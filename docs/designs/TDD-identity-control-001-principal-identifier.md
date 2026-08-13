@@ -1,14 +1,14 @@
 ---
 doc_meta:
-  id: TDD-001
+  id: TDD-identity-control-001
   title: Canonical Principal Identifier and Creation Path
   owner: Core Platform Team
-  version: 0.2.0
-  status: draft
+  version: 0.4.0
+  status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-10
-  last_reviewed: 2026-08-10
+  last_reviewed: 2026-08-14
   parent_sad: SAD-001
 ---
 
@@ -43,12 +43,12 @@ change. This design therefore fixes the contract before the first Principal exis
 **Out of scope**
 
 - Protocol subject (`sub`) semantics, pairwise subject derivation, and external
-  token profiles — owned by the Token & Verification Profile standard.
+  token profiles — owned by the STD-IAM-002 Token and Verification Profile.
 - Realm and issuer topology — owned by the Realm & Issuer decision.
 - Credential material, authenticator enrollment, and authentication ceremonies —
   owned by the Keycloak Identity Kernel.
-- Membership, Tenant, and Workspace context — owned by
-  [TDD-003](TDD-003-membership-projection-and-revocation.md).
+- Membership, Tenant, and Workspace authority - owned by `organization-control`;
+  projection into Keycloak is owned by `TDD-identity-control-002`.
 - Migration of identifiers from any prior identity implementation.
 
 ## Technical Context
@@ -101,15 +101,16 @@ sequenceDiagram
     P->>D: Claim idempotency key
     P->>P: Generate principal_id (UUIDv7)
     P->>D: Persist mapping intent (state=pending)
-    P->>K: POST /users with attributes.scnehaux_principal_id
+    P->>K: POST /users with immutable enterprise claim-source attributes
     K-->>P: 201 Created + Location header
     P->>D: Persist keycloak_user_id, state=active
     P-->>C: principal_id
 ```
 
-The identifier is minted before the remote call and carried inside the creation
-payload. The Keycloak user representation accepts attributes at creation time, so
-the Principal never exists in Keycloak without its canonical identifier.
+The identifier and subject classification are fixed before the remote call and carried
+inside the creation payload. The Keycloak representation accepts attributes at creation
+time, so the Principal never exists without the complete claim source required by its
+audience profile.
 
 ### Authorized and Prohibited Creation Paths
 
@@ -137,6 +138,8 @@ CREATE TABLE identity.principal_mapping (
     principal_id       UUID        PRIMARY KEY,
     keycloak_user_id   TEXT        UNIQUE,
     realm              TEXT        NOT NULL,
+    subject_type       TEXT        NOT NULL,
+    workload_owner     UUID,
     state              TEXT        NOT NULL,
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     activated_at       TIMESTAMPTZ,
@@ -144,7 +147,12 @@ CREATE TABLE identity.principal_mapping (
     quarantine_reason  TEXT,
     version            INTEGER     NOT NULL DEFAULT 1,
     CONSTRAINT principal_mapping_state_check
-        CHECK (state IN ('pending', 'active', 'quarantined', 'retired'))
+        CHECK (state IN ('pending', 'active', 'quarantined', 'retired')),
+    CONSTRAINT principal_mapping_subject_check
+        CHECK (subject_type IN ('human', 'workload')),
+    CONSTRAINT principal_mapping_owner_check
+        CHECK ((subject_type = 'human' AND workload_owner IS NULL)
+            OR (subject_type = 'workload' AND workload_owner IS NOT NULL))
 );
 
 CREATE UNIQUE INDEX principal_mapping_realm_user
@@ -172,7 +180,8 @@ The canonical identifier is stored as a user attribute:
   "username": "operator@example.com",
   "enabled": true,
   "attributes": {
-    "scnehaux_principal_id": ["019235f1-8c4a-7c1e-9d0b-3f4a2b6e5d71"]
+    "scnehaux_principal_id": ["019235f1-8c4a-7c1e-9d0b-3f4a2b6e5d71"],
+    "scnehaux_subject_type": ["human"]
   }
 }
 ```
@@ -188,6 +197,7 @@ cannot alter it.
   "iss": "https://identity.scnehaux.com/realms/<realm>",
   "sub": "<protocol subject>",
   "principal_id": "019235f1-8c4a-7c1e-9d0b-3f4a2b6e5d71",
+  "subject_type": "human",
   "aud": ["hcm-api"],
   "iat": 1786000000,
   "exp": 1786000900
@@ -214,7 +224,8 @@ POST   /v1/principals:reconcile
 ```
 
 `POST /v1/principals` requires an `Idempotency-Key` header. The response carries
-`principal_id`. `keycloak_user_id` is never present in any response body.
+`principal_id`. The request must declare `subject_type`; a workload also requires an
+active human `workload_owner`. `keycloak_user_id` is never present in any response body.
 
 ### Keycloak Admin API
 
@@ -227,7 +238,7 @@ POST   /v1/principals:reconcile
 
 Attribute search behavior differs across Keycloak releases. The proof-of-concept
 verifies that attribute search is exact-match and returns the created user against
-the pinned release before this design leaves `draft`.
+the pinned release before implementation begins.
 
 ## Algorithms / Logic
 
@@ -305,34 +316,40 @@ which some domains key on `sub` and others key on `principal_id`, which is a wor
 outcome than either choice applied consistently.
 
 External token profiles that intentionally omit `principal_id` are identified by
-audience and are validated against the external profile rules in the Token &
-Verification Profile standard.
+audience and are validated against the external profile rules in STD-IAM-002 §3.6.
 
 ## Configuration
 
-### Keycloak Realm
+### Realm Configuration Required by This Design
 
-| Setting | Value | Reason |
-| :-- | :-- | :-- |
-| User registration | disabled | Removes the unauthorized creation path |
-| Identity provider first-login flow | no automatic user creation | Removes the federated creation path |
-| Declarative user profile: `scnehaux_principal_id` | admin-managed, not user-editable | Preserves immutability |
-| Protocol mapper `principal-id-mapper` | user attribute → claim `principal_id` | Projects the identifier into tokens |
-| Mapper token surfaces — required | access token | The only surface STD-IAM-001 §3.3 makes mandatory |
-| Mapper token surfaces — target | access token, ID token, UserInfo, introspection | Prevents divergent subject semantics per surface |
+Realm configuration is authored and versioned in `identity-kernel`, not here. This
+design does not configure Keycloak; it depends on four settings and fails without
+them, so they are stated as requirements rather than as instructions.
 
-Mapper coverage is verified by the proof-of-concept, and the outcome is pre-decided so
-that a partial result does not require an unplanned amendment:
+| Requirement | Consequence if absent |
+| :-- | :-- |
+| User registration disabled | A Principal can appear without a canonical identifier |
+| Identity provider first-login creates no user | Same, through the federated path |
+| `scnehaux_principal_id` admin-managed and not user-editable | The identifier stops being immutable and the mapping stops being trustworthy |
+| Protocol mappers project the required claim-source attributes into the selected audience profile | The verifier invariant and workload accountability contract cannot hold |
+
+The reconciler treats a violation of the first two as evidence that a prohibited
+creation path is open, and quarantines what it finds. That is a compensating control,
+not a substitute: the primary mechanism is the realm configuration owned by
+`identity-kernel`.
+
+Mapper surface coverage is settled by proof-of-concept in `identity-kernel`, and the
+outcome is pre-decided so a partial result requires no unplanned amendment:
 
 - All four surfaces covered — adopt the target configuration.
 - Access token covered, one or more of ID token, UserInfo, or introspection not
-  covered — adopt the required configuration, record the uncovered surfaces in this
-  design, and prohibit consumers from resolving enterprise identity through them. No
-  standard amendment and no custom extension is required, because STD-IAM-001 §3.3
-  mandates only the access token.
+  covered — adopt access-token-only, record the uncovered surfaces here, and prohibit
+  consumers from resolving enterprise identity through them. No standard amendment and
+  no custom extension is required, because STD-IAM-001 §3.3 mandates only the access
+  token.
 - Access token not covered by any supported mapper — escalate. This is the single
-  outcome that forces either a restricted Keycloak extension or an amendment, and it
-  is the reason this question runs first.
+  outcome that forces either a restricted Keycloak extension or a standard amendment,
+  and it is why this question runs first.
 
 ### Identity Control Service Settings
 
@@ -366,7 +383,10 @@ Executed against a Keycloak instance pinned to the release under evaluation:
 - A created Principal carries `scnehaux_principal_id` in its Keycloak representation.
 - Attribute search returns exactly the created user and performs exact matching.
 - The issued access token, ID token, UserInfo response, and introspection response
-  each carry `principal_id`, and the value is identical across all four.
+  each carry the claims supported for their audience profile, and values are identical
+  across every covered surface.
+- Human tokens carry `subject_type=human`; workload tokens carry
+  `subject_type=workload` and `workload_owner`.
 - `sub` and `principal_id` hold different values, confirming the claims are distinct.
 
 ### Failure Injection
@@ -437,13 +457,12 @@ appears in structured logs; `keycloak_user_id` does not.
 | :-- | :-- |
 | Parent system | SAD-001 — Scnehaux Identity Runtime (Identity Control Service container) |
 | Realizes capability | PAD-PLT-001 — Identity & Access Platform |
-| Governed by | ADR-IAM-004 — Adopt Keycloak Identity Kernel |
+| Governed by | ADR-IAM-001 — Adopt Keycloak Identity Kernel |
 | Governed by | Principal Identifier decision (Gate B) |
 | Enterprise constraint | EAD-003 — canonical identifiers are opaque, stable, and authority-scoped |
 | Enterprise constraint | EAD-006 — identity correlation is limited to justified realm and purpose |
-| Consumed by | Token & Verification Profile standard, which fixes the verifier invariant |
-| Related design | TDD-002 — control plane module boundaries |
-| Related design | TDD-003 — membership projection and revocation |
+| Consumed by | STD-IAM-002 Token and Verification Profile, which fixes the verifier invariant |
+| Related design | `TDD-identity-control-002` - Membership projection and session removal |
 
 ### Open Proof-of-Concept Questions
 

@@ -1,107 +1,104 @@
-# Scnehaux Identity Platform — Implementation Repository
+# Identity Control Service
 
-Monorepo for the two Go control-plane deployables of the Scnehaux Enterprise Cloud
-identity and tenancy foundation.
+Go control-plane service for the Scnehaux Identity & Access Platform. It is one of the
+two containers that realize **SAD-001 Scnehaux Identity Runtime**; the other is
+Keycloak itself, built and operated from `identity-kernel`.
 
-**A shared repository is not a shared system.** The two deployables have separate
-SADs, separate databases, separate credentials, and separate accountable domains.
-Their boundaries are enforced by CI, not by convention — see
-[TDD-002](docs/designs/TDD-002-control-plane-module-boundaries.md).
+## What this service owns
 
-## Deployables
+- Minting the canonical `principal_id` and performing the only authorized Principal
+  creation call against the Keycloak Admin API.
+- Registering protocol clients and protected resources from Software Catalog
+  references.
+- Applying Membership context projection into Keycloak, and removing Keycloak sessions
+  when a Membership is revoked.
+- Detecting drift between Scnehaux desired state and Keycloak runtime state, and
+  reconciling it.
+- Translating Keycloak events into canonical Scnehaux events.
 
-| Deployable | System | Domain | Database | Holds |
-| :-- | :-- | :-- | :-- | :-- |
-| `cmd/identity-control` | SAD-001 Identity Runtime | PAD-PLT-001 | Control | Keycloak Admin credential, mappings, cursors, drift, outbox |
-| `cmd/tenancy-control` | SAD-004 Organization & Tenancy Control | PAD-PLT-002 | Tenancy | Organization, Tenant, Workspace, Membership authority, outbox |
+## What it does not own
 
-Two further components of the architecture are built and operated elsewhere: the
-Keycloak Identity Kernel (also SAD-001) and the Administration Experience (SAD-002).
+It authenticates nobody, issues no token, stores no credential, and runs no session
+engine. Those belong to the Keycloak kernel. It is also not authoritative for
+Organization, Tenant, Workspace, or Membership — that authority lives in
+`organization-control`, and this service consumes it as a projection.
 
-## Governance Lineage
+This service holds the **Keycloak Admin credential**, which is the most privileged
+secret in the estate. That is the reason it runs as its own process rather than as a
+module beside the Organization control plane: a module boundary does not contain a
+server-side-request or memory-disclosure defect, and a process boundary does.
 
-Strategic and system-level architecture is owned by the
-[scnehaux-architecture](../scnehaux-architecture) repository. This repository owns
-only Technical Design Documents and source code.
+## Repository map
+
+The identity and organization foundation spans six repositories.
+
+| Repository | Role | System |
+| :-- | :-- | :-- |
+| `identity-kernel` | Keycloak extensions, realm configuration, login theme, image build | SAD-001 |
+| **`identity-control`** | **This service** | **SAD-001** |
+| `organization-control` | Organization, Tenant, Workspace, Membership authority | SAD-004 |
+| `foundation-platform` | Shared Go substrate: outbox, envelope, idempotency, problem details | library |
+| `identity-experience` | Account security and identity administration UI with its BFF | SAD-002 |
+| `organization-experience` | Organization administration UI with its BFF | SAD-012 |
+
+Cross-system state moves only through versioned domain events on the broker. There is
+no synchronous call between this service and `organization-control`; where an
+authoritative answer is required, this service calls the published HTTP contract that
+every other consumer uses.
+
+## Governance lineage
+
+Strategic and system architecture is owned by the
+[scnehaux-architecture](https://github.com/anshacerbia2/scnehaux-architecture)
+repository. This repository owns Technical Design Documents and source code only.
 
 ```text
-EAD-001 … EAD-006        Enterprise architecture
+EAD-001 … EAD-006     Enterprise architecture
     ↓
-PAD-PLT-001              Identity & Access Platform
-PAD-PLT-002              Organization & Tenancy Platform
+PAD-PLT-001           Identity & Access Platform
     ↓
-SAD-001                  Identity Runtime  (Keycloak Kernel + Identity Control Service)
-SAD-004                  Organization & Tenancy Control
+SAD-001               Scnehaux Identity Runtime
     ↓
-TDD-001 … TDD-003        Technical designs      (this repository, docs/designs)
+TDD-identity-control-*    Technical designs   (docs/designs)
     ↓
 Source code
 ```
 
-Root artifacts never link downward into this repository. Every TDD names its parent
-SAD in `parent_sad`, and that name resolves to exactly one existing SAD document.
+Every TDD names its parent SAD in `parent_sad`, and that name resolves to exactly one
+existing SAD document. Root artifacts never link downward into this repository.
 
 ## Layout
 
 | Path | Contents |
 | :-- | :-- |
-| `cmd/identity-control/` | Entrypoint, SAD-001 |
-| `cmd/tenancy-control/` | Entrypoint, SAD-004 |
-| `internal/identity/` | Identity Control Service tree — imports `platform` only |
-| `internal/tenancy/` | Organization & Tenancy tree — imports `platform` only |
-| `internal/platform/` | Shared technical substrate — imports neither system tree |
-| `contracts/events/` | Versioned event schemas exchanged between the two systems |
+| `cmd/identity-control/` | Deployable entrypoint and composition root |
+| `internal/provisioning/` | Principal minting and the Keycloak creation path |
+| `internal/registration/` | Application to protocol client and resource orchestration |
+| `internal/projection/` | Membership projection and Keycloak session removal |
+| `internal/reconcile/` | Desired-state drift detection and repair |
+| `internal/keycloak/` | Typed client over the supported Admin REST API |
 | `docs/designs/` | Technical Design Documents |
 
-`internal/identity` and `internal/tenancy` never import each other. The compiler will
-not stop it; the import boundary check in CI will.
+The shared substrate — outbox, dispatcher, event envelope, idempotency, HTTP problem
+details, telemetry — is imported from `foundation-platform` rather than reimplemented
+here. Two divergent copies of the dispatcher would produce two different revocation
+enforcement intervals while both systems reported compliance.
 
-## Current Designs
+## Designs
 
-| TDD | Parent | Subject | Status |
-| :-- | :-- | :-- | :-- |
-| [TDD-001](docs/designs/TDD-001-principal-identifier-and-creation.md) | SAD-001 | Canonical Principal identifier and creation path | draft |
-| [TDD-002](docs/designs/TDD-002-control-plane-module-boundaries.md) | SAD-001, SAD-004 | Deployable and module boundaries | draft |
-| [TDD-003](docs/designs/TDD-003-membership-projection-and-revocation.md) | SAD-004 | Membership projection and revocation propagation | draft |
+| TDD | Subject | Status |
+| :-- | :-- | :-- |
+| `TDD-identity-control-001` | Canonical Principal identifier and creation path | approved; Keycloak PoC pending |
+| `TDD-identity-control-002` | Keycloak context projection, durable retry, session removal | approved; Keycloak PoC pending |
+| `TDD-identity-control-003` | Protocol client and protected-resource registration | approved |
+| `TDD-identity-control-004` | Workload and bounded agent identity | approved |
+| `TDD-identity-control-005` | Account-security and investigation API mediation | approved |
 
-Numbering is a flat sequence. A TDD number is an identifier, not a reading order and
-not a priority.
+Numbering is a flat sequence within this repository. A number is an identifier, not a
+reading order and not a priority.
 
-## Proof-of-Concept Questions
+## Status
 
-Designs marked `draft` implement decisions accepted at architecture level but not yet
-proven against a pinned Keycloak release. **Refer to these questions by name, never by
-number** — the numbering below is an execution order, not the numbering used inside
-each TDD.
-
-Run in this order. The first question is the only one whose failure forces an
-extension or a standard amendment, so it runs first.
-
-| Order | Question | TDD | Failure consequence |
-| :-- | :-- | :-- | :-- |
-| 1 | **Protocol mapper coverage** — which token surfaces can carry `principal_id`: access token, ID token, UserInfo, introspection | TDD-001 | Access token uncovered is the escalation case. Partial coverage of the other three is pre-decided and needs no amendment |
-| 2 | **Attribute search semantics** — is `q=scnehaux_principal_id:{id}` exact-match, and how does it paginate | TDD-001 | Recovery mechanism changes; creation path unaffected |
-| 3 | **Attribute immutability** — can declarative user profile prevent edits to `scnehaux_principal_id` | TDD-001 | Falls back to reconciliation detection |
-| 4 | **Issuer URI form** — can `/realms/{name}` be removed from `iss`, or is the path shape retained deliberately | TDD-001 | Irreversible once tokens are issued; decide either way before the first token |
-| 5 | **Projected context representation** — Keycloak Organizations, Groups, or user attributes | TDD-003 | Projector implementation changes; authority model unaffected |
-| 6 | **Session removal granularity** — per Principal and Tenant context, or per Principal only | TDD-003 | Determines whether revoking one Membership disturbs unrelated contexts |
-| 7 | **Context switch mechanism** — new authorization request on the existing SSO session, Standard Token Exchange, or refresh with context, judged against the nine criteria in TDD-003 | TDD-003 | Determines whether a custom extension is required, which changes upgrade burden |
-
-Two further questions are decisions rather than experiments and do not need Keycloak:
-manifest placement and whether the two databases are separate instances or separate
-logical databases ([TDD-002](docs/designs/TDD-002-control-plane-module-boundaries.md)).
-
-## Parallel Tracks
-
-The proof-of-concept and the build run at the same time. No outcome above invalidates
-the authority schemas, the outbox engine, the state machines, or the boundary
-enforcement — every blocked item is an adapter, and adapters are the cheapest part to
-change.
-
-```text
-Track A   Keycloak proof-of-concept, questions 1–7 in order
-Track B   Tenancy schema, Membership state machine, revocation transaction,
-          outbox and dispatcher, import boundary check, grant assertion
-                         ↓
-          converge when the Keycloak projector is written
-```
+Approved designs may still carry an explicit implementation gate against the pinned
+Keycloak release. Every such proof-of-concept is listed in the TDD that depends on it;
+an unverified adapter is not treated as implementation-ready code.
