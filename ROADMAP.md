@@ -44,15 +44,33 @@ beyond `foundation-platform`.
 
 ### Week 1 · Skeleton and Control Database
 
-- `cmd/identity-control` entrypoint and composition root
-- `foundation-platform` dependency wired: pool, transaction manager, telemetry
-- Atlas migrations for the `identity` and `platform` schemas
-- `identity.principal_mapping` with its state machine and partial unique index
-- `identity.projection_cursor` as this service's own consumer position
-- `identity_migrator` and `identity_runtime` roles, grant assertion in CI
+- ✅ `cmd/identity-control` entrypoint and composition root
+- ✅ `foundation-platform v0.1.0` wired: pool, transaction manager, telemetry
+- ✅ Atlas migrations for the `identity` schema; the `platform` schema applied from the
+  shared module rather than re-authored here
+- ✅ `identity.principal_mapping` with its state machine and partial unique index
+- ✅ `identity.projection_cursor` as this service's own consumer position
+- ✅ `identity_migrator` and `identity_runtime` roles, asserted against the catalog
 
 **Exit:** the runtime role owns no table, holds no `SUPERUSER`, no `BYPASSRLS`, and no
 DDL privilege, proven by assertion rather than by review.
+
+**Met.** `internal/controldb` asserts it against `pg_roles`, `pg_tables`,
+`information_schema.schemata`, and `has_schema_privilege` — seven tests, run in CI with
+`REQUIRE_INTEGRATION=1` so a database that never came up fails the build instead of
+skipping. The suite reads the catalog rather than the SQL that built it, because the
+privilege this criterion guards against is one arriving from somewhere else: a restored
+dump, a hand-run `GRANT`, a role that predates these files.
+
+#### Findings recorded while building it
+
+| Finding | Consequence |
+| :-- | :-- |
+| Atlas in database scope planned `DROP SCHEMA "public" CASCADE`, and would have planned the same for `platform` | Both urls carry `search_path=identity`. The `identity` schema object is created by `identity-migrate -stage=pre`, because a schema-scoped plan may not modify the schema it is scoped to |
+| `GRANT ... ON ALL TABLES IN SCHEMA` over an empty schema is a no-op, not an error | `grants.sql` opens with a guard that raises when its objects are absent. Without it the stage reported success and granted nothing, and the failure surfaced as a runtime that could not read its own tables |
+| `atlas migrate lint` is Atlas Pro only since v0.38 | ADR-GLB-004 names it as the destructive gate, so the mandated mechanism cannot run on the free CLI. CI runs `atlas migrate validate`, which is free and checks directory integrity, plus a text-level destructive gate standing in for the analyzer. **This is debt.** Resolving it means an Atlas Pro login with a CI token, or amending ADR-GLB-004 |
+| `TDD-identity-control-001` specifies both `keycloak_user_id UNIQUE` and a partial unique index on `(realm, keycloak_user_id)` | The first is strictly stronger, so the second adds nothing. Both are implemented as specified; the redundancy is recorded here rather than resolved in the schema |
+| Atlas requires the target schema to exist on the dev server before any schema-scoped command | CI creates it on the throwaway dev container before Atlas runs. Absent, the first Atlas step fails with `schema "identity" was not found`, which reads like a broken migration |
 
 ### Week 2 · Principal creation path
 

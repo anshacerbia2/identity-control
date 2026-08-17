@@ -1,0 +1,249 @@
+name: ci
+
+# Every check here exists because a rule somewhere requires it, and the rule is named on
+# the step. A gate whose reason is not written down is a gate someone deletes to make a
+# build green.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "23 3 * * 1"
+
+permissions:
+  contents: read
+
+env:
+  # A minor version, not a patch. The patch a runner resolves is a testing detail; pinning
+  # it here would turn every Go security release into a manual bump in this file. The
+  # supply-chain job disagrees on purpose — see its setup-go step.
+  GO_VERSION: "1.26"
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    # A disposable PostgreSQL. The Week 1 exit criterion is a property of a database — the
+    # runtime role owns no table and holds no DDL — and no fake can answer it. Neither can
+    # a fake answer whether the shipped platform DDL parses or whether Atlas produces the
+    # plan it claims.
+    services:
+      postgres:
+        # Pinned by digest, not by tag, so a run six months from now tests the same server.
+        # PostgreSQL 17 matches what foundation-platform is verified against; a different
+        # major version here would validate a plan for the wrong engine.
+        image: postgres:17-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
+        env:
+          POSTGRES_USER: identity
+          POSTGRES_PASSWORD: identity
+          POSTGRES_DB: identity_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U identity"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      # Atlas computes a diff by materialising the desired state on a throwaway server.
+      # It must be a separate database from the one under test: Atlas drops and recreates
+      # everything in the dev database on every command.
+      atlas-dev:
+        image: postgres:17-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
+        env:
+          POSTGRES_USER: atlas
+          POSTGRES_PASSWORD: atlas
+          POSTGRES_DB: atlas_dev
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U atlas"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      TEST_DATABASE_URL: postgres://identity:identity@localhost:5432/identity_test?sslmode=disable
+      IDENTITY_MIGRATION_DATABASE_URL: postgres://identity:identity@localhost:5432/identity_test?sslmode=disable
+      DATABASE_URL: postgres://identity:identity@localhost:5432/identity_test?search_path=identity&sslmode=disable
+      ATLAS_DEV_URL: postgres://atlas:atlas@localhost:5433/atlas_dev?search_path=identity&sslmode=disable
+      # Turns a skipped privilege suite into a failure. Without it, a service container that
+      # never came up would leave the Week 1 exit criterion unasserted and the run green.
+      REQUIRE_INTEGRATION: "1"
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+
+      - uses: ariga/setup-atlas@e181c50e3c1e8b7fbe10617f2a4a0fbc0d2b9c4a # v0
+        with:
+          version: latest
+
+      # Atlas is scoped to one schema through search_path on both urls, and a schema-scoped
+      # command requires the schema to already exist on the dev server. Without this the
+      # first Atlas step fails with `schema "identity" was not found`, which reads like a
+      # broken migration rather than an unprepared throwaway database.
+      - name: prepare the Atlas dev schema
+        run: psql "$ATLAS_DEV_URL" -v ON_ERROR_STOP=1 -c 'CREATE SCHEMA IF NOT EXISTS identity;'
+        env:
+          PGPASSWORD: atlas
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt reports unformatted files:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: build
+        run: go build ./...
+
+      # The race detector is the only thing separating correct synchronisation from
+      # synchronisation that has been lucky.
+      - name: test with race detector
+        run: go test ./... -race -count=1
+
+      # Integrity of the migration directory. atlas.sum is a checksum over every file, so
+      # this fails when a committed migration was edited after generation — which is how a
+      # reviewed plan and an applied plan quietly stop being the same thing.
+      - name: atlas migration directory integrity
+        run: atlas migrate validate --env ci
+
+      # ADR-GLB-004 requires the pipeline to block a destructive plan rather than report
+      # one, and names `atlas migrate lint` as the mechanism. Since Atlas v0.38 that
+      # command is available only to Atlas Pro accounts, so the mandated gate cannot run on
+      # the free CLI.
+      #
+      # This is the interim replacement. It is cruder than the analyzer it stands in for —
+      # it reads text rather than a parsed plan — but it fails, which is the property that
+      # matters, and it is recorded as debt in ROADMAP.md rather than presented as
+      # equivalent. Resolving it means either an Atlas Pro login with a CI token or an
+      # amendment to ADR-GLB-004.
+      - name: destructive statements are blocked
+        run: |
+          pattern='DROP TABLE|DROP SCHEMA|DROP COLUMN|DROP CONSTRAINT|DROP INDEX|RENAME TO|RENAME COLUMN|TRUNCATE'
+          if grep -nEi "$pattern" migrations/*.sql | grep -v 'atlas:destructive-approved'; then
+            echo "::error::a migration contains a destructive statement; a multi-phase deployment is required by STD-GLB-002, or annotate the line with atlas:destructive-approved after review"
+            exit 1
+          fi
+          echo "no destructive statements in migrations/"
+
+      # A migration directory that no longer matches schema.hcl is drift that would be
+      # applied silently on the next deploy.
+      #
+      # `atlas migrate diff` has no --dry-run, so the check is the command plus its effect:
+      # diff writes a migration only when the directory and schema.hcl disagree, and a
+      # clean tree afterwards proves they agree. Asserting the effect rather than a flag
+      # also survives a future Atlas release changing its flag set.
+      - name: atlas migration directory is in sync with schema.hcl
+        run: |
+          atlas migrate diff --env ci drift_check
+          if ! git diff --exit-code --stat migrations/; then
+            echo "::error::schema.hcl and migrations/ disagree; run 'atlas migrate diff --env local <name>' and commit the result"
+            exit 1
+          fi
+          if [ -n "$(git status --porcelain migrations/)" ]; then
+            echo "::error::atlas wrote a new migration; schema.hcl has changes that are not in migrations/"
+            git status --porcelain migrations/
+            exit 1
+          fi
+
+      # The three-stage order is not arbitrary. Roles must exist before ownership can be
+      # assigned, the platform schema is applied from the shared module rather than copied
+      # here, and grants name objects so they run once every object exists.
+      - name: apply roles and the platform schema
+        run: go run ./cmd/identity-migrate -stage=pre
+
+      - name: apply the identity schema
+        run: atlas migrate apply --env ci
+
+      - name: apply runtime privileges
+        run: go run ./cmd/identity-migrate -stage=post
+
+      # This is the Week 1 exit criterion, asserted against the catalog rather than against
+      # the SQL that produced it. It reruns the suite because the assertions above only
+      # became answerable once the three stages had run.
+      - name: assert the runtime role holds no ownership and no DDL
+        run: go test ./internal/controldb/... -count=1 -v
+
+      # Measured over library packages only. cmd/ is the composition root and is excluded
+      # for a reason stronger than convenience: cmd/identity-migrate is executed three times
+      # by the steps above, against a real PostgreSQL, in the order a deployment runs it.
+      # That is a better verification than a unit test of a wiring function, and including
+      # it would let an untestable main() depress a number meant to describe the code that
+      # holds logic.
+      - name: coverage floor
+        run: |
+          pkgs=$(go list ./... | grep -v '/cmd/' | paste -sd ' ')
+          go test $pkgs -count=1 -covermode=atomic -coverprofile=coverage.out
+          total=$(go tool cover -func=coverage.out | awk '/^total:/ {print $3}' | tr -d '%')
+          echo "library-package coverage: ${total}%"
+          if awk "BEGIN {exit !($total < 80)}"; then
+            echo "::error::coverage ${total}% is below the 80% floor"
+            exit 1
+          fi
+
+      # Reused from foundation-platform rather than reimplemented. The rules live in
+      # arch.json beside the code they constrain.
+      - name: architecture boundaries
+        run: go run github.com/anshacerbia2/foundation-platform/tools/archcheck
+
+      - name: upload coverage
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: coverage
+          path: coverage.out
+          retention-days: 7
+
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          # The one step in this file that wants the newest toolchain rather than a stable
+          # one. govulncheck derives which standard library advisories apply from the
+          # version it builds with, so a pinned patch reports every stdlib finding fixed
+          # since that patch shipped. The verify job pins deliberately: test results have
+          # to be reproducible, a vulnerability scan has to be current.
+          check-latest: true
+
+      - name: dependencies are tidy
+        run: |
+          go mod tidy
+          if ! git diff --exit-code go.mod go.sum; then
+            echo "::error::go mod tidy changed go.mod or go.sum; commit the result"
+            exit 1
+          fi
+
+      # foundation-platform is pinned to a tag, never a branch. A change to the envelope,
+      # the outbox schema, or the dispatcher contract must be an upgrade this repository
+      # performs deliberately rather than one it inherits from a rebuild.
+      - name: foundation-platform is pinned to a released version
+        run: |
+          version=$(go list -m -f '{{.Version}}' github.com/anshacerbia2/foundation-platform)
+          echo "foundation-platform ${version}"
+          case "$version" in
+            v0.0.0-*)
+              echo "::error::foundation-platform resolves to a pseudo-version (${version}); pin a tag"
+              exit 1
+              ;;
+          esac
+
+      - name: vulnerability scan
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...

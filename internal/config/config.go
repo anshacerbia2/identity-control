@@ -1,0 +1,122 @@
+// Package config reads process configuration from the environment and nowhere else.
+//
+// Twelve-factor, per STD-GLB-009: no file, no flag for a value that differs between
+// environments, and no default that would let a misconfigured process start and fail
+// later. A required variable that is absent is a startup error, because a service that
+// boots without its database URL and reports healthy is worse than one that never boots.
+package config
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// Config is the whole configuration surface of the deployable. It grows as the service
+// does; every field here is read once at startup and passed down explicitly rather than
+// reached for from a package variable.
+type Config struct {
+	// Deployable and System label every span, metric, and log line so load and failure
+	// are attributable while several systems run the same foundation-platform code.
+	Deployable string
+	System     string
+
+	ListenAddress string
+
+	// RuntimeDSN connects as identity_runtime. It holds DML and no DDL, so a migration
+	// attempted through this pool fails at the database rather than succeeding quietly.
+	RuntimeDSN string
+
+	DBMaxConns        int32
+	DBMaxConnLifetime time.Duration
+	DBAcquireTimeout  time.Duration
+
+	HTTPReadTimeout    time.Duration
+	HTTPWriteTimeout   time.Duration
+	HTTPRequestTimeout time.Duration
+	HTTPMaxInFlight    int64
+	HTTPShutdownGrace  time.Duration
+
+	LogLevel string
+}
+
+// Load reads the environment and reports every problem at once.
+//
+// Collecting errors rather than returning the first is deliberate: an operator fixing a
+// deployment wants the whole list, and returning them one per restart turns a five-minute
+// correction into five deploys.
+func Load() (Config, error) {
+	var problems []error
+
+	cfg := Config{
+		Deployable: "identity-control",
+		System:     "SAD-001",
+	}
+
+	cfg.RuntimeDSN = os.Getenv("IDENTITY_DATABASE_URL")
+	if strings.TrimSpace(cfg.RuntimeDSN) == "" {
+		problems = append(problems, errors.New("IDENTITY_DATABASE_URL is required"))
+	}
+
+	cfg.ListenAddress = stringOr("IDENTITY_LISTEN_ADDRESS", ":8080")
+	cfg.LogLevel = stringOr("LOG_LEVEL", "info")
+
+	cfg.DBMaxConns = int32(intOr("DB_MAX_CONNS", 20, &problems))
+	cfg.DBMaxConnLifetime = durationOr("DB_MAX_CONN_LIFETIME", 30*time.Minute, &problems)
+	cfg.DBAcquireTimeout = durationOr("DB_ACQUIRE_TIMEOUT", 3*time.Second, &problems)
+
+	cfg.HTTPReadTimeout = durationOr("HTTP_READ_TIMEOUT", 10*time.Second, &problems)
+	cfg.HTTPWriteTimeout = durationOr("HTTP_WRITE_TIMEOUT", 30*time.Second, &problems)
+	cfg.HTTPRequestTimeout = durationOr("HTTP_REQUEST_TIMEOUT", 5*time.Second, &problems)
+	cfg.HTTPMaxInFlight = int64(intOr("HTTP_MAX_IN_FLIGHT", 256, &problems))
+	cfg.HTTPShutdownGrace = durationOr("HTTP_SHUTDOWN_GRACE", 20*time.Second, &problems)
+
+	if len(problems) > 0 {
+		return Config{}, errors.Join(problems...)
+	}
+	return cfg, nil
+}
+
+func stringOr(key, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+		return value
+	}
+	return fallback
+}
+
+func intOr(key string, fallback int, problems *[]error) int {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		*problems = append(*problems, fmt.Errorf("%s: %q is not an integer", key, raw))
+		return fallback
+	}
+	if value <= 0 {
+		*problems = append(*problems, fmt.Errorf("%s: %d must be positive", key, value))
+		return fallback
+	}
+	return value
+}
+
+func durationOr(key string, fallback time.Duration, problems *[]error) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	value, err := time.ParseDuration(raw)
+	if err != nil {
+		*problems = append(*problems, fmt.Errorf("%s: %q is not a duration", key, raw))
+		return fallback
+	}
+	if value <= 0 {
+		*problems = append(*problems, fmt.Errorf("%s: %s must be positive", key, value))
+		return fallback
+	}
+	return value
+}
