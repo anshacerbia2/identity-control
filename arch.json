@@ -18,7 +18,10 @@
     "cmd/identity-control": ["internal/config"],
     "cmd/identity-migrate": ["internal/controldb"],
     "internal/config": [],
-    "internal/controldb": []
+    "internal/controldb": [],
+
+    "internal/keycloak": [],
+    "internal/keycloak/keycloakfake": ["internal/keycloak"]
   },
 
   "pureSegments": ["domain"],
@@ -33,6 +36,10 @@
     "database/sql": {
       "reason": "the pgx pool in foundation-platform is the only connection source. a second one would open connections outside the transaction manager, and outbox.Append would no longer be atomic with the domain mutation it accompanies",
       "except": []
+    },
+    "net/http": {
+      "reason": "only internal/keycloak reaches the identity kernel, and only the composition root serves. an HTTP client anywhere else is either a second path to the kernel or an undeclared cross-domain call, and ADR-ORG-001 plus TDD-identity-control-002 both require that no such path exists",
+      "except": ["cmd/identity-control", "internal/keycloak", "internal/httpapi"]
     }
   },
 
