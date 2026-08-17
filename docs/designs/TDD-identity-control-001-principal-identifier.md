@@ -160,6 +160,35 @@ CREATE UNIQUE INDEX principal_mapping_realm_user
     WHERE keycloak_user_id IS NOT NULL;
 ```
 
+**Departure recorded: the row carries the creation payload.** Two columns were added during
+implementation, `username TEXT NOT NULL` and `email TEXT`, because the recovery algorithm
+below cannot be written without them.
+
+Recovery retries the create when the kernel holds no matching user. Retrying requires the
+payload of the original call, and the columns above name an identifier, a realm, a subject
+type, and an owner — none of which is a username. A pending row was therefore
+unrecoverable: the branch could not run, and the caller's idempotency key would stay
+in-progress permanently with no path out, because a repeated request against an unfinished
+claim returns `ErrInProgress` rather than retrying.
+
+Passing the payload into the recovery sweep instead was considered and rejected. A sweep
+resolves many mappings, each from a different request, so one payload supplied by the caller
+would have been applied to every mapping the sweep touched.
+
+The payload is Tier-2 identifiable PII under STD-GLB-007 and is encrypted at rest with the
+rest of the Control Database. It is the argument of a call this service makes and not a
+second authority for identity attributes: Keycloak owns the live values, and a change made
+there is not reflected here. `username` is refused as empty before the insert rather than at
+the database, so the failure names the reason instead of a column.
+
+**Departure recorded: the global unique constraint on `keycloak_user_id` makes the partial
+index redundant.** `keycloak_user_id TEXT UNIQUE` already enforces global uniqueness of
+non-null values, and PostgreSQL treats nulls as distinct, so it permits many pending rows.
+The partial unique index on `(realm, keycloak_user_id)` therefore adds nothing. Both are
+implemented as specified above; the redundancy is recorded rather than resolved, because
+removing a constraint named as a deliverable belongs in a review rather than in an
+implementation commit.
+
 `principal_id` is the primary key and the enterprise-wide reference. `keycloak_user_id`
 is nullable while the mapping is `pending`, and is never exposed outside this module.
 

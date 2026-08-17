@@ -47,6 +47,29 @@ table "principal_mapping" {
     type = text
   }
 
+  // The creation payload, held so a pending row can reconstruct its own kernel call.
+  //
+  // TDD-identity-control-001 specifies that recovery retries the create when the kernel
+  // holds no matching user. Without these two columns that branch cannot be written: the
+  // pending row would name an identifier and nothing else, and the caller's idempotency
+  // key would stay in-progress forever with no path out. Recorded as a departure in that
+  // design.
+  //
+  // These are Tier-2 identifiable PII under STD-GLB-007 and are encrypted at rest with the
+  // rest of the Control Database. They are the payload of a call this service makes, not a
+  // second authority for identity attributes: Keycloak owns the live values, and a change
+  // made there is not reflected here.
+  column "username" {
+    null    = false
+    type    = text
+    comment = "Creation payload. Recovery reconstructs the kernel call from it; it is not the authoritative username."
+  }
+
+  column "email" {
+    null = true
+    type = text
+  }
+
   column "subject_type" {
     null = false
     type = text
