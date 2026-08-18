@@ -74,15 +74,53 @@ dump, a hand-run `GRANT`, a role that predates these files.
 
 ### Week 2 · Principal creation path
 
-- UUIDv7 generation and idempotency key claim
-- `POST /v1/principals` and the rest of the Principal surface
-- Keycloak calls behind a port, with a fake covering create, search, and disable
-- Pending-state recovery loop, with the search strategy left as a seam
-- `keycloak_user_id` absent from every response body, asserted by test
+- ✅ UUIDv7 generation and idempotency key claim
+- ✅ `POST /v1/principals`, with the rest of the Principal surface still to land
+- ✅ Keycloak behind a port, with a fake covering create, search, and disable, and the real
+  Admin REST client implementing it
+- ✅ Pending-state recovery loop, with the search strategy left as a seam
+- ✅ `keycloak_user_id` absent from every response body, asserted at the type level and over
+  the wire
 
 **Exit:** a repeated `Idempotency-Key` returns the original identifier and performs no
 remote call; process termination between the remote call and the local commit recovers
 without creating a second Principal.
+
+**Met.** Both are tests. The second runs end to end: the kernel create succeeds, the
+activation commit fails, recovery finds the user and adopts it, and the assertion is that
+`CreateUser` ran exactly once across both phases.
+
+**The proof-of-concept question did not gate this.** Week 2 was recorded as
+implementation-gated on whether Keycloak attribute search is exact-match. It is not: the
+answer changes what the kernel returns for a query rather than what this service does about
+it. `FindByPrincipalID` returns a slice, both the port and the real client filter to exact
+equality, and the recovery algorithm already branches on none, one, and more than one. A
+`SearchSemantics` switch in the fake runs the same assertions under the pessimistic reading.
+
+#### Deliberately absent: authentication
+
+`POST /v1/principals` is wired and **fails closed with 401**. No token verifier exists yet,
+so no request carries a caller scope and every mutation is refused.
+
+A development mode trusting a header would have made the route usable today and is not
+offered. A permissive authentication path that exists in one environment is a permissive path
+that reaches production, and `EAD-006 §8` requires a security-control failure to fail closed.
+The startup log states the reduced capability so an operator is never left guessing why a
+request is refused.
+
+Verifying a token means fetching JWKS, checking `PS256`, and applying the whole
+`STD-IAM-002 §3.5` checklist including the rule that `principal_id` must be present for an
+internal audience. That is its own increment.
+
+#### Findings recorded while building it
+
+| Finding | Consequence |
+| :-- | :-- |
+| `identity.principal_mapping` stored no username, so the recovery retry branch was unwritable | The row now carries the creation payload. Without it, a create failing after the key was claimed left that key in-progress permanently, and the caller retrying with the same key would receive `ErrInProgress` forever with no path out. Recorded as a departure in TDD-identity-control-001 |
+| `RecoverPending` originally took a `CreateRequest` | A sweep resolves many mappings from different requests, so one caller's username would have been applied to all of them. It now reads the payload from each row |
+| TDD-identity-control-004 assigned a workload lifetime class `L3` | `L3` is the external class and its claim profile omits `workload_owner`, which would make the accountability chain unreadable at the verifier. Corrected to `L1` |
+| foundation-platform's problem registry carries no in-progress type | A request duplicating one still in flight maps to `state-transition-refused`, which returns the correct 409 with a slightly wrong name. The registry is compiled and deliberately prevents a handler inventing a type, so this wants a `request-in-progress` entry upstream |
+| A transport failure on a create cannot be distinguished from a lost response | The Admin client classes every statusless mutation as `ErrAmbiguous` and every statusless read as `ErrUnavailable`. Being wrong toward ambiguous costs one extra search; being wrong the other way creates a second Principal |
 
 ### Week 3 · Event translation and consumption
 

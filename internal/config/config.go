@@ -43,6 +43,13 @@ type Config struct {
 	// KeycloakRealm is the single realm this deployable administers.
 	KeycloakRealm string
 
+	// KeycloakBaseURL is the kernel root. KeycloakClientID and KeycloakClientSecret are the
+	// administration service account, sourced from the approved secret manager. This process
+	// is the only one in the estate holding them, per ADR-IAM-001 §5.5.
+	KeycloakBaseURL      string
+	KeycloakClientID     string
+	KeycloakClientSecret string
+
 	// ProvisionTimeout bounds one Admin API call. PendingRecoveryAfter must exceed it, or
 	// recovery searches the kernel for a user the original request is still creating.
 	ProvisionTimeout     time.Duration
@@ -79,6 +86,20 @@ func Load() (Config, error) {
 	cfg.KeycloakRealm = os.Getenv("IDENTITY_KEYCLOAK_REALM")
 	if strings.TrimSpace(cfg.KeycloakRealm) == "" {
 		problems = append(problems, errors.New("IDENTITY_KEYCLOAK_REALM is required"))
+	}
+
+	// Each is required rather than defaulted. A default base URL would point this process at
+	// a kernel nobody chose, and a default credential does not exist.
+	required := map[string]*string{
+		"IDENTITY_KEYCLOAK_BASE_URL":      &cfg.KeycloakBaseURL,
+		"IDENTITY_KEYCLOAK_CLIENT_ID":     &cfg.KeycloakClientID,
+		"IDENTITY_KEYCLOAK_CLIENT_SECRET": &cfg.KeycloakClientSecret,
+	}
+	for name, target := range required {
+		*target = os.Getenv(name)
+		if strings.TrimSpace(*target) == "" {
+			problems = append(problems, fmt.Errorf("%s is required", name))
+		}
 	}
 
 	cfg.ProvisionTimeout = durationOr("IDENTITY_PROVISION_TIMEOUT", 10*time.Second, &problems)

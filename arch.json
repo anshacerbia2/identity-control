@@ -15,7 +15,12 @@
   "module": "github.com/anshacerbia2/identity-control",
 
   "internalEdges": {
-    "cmd/identity-control": ["internal/config"],
+    "cmd/identity-control": [
+      "internal/config",
+      "internal/httpapi",
+      "internal/identity/provisioning",
+      "internal/keycloak"
+    ],
     "cmd/identity-migrate": ["internal/controldb"],
     "internal/config": [],
     "internal/controldb": [],

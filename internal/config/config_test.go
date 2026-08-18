@@ -14,6 +14,9 @@ import (
 func TestLoadRequiresDatabaseURL(t *testing.T) {
 	t.Setenv("IDENTITY_DATABASE_URL", "")
 	t.Setenv("IDENTITY_KEYCLOAK_REALM", "scnehaux")
+	t.Setenv("IDENTITY_KEYCLOAK_BASE_URL", "https://identity.example.com")
+	t.Setenv("IDENTITY_KEYCLOAK_CLIENT_ID", "identity-control")
+	t.Setenv("IDENTITY_KEYCLOAK_CLIENT_SECRET", "secret")
 
 	if _, err := config.Load(); err == nil {
 		t.Fatal("Load succeeded without IDENTITY_DATABASE_URL")
@@ -43,6 +46,9 @@ func TestLoadRejectsWhitespaceOnlyDatabaseURL(t *testing.T) {
 func TestLoadAppliesDefaults(t *testing.T) {
 	t.Setenv("IDENTITY_DATABASE_URL", "postgres://runtime@localhost:5432/identity")
 	t.Setenv("IDENTITY_KEYCLOAK_REALM", "scnehaux")
+	t.Setenv("IDENTITY_KEYCLOAK_BASE_URL", "https://identity.example.com")
+	t.Setenv("IDENTITY_KEYCLOAK_CLIENT_ID", "identity-control")
+	t.Setenv("IDENTITY_KEYCLOAK_CLIENT_SECRET", "secret")
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -72,6 +78,9 @@ func TestLoadAppliesDefaults(t *testing.T) {
 func TestLoadOverridesFromEnvironment(t *testing.T) {
 	t.Setenv("IDENTITY_DATABASE_URL", "postgres://runtime@localhost:5432/identity")
 	t.Setenv("IDENTITY_KEYCLOAK_REALM", "scnehaux")
+	t.Setenv("IDENTITY_KEYCLOAK_BASE_URL", "https://identity.example.com")
+	t.Setenv("IDENTITY_KEYCLOAK_CLIENT_ID", "identity-control")
+	t.Setenv("IDENTITY_KEYCLOAK_CLIENT_SECRET", "secret")
 	t.Setenv("IDENTITY_LISTEN_ADDRESS", "127.0.0.1:9090")
 	t.Setenv("DB_MAX_CONNS", "8")
 	t.Setenv("HTTP_REQUEST_TIMEOUT", "250ms")
@@ -112,6 +121,9 @@ func TestLoadRejectsMalformedValues(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Setenv("IDENTITY_DATABASE_URL", "postgres://runtime@localhost:5432/identity")
 			t.Setenv("IDENTITY_KEYCLOAK_REALM", "scnehaux")
+			t.Setenv("IDENTITY_KEYCLOAK_BASE_URL", "https://identity.example.com")
+			t.Setenv("IDENTITY_KEYCLOAK_CLIENT_ID", "identity-control")
+			t.Setenv("IDENTITY_KEYCLOAK_CLIENT_SECRET", "secret")
 			t.Setenv(tc.key, tc.value)
 
 			if _, err := config.Load(); err == nil {
