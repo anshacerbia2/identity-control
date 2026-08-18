@@ -40,6 +40,15 @@ type Config struct {
 	HTTPMaxInFlight    int64
 	HTTPShutdownGrace  time.Duration
 
+	// KeycloakRealm is the single realm this deployable administers.
+	KeycloakRealm string
+
+	// ProvisionTimeout bounds one Admin API call. PendingRecoveryAfter must exceed it, or
+	// recovery searches the kernel for a user the original request is still creating.
+	ProvisionTimeout     time.Duration
+	PendingRecoveryAfter time.Duration
+	ReconcilePageSize    int
+
 	LogLevel string
 }
 
@@ -63,6 +72,18 @@ func Load() (Config, error) {
 
 	cfg.ListenAddress = stringOr("IDENTITY_LISTEN_ADDRESS", ":8080")
 	cfg.LogLevel = stringOr("LOG_LEVEL", "info")
+
+	// The realm is configuration rather than caller input. ADR-IAM-001 §5.4 fixes a small
+	// static set of realms, and a caller-supplied realm would let one request create a
+	// Principal in a realm its authorization never covered.
+	cfg.KeycloakRealm = os.Getenv("IDENTITY_KEYCLOAK_REALM")
+	if strings.TrimSpace(cfg.KeycloakRealm) == "" {
+		problems = append(problems, errors.New("IDENTITY_KEYCLOAK_REALM is required"))
+	}
+
+	cfg.ProvisionTimeout = durationOr("IDENTITY_PROVISION_TIMEOUT", 10*time.Second, &problems)
+	cfg.PendingRecoveryAfter = durationOr("IDENTITY_PENDING_RECOVERY_AFTER", 60*time.Second, &problems)
+	cfg.ReconcilePageSize = intOr("IDENTITY_RECONCILE_PAGE_SIZE", 200, &problems)
 
 	cfg.DBMaxConns = int32(intOr("DB_MAX_CONNS", 20, &problems))
 	cfg.DBMaxConnLifetime = durationOr("DB_MAX_CONN_LIFETIME", 30*time.Minute, &problems)

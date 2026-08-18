@@ -26,6 +26,11 @@
     "internal/identity/provisioning": [
       "internal/keycloak",
       "internal/keycloak/keycloakfake"
+    ],
+
+    "internal/httpapi": [
+      "internal/identity/provisioning",
+      "internal/keycloak"
     ]
   },
 

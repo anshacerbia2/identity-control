@@ -13,9 +13,22 @@ import (
 // absence has to be a startup error rather than a lazily-discovered nil.
 func TestLoadRequiresDatabaseURL(t *testing.T) {
 	t.Setenv("IDENTITY_DATABASE_URL", "")
+	t.Setenv("IDENTITY_KEYCLOAK_REALM", "scnehaux")
 
 	if _, err := config.Load(); err == nil {
 		t.Fatal("Load succeeded without IDENTITY_DATABASE_URL")
+	}
+}
+
+// TestLoadRequiresRealm states the property the handler depends on: the realm is configuration,
+// so a deployable that does not name one must not start. Defaulting it would let a
+// misconfigured process administer whichever realm the default happened to name.
+func TestLoadRequiresRealm(t *testing.T) {
+	t.Setenv("IDENTITY_DATABASE_URL", "postgres://runtime@localhost:5432/identity")
+	t.Setenv("IDENTITY_KEYCLOAK_REALM", "")
+
+	if _, err := config.Load(); err == nil {
+		t.Fatal("Load succeeded without IDENTITY_KEYCLOAK_REALM")
 	}
 }
 
@@ -29,6 +42,7 @@ func TestLoadRejectsWhitespaceOnlyDatabaseURL(t *testing.T) {
 
 func TestLoadAppliesDefaults(t *testing.T) {
 	t.Setenv("IDENTITY_DATABASE_URL", "postgres://runtime@localhost:5432/identity")
+	t.Setenv("IDENTITY_KEYCLOAK_REALM", "scnehaux")
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -57,6 +71,7 @@ func TestLoadAppliesDefaults(t *testing.T) {
 
 func TestLoadOverridesFromEnvironment(t *testing.T) {
 	t.Setenv("IDENTITY_DATABASE_URL", "postgres://runtime@localhost:5432/identity")
+	t.Setenv("IDENTITY_KEYCLOAK_REALM", "scnehaux")
 	t.Setenv("IDENTITY_LISTEN_ADDRESS", "127.0.0.1:9090")
 	t.Setenv("DB_MAX_CONNS", "8")
 	t.Setenv("HTTP_REQUEST_TIMEOUT", "250ms")
@@ -96,6 +111,7 @@ func TestLoadRejectsMalformedValues(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			t.Setenv("IDENTITY_DATABASE_URL", "postgres://runtime@localhost:5432/identity")
+			t.Setenv("IDENTITY_KEYCLOAK_REALM", "scnehaux")
 			t.Setenv(tc.key, tc.value)
 
 			if _, err := config.Load(); err == nil {
