@@ -17,6 +17,9 @@ func TestLoadRequiresDatabaseURL(t *testing.T) {
 	t.Setenv("IDENTITY_KEYCLOAK_BASE_URL", "https://identity.example.com")
 	t.Setenv("IDENTITY_KEYCLOAK_CLIENT_ID", "identity-control")
 	t.Setenv("IDENTITY_KEYCLOAK_CLIENT_SECRET", "secret")
+	t.Setenv("IDENTITY_TOKEN_ISSUER", "https://identity.example.com/realms/scnehaux")
+	t.Setenv("IDENTITY_TOKEN_AUDIENCE", "identity-control")
+	t.Setenv("IDENTITY_JWKS_URL", "https://identity.example.com/realms/scnehaux/protocol/openid-connect/certs")
 
 	if _, err := config.Load(); err == nil {
 		t.Fatal("Load succeeded without IDENTITY_DATABASE_URL")
@@ -49,6 +52,9 @@ func TestLoadAppliesDefaults(t *testing.T) {
 	t.Setenv("IDENTITY_KEYCLOAK_BASE_URL", "https://identity.example.com")
 	t.Setenv("IDENTITY_KEYCLOAK_CLIENT_ID", "identity-control")
 	t.Setenv("IDENTITY_KEYCLOAK_CLIENT_SECRET", "secret")
+	t.Setenv("IDENTITY_TOKEN_ISSUER", "https://identity.example.com/realms/scnehaux")
+	t.Setenv("IDENTITY_TOKEN_AUDIENCE", "identity-control")
+	t.Setenv("IDENTITY_JWKS_URL", "https://identity.example.com/realms/scnehaux/protocol/openid-connect/certs")
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -81,6 +87,9 @@ func TestLoadOverridesFromEnvironment(t *testing.T) {
 	t.Setenv("IDENTITY_KEYCLOAK_BASE_URL", "https://identity.example.com")
 	t.Setenv("IDENTITY_KEYCLOAK_CLIENT_ID", "identity-control")
 	t.Setenv("IDENTITY_KEYCLOAK_CLIENT_SECRET", "secret")
+	t.Setenv("IDENTITY_TOKEN_ISSUER", "https://identity.example.com/realms/scnehaux")
+	t.Setenv("IDENTITY_TOKEN_AUDIENCE", "identity-control")
+	t.Setenv("IDENTITY_JWKS_URL", "https://identity.example.com/realms/scnehaux/protocol/openid-connect/certs")
 	t.Setenv("IDENTITY_LISTEN_ADDRESS", "127.0.0.1:9090")
 	t.Setenv("DB_MAX_CONNS", "8")
 	t.Setenv("HTTP_REQUEST_TIMEOUT", "250ms")
@@ -124,6 +133,9 @@ func TestLoadRejectsMalformedValues(t *testing.T) {
 			t.Setenv("IDENTITY_KEYCLOAK_BASE_URL", "https://identity.example.com")
 			t.Setenv("IDENTITY_KEYCLOAK_CLIENT_ID", "identity-control")
 			t.Setenv("IDENTITY_KEYCLOAK_CLIENT_SECRET", "secret")
+			t.Setenv("IDENTITY_TOKEN_ISSUER", "https://identity.example.com/realms/scnehaux")
+			t.Setenv("IDENTITY_TOKEN_AUDIENCE", "identity-control")
+			t.Setenv("IDENTITY_JWKS_URL", "https://identity.example.com/realms/scnehaux/protocol/openid-connect/certs")
 			t.Setenv(tc.key, tc.value)
 
 			if _, err := config.Load(); err == nil {

@@ -50,6 +50,19 @@ type Config struct {
 	KeycloakClientID     string
 	KeycloakClientSecret string
 
+	// TokenIssuer and TokenAudience are the verifier's contract. The issuer is compared for
+	// exact equality, so a value with a stray trailing slash rejects every token rather than
+	// accepting a wrong one.
+	//
+	// JWKSURL is configuration and never read from a token: a token naming its own key source
+	// would choose the key that validates it.
+	TokenIssuer   string
+	TokenAudience string
+	JWKSURL       string
+
+	// TokenMaxSkew tolerates clock drift, capped at 60 seconds by STD-IAM-002 §3.5.
+	TokenMaxSkew time.Duration
+
 	// ProvisionTimeout bounds one Admin API call. PendingRecoveryAfter must exceed it, or
 	// recovery searches the kernel for a user the original request is still creating.
 	ProvisionTimeout     time.Duration
@@ -94,6 +107,13 @@ func Load() (Config, error) {
 		"IDENTITY_KEYCLOAK_BASE_URL":      &cfg.KeycloakBaseURL,
 		"IDENTITY_KEYCLOAK_CLIENT_ID":     &cfg.KeycloakClientID,
 		"IDENTITY_KEYCLOAK_CLIENT_SECRET": &cfg.KeycloakClientSecret,
+
+		// Each of these is a term in an authentication decision. A default would be a
+		// default answer to "who may call this service", which is not a question a
+		// fallback value gets to answer.
+		"IDENTITY_TOKEN_ISSUER":   &cfg.TokenIssuer,
+		"IDENTITY_TOKEN_AUDIENCE": &cfg.TokenAudience,
+		"IDENTITY_JWKS_URL":       &cfg.JWKSURL,
 	}
 	for name, target := range required {
 		*target = os.Getenv(name)
@@ -102,6 +122,7 @@ func Load() (Config, error) {
 		}
 	}
 
+	cfg.TokenMaxSkew = durationOr("IDENTITY_TOKEN_MAX_SKEW", 30*time.Second, &problems)
 	cfg.ProvisionTimeout = durationOr("IDENTITY_PROVISION_TIMEOUT", 10*time.Second, &problems)
 	cfg.PendingRecoveryAfter = durationOr("IDENTITY_PENDING_RECOVERY_AFTER", 60*time.Second, &problems)
 	cfg.ReconcilePageSize = intOr("IDENTITY_RECONCILE_PAGE_SIZE", 200, &problems)

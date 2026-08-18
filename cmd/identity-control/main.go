@@ -24,6 +24,7 @@ import (
 	"github.com/anshacerbia2/foundation-platform/db"
 	fhttp "github.com/anshacerbia2/foundation-platform/httpapi"
 	"github.com/anshacerbia2/foundation-platform/observability"
+	"github.com/anshacerbia2/foundation-platform/verify"
 
 	"github.com/anshacerbia2/identity-control/internal/config"
 	"github.com/anshacerbia2/identity-control/internal/httpapi"
@@ -124,23 +125,47 @@ func run() error {
 		return fmt.Errorf("routes: %w", err)
 	}
 
-	// Authentication is deliberately absent, and every mutation therefore fails closed with
-	// 401 until it lands. Chain fixes where an authentication hook runs; supplying one is this
-	// service's job, and verifying a token means fetching JWKS and applying the whole
-	// STD-IAM-002 §3.5 checklist, which is its own increment.
-	//
-	// A development mode that trusted a header would have made the route usable today. It is
-	// not offered: a permissive authentication path that exists in one environment is a
-	// permissive path that reaches production, and EAD-006 §8 requires a security-control
-	// failure to fail closed rather than open. The startup log states the reduced capability
-	// so an operator is never left guessing why a request is refused.
-	logger.Warn("authentication is not configured; every mutation will be refused with 401",
-		slog.String("effect", "POST /v1/principals is unavailable until a token verifier is supplied"))
+	// The key source performs no fetch here. A cold replica loads the key set on its first
+	// verification, and NewJWKS deliberately touches no network so the composition root decides
+	// when that happens rather than the linker.
+	keys, err := verify.NewJWKS(verify.JWKSConfig{URL: cfg.JWKSURL})
+	if err != nil {
+		return fmt.Errorf("jwks source: %w", err)
+	}
 
+	// The claim rule is this service's, because STD-IAM-002 §3.5 states it in terms of a claim
+	// foundation-platform is forbidden from naming. The verifier refuses to build without one.
+	verifier, err := verify.New(verify.Config{
+		Issuer:      cfg.TokenIssuer,
+		Audience:    cfg.TokenAudience,
+		Keys:        keys,
+		Requirement: httpapi.Requirement(),
+		MaxSkew:     cfg.TokenMaxSkew,
+	})
+	if err != nil {
+		return fmt.Errorf("token verifier: %w", err)
+	}
+
+	authentication, err := httpapi.Authenticate(verifier)
+	if err != nil {
+		return fmt.Errorf("authentication middleware: %w", err)
+	}
+
+	logger.Info("token verification configured",
+		slog.String("issuer", cfg.TokenIssuer),
+		slog.String("audience", cfg.TokenAudience),
+		slog.String("jwks_url", cfg.JWKSURL),
+		slog.Duration("max_skew", cfg.TokenMaxSkew))
+
+	// Authentication is supplied to Chain rather than wrapped around the mux here, so it runs
+	// at the position TDD-foundation-platform-002 fixes: after load shedding, so rejecting
+	// overload costs no signature verification, and before the idempotency claim, so a key is
+	// always claimed under an authenticated caller.
 	chain := fhttp.Chain(fhttp.Options{
-		Telemetry:   telemetry,
-		Timeout:     cfg.HTTPRequestTimeout,
-		MaxInFlight: cfg.HTTPMaxInFlight,
+		Telemetry:      telemetry,
+		Timeout:        cfg.HTTPRequestTimeout,
+		MaxInFlight:    cfg.HTTPMaxInFlight,
+		Authentication: authentication,
 	})
 
 	server, err := fhttp.NewServer(cfg.ListenAddress, chain(routes), fhttp.ServerConfig{
