@@ -116,7 +116,7 @@ func run() error {
 		return fmt.Errorf("principal handler: %w", err)
 	}
 
-	routes, err := httpapi.Routes(httpapi.RoutesConfig{
+	surface, err := httpapi.Routes(httpapi.RoutesConfig{
 		Principals: principals,
 		Database:   pool,
 		Telemetry:  telemetry,
@@ -161,14 +161,23 @@ func run() error {
 	// at the position TDD-foundation-platform-002 fixes: after load shedding, so rejecting
 	// overload costs no signature verification, and before the idempotency claim, so a key is
 	// always claimed under an authenticated caller.
-	chain := fhttp.Chain(fhttp.Options{
+	apiChain := fhttp.Chain(fhttp.Options{
 		Telemetry:      telemetry,
 		Timeout:        cfg.HTTPRequestTimeout,
 		MaxInFlight:    cfg.HTTPMaxInFlight,
 		Authentication: authentication,
 	})
 
-	server, err := fhttp.NewServer(cfg.ListenAddress, chain(routes), fhttp.ServerConfig{
+	// Probes get the same observability and timeout and neither authentication nor the API's
+	// in-flight budget. Both omissions are decisions, not oversights: a probe cannot present a
+	// credential, and a readiness check shed by an overloaded API would remove a replica that
+	// is still healthy — which is how load shedding turns overload into an outage.
+	probeChain := fhttp.Chain(fhttp.Options{
+		Telemetry: telemetry,
+		Timeout:   cfg.HTTPRequestTimeout,
+	})
+
+	server, err := fhttp.NewServer(cfg.ListenAddress, surface.Mount(probeChain, apiChain), fhttp.ServerConfig{
 		ReadTimeout:  cfg.HTTPReadTimeout,
 		WriteTimeout: cfg.HTTPWriteTimeout,
 	})

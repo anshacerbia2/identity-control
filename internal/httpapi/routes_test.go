@@ -23,7 +23,7 @@ func (s *stubProber) Ping(context.Context) error {
 	return s.err
 }
 
-func routes(t *testing.T, prober httpapi.Prober) http.Handler {
+func surface(t *testing.T, prober httpapi.Prober) httpapi.Surface {
 	t.Helper()
 	handler, err := httpapi.NewPrincipals(&stubProvisioner{
 		response: provisioning.Response{PrincipalID: mustUUID(t)},
@@ -31,11 +31,19 @@ func routes(t *testing.T, prober httpapi.Prober) http.Handler {
 	if err != nil {
 		t.Fatalf("NewPrincipals: %v", err)
 	}
-	mux, err := httpapi.Routes(httpapi.RoutesConfig{Principals: handler, Database: prober})
+	built, err := httpapi.Routes(httpapi.RoutesConfig{Principals: handler, Database: prober})
 	if err != nil {
 		t.Fatalf("Routes: %v", err)
 	}
-	return mux
+	return built
+}
+
+// routes mounts the surface the way the composition root does, so these tests exercise the
+// pattern precedence between the two halves and not just each half in isolation.
+func routes(t *testing.T, prober httpapi.Prober) http.Handler {
+	t.Helper()
+	identity := func(next http.Handler) http.Handler { return next }
+	return surface(t, prober).Mount(identity, identity)
 }
 
 // TestLivenessTouchesNoDependency is the property that keeps a database outage from becoming a
@@ -138,6 +146,37 @@ func TestMethodAndPathAreExact(t *testing.T) {
 				t.Errorf("status = %d; the route matched a request it should not", w.Code)
 			}
 		})
+	}
+}
+
+// TestProbesAreNotBehindAuthentication is a regression test for an outage this repository
+// actually produced: `chain(routes)` wrapped one mux, so the authentication middleware answered
+// 401 on /readyz and the replica never entered service. The property is stated in terms of a
+// probe chain that authenticates nothing and an api chain that rejects everything, because that
+// is the difference the split exists to make.
+func TestProbesAreNotBehindAuthentication(t *testing.T) {
+	probeChain := func(next http.Handler) http.Handler { return next }
+	apiChain := func(http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusUnauthorized)
+		})
+	}
+	handler := surface(t, &stubProber{}).Mount(probeChain, apiChain)
+
+	for _, path := range []string{"/healthz", "/readyz"} {
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, path, nil))
+		if w.Code != http.StatusOK {
+			t.Errorf("%s = %d, want 200; the probe went through the authenticated chain", path, w.Code)
+		}
+	}
+
+	// The other direction matters as much. A split that let an API route reach the probe chain
+	// would be an unauthenticated mutation endpoint.
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/v1/principals", strings.NewReader("{}")))
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("POST /v1/principals = %d, want 401; the route escaped the authenticated chain", w.Code)
 	}
 }
 

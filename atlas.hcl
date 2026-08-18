@@ -26,6 +26,15 @@ env "local" {
 
   migration {
     dir = "file://migrations"
+
+    // Atlas's own bookkeeping lives outside the schema it manages.
+    //
+    // Without this it lands in `identity`, and `grants.sql` grants the runtime role DML on
+    // every table in that schema — so the runtime could rewrite migration history, and a
+    // later `atlas migrate apply` would re-run or skip migrations based on rows the
+    // application was able to change. Found by running the pipeline and querying
+    // has_table_privilege, not by reading the configuration.
+    revisions_schema = "atlas"
   }
 
   format {
@@ -43,6 +52,15 @@ env "ci" {
 
   migration {
     dir = "file://migrations"
+
+    // Atlas's own bookkeeping lives outside the schema it manages.
+    //
+    // Without this it lands in `identity`, and `grants.sql` grants the runtime role DML on
+    // every table in that schema — so the runtime could rewrite migration history, and a
+    // later `atlas migrate apply` would re-run or skip migrations based on rows the
+    // application was able to change. Found by running the pipeline and querying
+    // has_table_privilege, not by reading the configuration.
+    revisions_schema = "atlas"
   }
 
   // ADR-GLB-004 requires the pipeline to block a destructive plan rather than report it,

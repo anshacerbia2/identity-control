@@ -30,29 +30,47 @@ type RoutesConfig struct {
 	ReadinessTimeout time.Duration
 }
 
+// Surface is the deployable's HTTP surface, split by whether a request can carry a credential.
+//
+// The split exists because an orchestrator probe cannot authenticate. Returning one mux made
+// `chain(routes)` apply the authentication middleware to `/readyz` as well, so every probe
+// answered 401 and the replica never entered service — an outage produced by wrapping the
+// wrong handler, and found by running the process rather than by reading it.
+//
+// Two fields rather than a list of exempt paths: an exemption list is edited by whoever adds a
+// route, and the failure mode of forgetting is an unauthenticated mutation. Here, a new route
+// is unauthenticated only if its author writes it into Probes.
+type Surface struct {
+	// Probes is liveness and readiness. It carries no authentication and never will.
+	Probes http.Handler
+
+	// API is every route that acts on behalf of a caller. It requires an authenticated caller.
+	API http.Handler
+}
+
 // Routes builds the HTTP surface.
 //
-// It returns a bare mux. The middleware chain is applied by the composition root, so ordering
+// It returns bare muxes. The middleware chain is applied by the composition root, so ordering
 // stays in one place: TDD-foundation-platform-002 fixes recovery, correlation, logging,
 // timeout, and shedding in that order, and a package that wrapped its own routes could quietly
 // reorder them.
-func Routes(cfg RoutesConfig) (http.Handler, error) {
+func Routes(cfg RoutesConfig) (Surface, error) {
 	if cfg.Principals == nil {
-		return nil, errors.New("httpapi: the Principal handler is required")
+		return Surface{}, errors.New("httpapi: the Principal handler is required")
 	}
 	if cfg.Database == nil {
-		return nil, errors.New("httpapi: a database prober is required")
+		return Surface{}, errors.New("httpapi: a database prober is required")
 	}
 	if cfg.ReadinessTimeout <= 0 {
 		cfg.ReadinessTimeout = 2 * time.Second
 	}
 
-	mux := http.NewServeMux()
+	probes := http.NewServeMux()
 
 	// Liveness touches no dependency on purpose. A probe that fails during a database outage
 	// makes the orchestrator restart every replica for a fault a restart cannot fix, which
 	// converts a degradation into an outage.
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+	probes.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok\n"))
 	})
@@ -60,7 +78,7 @@ func Routes(cfg RoutesConfig) (http.Handler, error) {
 	// Readiness answers whether this replica can serve. A replica that cannot reach the
 	// Control Database can serve nothing, and belongs out of the load balancer rather than
 	// returning errors to callers.
-	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
+	probes.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), cfg.ReadinessTimeout)
 		defer cancel()
 		if err := cfg.Database.Ping(ctx); err != nil {
@@ -75,7 +93,20 @@ func Routes(cfg RoutesConfig) (http.Handler, error) {
 		_, _ = w.Write([]byte("ready\n"))
 	})
 
-	mux.HandleFunc("POST /v1/principals", cfg.Principals.CreatePrincipal)
+	api := http.NewServeMux()
+	api.HandleFunc("POST /v1/principals", cfg.Principals.CreatePrincipal)
 
-	return mux, nil
+	return Surface{Probes: probes, API: api}, nil
+}
+
+// Mount joins the two halves onto one root mux, each behind the chain its half requires.
+//
+// The probe patterns are literal and method-qualified, so Go's mux precedence gives them
+// priority over the catch-all without either half being able to shadow the other.
+func (s Surface) Mount(probeChain, apiChain func(http.Handler) http.Handler) http.Handler {
+	root := http.NewServeMux()
+	root.Handle("GET /healthz", probeChain(s.Probes))
+	root.Handle("GET /readyz", probeChain(s.Probes))
+	root.Handle("/", apiChain(s.API))
+	return root
 }

@@ -162,6 +162,45 @@ func TestRuntimeRoleHoldsNoDDL(t *testing.T) {
 	}
 }
 
+// TestRuntimeRoleCannotRewriteMigrationHistory closes a leak found by running the pipeline
+// rather than by reading it.
+//
+// Atlas records applied migrations in a revision table. Left in the `identity` schema it is
+// covered by GRANT ... ON ALL TABLES, so the runtime could update or delete those rows — and a
+// later `atlas migrate apply` would then re-run or skip migrations according to state the
+// application was able to change. atlas.hcl moves the table to its own schema; this asserts the
+// outcome rather than the setting, because a future environment could add its own env block and
+// forget.
+func TestRuntimeRoleCannotRewriteMigrationHistory(t *testing.T) {
+	pool, ctx := openPool(t)
+
+	stray := queryInt(t, pool, ctx,
+		`SELECT count(*) FROM pg_tables
+		  WHERE schemaname IN ('identity', 'platform')
+		    AND tablename LIKE '%schema_revisions%'`)
+	if stray != 0 {
+		t.Errorf("migration bookkeeping sits in a schema the runtime role has DML on: %d table(s)", stray)
+	}
+
+	// Where the revision table does live, the runtime must hold nothing on it.
+	revisionSchema := ""
+	if err := pool.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT coalesce(max(schemaname), '') FROM pg_tables WHERE tablename LIKE '%schema_revisions%'`).
+			Scan(&revisionSchema)
+	}); err != nil {
+		t.Fatalf("locate the revision table: %v", err)
+	}
+	if revisionSchema == "" {
+		t.Skip("no Atlas revision table exists yet; nothing to assert")
+	}
+
+	if queryBool(t, pool, ctx,
+		`SELECT has_schema_privilege($1, $2, 'USAGE')`, runtimeRole, revisionSchema) {
+		t.Errorf("%s holds USAGE on %s, where migration history lives", runtimeRole, revisionSchema)
+	}
+}
+
 // TestMigratorRoleOwnsTheSchemas is the other side of the same property. If the migration
 // role owns nothing either, the objects belong to whichever superuser ran the migration,
 // and the separation the criterion describes exists only on paper.
