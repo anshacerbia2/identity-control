@@ -119,6 +119,34 @@ type CreateUserRequest struct {
 	WorkloadOwner id.UUID
 }
 
+// ActionUpdatePassword is the kernel's required-action alias for establishing a password.
+//
+// A required action is an instruction to the kernel, not a credential. Sending it is how this
+// service creates a human Principal without ever holding the credential that Principal will
+// authenticate with, per ADR-IAM-001 §5.2.
+const ActionUpdatePassword = "UPDATE_PASSWORD"
+
+// RequiredActions is what the kernel must demand of this Principal before it can authenticate.
+//
+// Derived from the subject type rather than passed in, because the two answers are properties of
+// what is being created rather than choices a caller makes:
+//
+//   - A human authenticates with a credential this service must never hold, so the kernel is
+//     told to demand one. Without this the user exists, has no credential, and cannot ever
+//     authenticate — and nothing in the system says so.
+//   - A workload authenticates with a client credential rather than a password, so a password
+//     action would block it on a flow it never uses.
+//
+// This applies to every creation path, not only the bootstrap ceremony. Two paths that create
+// the same kind of Principal under different credential rules would be two different meanings
+// of "created".
+func (r CreateUserRequest) RequiredActions() []string {
+	if r.SubjectType == SubjectHuman {
+		return []string{ActionUpdatePassword}
+	}
+	return nil
+}
+
 // Validate rejects a request the kernel would accept but the enterprise would not.
 //
 // The checks run here rather than only at the API edge because this is the last point

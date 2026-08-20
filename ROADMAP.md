@@ -153,6 +153,51 @@ without an accountable owner is refused, and a client-supplied `keycloak_user_id
 | Keycloak 24+ discards user attributes the user profile does not declare, without an error | The create call succeeds, `scnehaux_principal_id` never lands, and the symptom appears three steps later as a token with no `principal_id`. The three attributes are declared with `edit` restricted to admin, rather than solved by enabling unmanaged attributes, so a user cannot set their own `principal_id` through the account console |
 | foundation-platform's platform migration set was not re-runnable | Every deployment after the first aborted on `column "scope" ... already exists`. `identity-migrate` applies the whole set on every invocation because the shared module ships no revision table, and its package comment already claimed idempotency. Fixed upstream in `foundation-platform v0.2.1` with an integration test that applies the set three times |
 
+### Week 2¾ · The bootstrap ceremony
+
+✅ **Closed.** The first-Principal gap recorded here was a real design defect, not a harness
+inconvenience: `TDD-identity-control-001` closes every creation path except `POST /v1/principals`,
+that endpoint requires a caller holding a `principal_id`, and only that endpoint issues one. A
+fresh production realm had no entry point.
+
+`ADR-IAM-001 §5.8` decided the shape — a single-use ceremony on the deployable — and rejected the
+standing break-glass identity as `Alternative F`. The reasoning that settled it: a break-glass
+identity creates a credential that can create Principals *forever*, in exchange for solving a
+problem that occurs once, and because it must exist before the service does it can only be placed
+by the out-of-band write the architecture prohibits. The problem would have been relocated rather
+than solved.
+
+`cmd/identity-bootstrap` implements it, and every guarantee is structural rather than procedural:
+
+| Guarantee | Mechanism |
+| :-- | :-- |
+| Succeeds at most once per Control Database | `id = 1` under a primary key on `identity.bootstrap_ceremony`. Two concurrent ceremonies produce one Principal; the loser is refused by a constraint rather than by a race it might win |
+| Refuses a populated registry | Emptiness asserted in the claiming transaction, in the same statement that reads the row back, so the count cannot be from a stale snapshot |
+| The operator and reason are immutable | `grants.sql` revokes `UPDATE`, `DELETE`, and `TRUNCATE` on that table from the runtime role. A resumed ceremony reads the record and reports the *original* operator, so a second attempt cannot rewrite who ran the first |
+| Survives a crash without a second Principal | The idempotency key lives in the row, so a resumed ceremony replays the original claim through `Provisioner.Create` |
+| Holds no credential | The kernel user is created with `UPDATE_PASSWORD` outstanding, so the first human interaction establishes the credential |
+| Creates nothing special | The identifier is a UUIDv7 through the ordinary path. A reserved or well-known identifier for the first Principal would be a value an attacker knows in every estate |
+
+The scope it claims under is `ceremony:bootstrap`. Every API caller's scope is
+`principal:<uuid>`, so the namespaces are disjoint and an authenticated caller can neither replay
+nor consume the ceremony's claim. Asserted by test.
+
+**The harness no longer does the prohibited thing.** `dev-keycloak.ps1` creates no user and
+`dev-database.ps1` lost its `-SeedBootstrapPrincipal` switch; `scripts/dev-bootstrap.ps1` runs the
+real ceremony. Verified from a dropped database and an emptied realm: the ceremony succeeded, a
+second run was refused showing the record, a `-resume` with the wrong operator was refused, a
+`-resume` with the right one returned the same `principal_id` with no second kernel user, and
+`UPDATE` on the record was refused by PostgreSQL.
+
+#### One finding this produced
+
+Deriving the required action from the subject type exposed a latent gap in the ordinary path too.
+A human Principal created through `POST /v1/principals` previously had no credential and no
+required action, so the user existed and could never authenticate — with nothing in the system
+saying so. `CreateUserRequest.RequiredActions()` now applies to every creation path: a human owes
+a credential, a workload does not, because a workload authenticates by client credential and a
+password action would block it on a flow it never uses.
+
 ### Week 3 · Event translation and consumption
 
 - Publication of `com.scnehaux.identity.*` through the shared outbox
@@ -163,36 +208,6 @@ without an accountable owner is refused, and a client-supplied `keycloak_user_id
 
 **Exit:** no code path in this service constructs an Organization Database connection,
 asserted by test.
-
-## Open governance question: the first Principal
-
-**The first Principal in a realm cannot be created through the only sanctioned path.**
-
-`TDD-identity-control-001` closes every Principal creation path except `POST /v1/principals`,
-and `ADR-ORG-001 §5.3` makes this service the sole authority over the identifier. That endpoint
-requires an authenticated caller, and authentication requires a token carrying a `principal_id`,
-and a `principal_id` is issued only by that endpoint. The cycle has no entry point.
-
-This is not a harness inconvenience. A fresh production realm has the same problem, and the
-answer cannot be "someone runs an INSERT", because an identifier that entered the canonical
-registry without a recorded decision is exactly what `ADR-ORG-001` exists to prevent.
-
-`scripts/dev-keycloak.ps1` and `scripts/dev-database.ps1 -SeedBootstrapPrincipal` currently mint
-and record one out-of-band, and both say plainly that this is the prohibited path. Acceptable on
-a loopback harness; not a production procedure.
-
-What the estate needs is a designed bootstrap. The shape is a decision for `ADR-IAM-001` rather
-than for this repository, and the two candidates are:
-
-- **A break-glass identity**, provisioned with the realm, holding a reserved `principal_id`, and
-  usable only to create the first real operator. Its use is an alert rather than a log line.
-- **An operator-initiated first-Principal ceremony** — a one-shot command on the deployable
-  itself, refusing to run when `identity.principal_mapping` is non-empty, and writing an audit
-  record naming the human who ran it.
-
-The second is closer to the estate's posture, because it keeps creation inside the authority
-that owns the identifier instead of creating a credential that can create Principals forever.
-Neither is decided, and nothing downstream of this repository should assume one.
 
 ## Waiting on the Keycloak proof-of-concept
 
@@ -242,7 +257,8 @@ removal, Keycloak administration credential rotation rehearsed, and runbooks wri
 for unmapped-Principal triage, duplicate-identifier containment, pending-mapping
 recovery, and projection drift repair.
 
-**Also a production blocker: the first-Principal bootstrap is decided and implemented.**
-Without it, standing up a production realm requires the out-of-band `INSERT` that
-`ADR-ORG-001` prohibits, and the shortcut taken once under deployment pressure is the one
-that stays.
+**The first-Principal bootstrap blocker is cleared.** `ADR-IAM-001 §5.8` decided it and
+`cmd/identity-bootstrap` implements it, so standing up a production realm no longer requires the
+out-of-band `INSERT` that `ADR-ORG-001` prohibits. What remains for the production gate is
+operational rather than architectural: the ceremony needs a runbook naming who is authorized to
+perform it and where the record is reviewed, since the evidence is worthless if nobody reads it.

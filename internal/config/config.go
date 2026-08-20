@@ -143,6 +143,65 @@ func Load() (Config, error) {
 	return cfg, nil
 }
 
+// BootstrapConfig is what the bootstrap ceremony command needs, and nothing more.
+//
+// A narrower type rather than reusing Config, because Config requires a token issuer, an
+// audience, and a JWKS URL — and this command verifies no token. Demanding them would make the
+// configuration surface lie about what the command does, and an operator running a one-time
+// ceremony would have to invent three values to satisfy a check that protects nothing.
+type BootstrapConfig struct {
+	Deployable string
+	System     string
+
+	// RuntimeDSN connects as the runtime role. The ceremony writes rows and no DDL, so it
+	// deliberately does not use the migration credential: a command that could alter the schema
+	// is a command that could remove the constraint making it single-use.
+	RuntimeDSN string
+
+	KeycloakRealm        string
+	KeycloakBaseURL      string
+	KeycloakClientID     string
+	KeycloakClientSecret string
+
+	ProvisionTimeout     time.Duration
+	PendingRecoveryAfter time.Duration
+
+	LogLevel string
+}
+
+// LoadBootstrap reads the environment for the ceremony command.
+func LoadBootstrap() (BootstrapConfig, error) {
+	var problems []error
+
+	cfg := BootstrapConfig{
+		Deployable: "identity-bootstrap",
+		System:     "SAD-001",
+	}
+
+	required := map[string]*string{
+		"IDENTITY_DATABASE_URL":           &cfg.RuntimeDSN,
+		"IDENTITY_KEYCLOAK_REALM":         &cfg.KeycloakRealm,
+		"IDENTITY_KEYCLOAK_BASE_URL":      &cfg.KeycloakBaseURL,
+		"IDENTITY_KEYCLOAK_CLIENT_ID":     &cfg.KeycloakClientID,
+		"IDENTITY_KEYCLOAK_CLIENT_SECRET": &cfg.KeycloakClientSecret,
+	}
+	for name, target := range required {
+		*target = os.Getenv(name)
+		if strings.TrimSpace(*target) == "" {
+			problems = append(problems, fmt.Errorf("%s is required", name))
+		}
+	}
+
+	cfg.ProvisionTimeout = durationOr("IDENTITY_PROVISION_TIMEOUT", 10*time.Second, &problems)
+	cfg.PendingRecoveryAfter = durationOr("IDENTITY_PENDING_RECOVERY_AFTER", 60*time.Second, &problems)
+	cfg.LogLevel = stringOr("LOG_LEVEL", "info")
+
+	if len(problems) > 0 {
+		return BootstrapConfig{}, errors.Join(problems...)
+	}
+	return cfg, nil
+}
+
 func stringOr(key, fallback string) string {
 	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
 		return value

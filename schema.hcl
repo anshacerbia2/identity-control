@@ -149,6 +149,64 @@ table "principal_mapping" {
   }
 }
 
+// The record of the one ceremony that created the first Principal.
+//
+// `POST /v1/principals` requires a caller holding a principal_id and is the only path that
+// issues one, so a fresh realm has no entry point. This table is how the ceremony that provides
+// one is bounded. ADR-IAM-001 §5.8 and TDD-identity-control-001 carry the decision.
+//
+// Every guarantee here is structural rather than procedural, because a procedure is what gets
+// skipped under deployment pressure.
+table "bootstrap_ceremony" {
+  schema  = schema.identity
+  comment = "The single bootstrap ceremony record. Insert-only. ADR-IAM-001 §5.8."
+
+  // `id = 1` under a primary key is what makes the ceremony single-use. A count() in Go would
+  // be a check the next refactor could drop, and would race two concurrent ceremonies into two
+  // Principals; a constraint refuses the second unconditionally.
+  column "id" {
+    null = false
+    type = integer
+  }
+
+  column "operator" {
+    null    = false
+    type    = text
+    comment = "The human who ran the ceremony. Not the process, and not a service account."
+  }
+
+  column "reason" {
+    null = false
+    type = text
+  }
+
+  // Held in the row rather than generated per invocation. A ceremony that crashed after the
+  // kernel call resumes against the same key, so the API's existing recovery path applies and a
+  // retry cannot mint a second Principal.
+  column "idempotency_key" {
+    null = false
+    type = text
+  }
+
+  column "requested_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+
+  primary_key {
+    columns = [column.id]
+  }
+
+  check "bootstrap_ceremony_single_row" {
+    expr = "id = 1"
+  }
+
+  check "bootstrap_ceremony_operator_named" {
+    expr = "btrim(operator) <> '' AND btrim(reason) <> ''"
+  }
+}
+
 // This service's own consumer position. The publisher registry lives in the Organization
 // Database and is never read from here.
 table "projection_cursor" {

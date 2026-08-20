@@ -17,14 +17,11 @@
 #   $env:PGPASSWORD          = '...'   # the superuser password, for step 1 only
 #   $env:IDENTITY_APP_PASSWORD = '...' # the login role identity-control authenticates as
 #
-# Optional:
-#   -SeedBootstrapPrincipal            with BOOTSTRAP_PRINCIPAL_ID and BOOTSTRAP_KEYCLOAK_ID set
+# This script writes no Principal. An earlier version had a -SeedBootstrapPrincipal switch that
+# inserted one directly; that is the out-of-band write ADR-ORG-001 §5.3 prohibits, and the
+# bootstrap ceremony (`scripts/dev-bootstrap.ps1`) replaced it.
 #
 # Usage: pwsh ./scripts/dev-database.ps1
-
-param(
-    [switch]$SeedBootstrapPrincipal
-)
 
 $ErrorActionPreference = "Stop"
 
@@ -132,27 +129,6 @@ foreach ($check in $checks) {
 }
 if ($failed) { throw "the privilege shape is wrong; do not run the service against this database" }
 
-# ---------------------------------------------------------------------------------------------
-if ($SeedBootstrapPrincipal) {
-    Write-Host "[+] bootstrap principal"
-    # Out-of-band Principal creation, which TDD-identity-control-001 prohibits. See the bootstrap
-    # note in dev-keycloak.ps1: the first Principal in a realm cannot be created through the only
-    # sanctioned path, because that path requires an authenticated Principal. Local only.
-    if ([string]::IsNullOrWhiteSpace($env:BOOTSTRAP_PRINCIPAL_ID) -or
-        [string]::IsNullOrWhiteSpace($env:BOOTSTRAP_KEYCLOAK_ID)) {
-        throw "BOOTSTRAP_PRINCIPAL_ID and BOOTSTRAP_KEYCLOAK_ID are required with -SeedBootstrapPrincipal"
-    }
-    $realm = if ($env:KC_REALM) { $env:KC_REALM } else { "scnehaux" }
-    Invoke-Psql $database @"
-INSERT INTO identity.principal_mapping
-    (principal_id, keycloak_user_id, realm, username, email, subject_type, state, activated_at)
-VALUES
-    ('$($env:BOOTSTRAP_PRINCIPAL_ID)', '$($env:BOOTSTRAP_KEYCLOAK_ID)', '$realm',
-     'bootstrap-operator', 'bootstrap-operator@scnehaux.local', 'human', 'active', now())
-ON CONFLICT (principal_id) DO NOTHING;
-"@
-    Write-Host "      recorded $($env:BOOTSTRAP_PRINCIPAL_ID)"
-}
-
 Write-Host ""
 Write-Host "control database ready: $database"
+Write-Host "The registry holds no Principal. Next: ./scripts/dev-bootstrap.ps1"

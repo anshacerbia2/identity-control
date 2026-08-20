@@ -89,6 +89,11 @@ type Calls struct {
 type stored struct {
 	realm keycloak.Realm
 	user  keycloak.User
+
+	// requiredActions is what the create call told the kernel to demand. The port's User type
+	// deliberately carries no such field — this service must not read one back — so it is held
+	// beside the user rather than on it, and reachable only through RequiredActions below.
+	requiredActions []string
 }
 
 // New returns an empty fake.
@@ -136,6 +141,7 @@ func (c *Client) CreateUser(ctx context.Context, req keycloak.CreateUserRequest)
 			SubjectType:   req.SubjectType,
 			WorkloadOwner: req.WorkloadOwner,
 		},
+		requiredActions: req.RequiredActions(),
 	}
 
 	// The user is recorded and the caller is told the call failed. This is the state the
@@ -287,6 +293,17 @@ func (c *Client) User(userID keycloak.UserID) (keycloak.User, bool) {
 	defer c.mu.Unlock()
 	entry, ok := c.users[userID]
 	return entry.user, ok
+}
+
+// RequiredActions returns what the create call told the kernel to demand of this user.
+//
+// It exists so a test can assert that a human Principal is created owing a credential the
+// service never supplied. Nothing in production reads this: the port has no such field, which is
+// what stops this service from developing an opinion about a user's credential state.
+func (c *Client) RequiredActions(userID keycloak.UserID) []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.users[userID].requiredActions
 }
 
 // Count returns how many users the fake holds.

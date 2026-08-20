@@ -29,6 +29,7 @@ BEGIN
       FROM (VALUES
               ('identity.principal_mapping'),
               ('identity.projection_cursor'),
+              ('identity.bootstrap_ceremony'),
               ('platform.outbox'),
               ('platform.processed_event'),
               ('platform.dead_letter'),
@@ -63,6 +64,19 @@ GRANT USAGE ON SCHEMA platform TO identity_runtime;
 -- the partition retention job exists to perform under the migration role.
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA identity TO identity_runtime;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA platform TO identity_runtime;
+
+-- The bootstrap ceremony record is insert-only, and the narrowing is applied after the
+-- schema-wide grant above rather than by excluding the table from it. Listing tables
+-- individually there would mean a new table is unreachable until someone remembers to add it;
+-- revoking here means a new table is readable and only this one is special.
+--
+-- ADR-IAM-001 §5.8 requires the operator and reason on record to be immutable. Without the
+-- REVOKE, the runtime role inherits UPDATE and DELETE from the schema-wide grant, and whoever
+-- runs the ceremony a second time could rewrite who ran it the first time — which is the entire
+-- value of the record.
+--
+-- SELECT and INSERT remain: the ceremony claims the row, and a resumed ceremony reads it back.
+REVOKE UPDATE, DELETE, TRUNCATE ON identity.bootstrap_ceremony FROM identity_runtime;
 
 -- platform.outbox_sequence is read by every append. Without USAGE the outbox write fails
 -- inside the caller's domain transaction, so a membership mutation would roll back.

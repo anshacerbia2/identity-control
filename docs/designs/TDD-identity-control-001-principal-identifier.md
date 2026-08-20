@@ -117,17 +117,65 @@ audience profile.
 ```text
 Authorized
     Identity Control Service → Keycloak Admin API
+        via POST /v1/principals              ordinary path, authenticated caller
+        via the bootstrap ceremony           single use per Control Database
 
 Prohibited in this phase
     Self-registration
     Federated first-login auto-create
     Direct Admin Console user creation
     Any write to the Keycloak database
+    Any direct write to identity.principal_mapping
 ```
 
 Prohibited paths are closed by realm configuration rather than by policy alone. The
 reconciler treats any Principal that appears without a mapping as evidence that a
 prohibited path is open, and quarantines it.
+
+#### The Bootstrap Ceremony
+
+`POST /v1/principals` requires a caller holding a `principal_id`, and it is the only path that
+issues one. A fresh realm therefore has no entry point, and the ceremony is it. `ADR-IAM-001 §5.8`
+records the decision and why a standing break-glass identity was rejected.
+
+It is a command on the deployable rather than an endpoint, because an endpoint that creates a
+Principal without an authenticated caller is a permanent hole in the API whether or not a guard
+currently closes it.
+
+**Structural guarantees, in the order the code relies on them.**
+
+```sql
+CREATE TABLE identity.bootstrap_ceremony (
+    id              INTEGER     PRIMARY KEY,
+    operator        TEXT        NOT NULL,
+    reason          TEXT        NOT NULL,
+    idempotency_key TEXT        NOT NULL,
+    requested_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT bootstrap_ceremony_single_row CHECK (id = 1)
+);
+```
+
+1. `id = 1` under a primary key makes the table hold at most one row. A second ceremony is
+   refused by a constraint, not by a `SELECT count(*)` the next refactor could drop, and two
+   concurrent ceremonies produce one Principal rather than two.
+2. The claiming transaction asserts `identity.principal_mapping` is empty. Together with (1)
+   this means the ceremony can only ever run on a virgin registry.
+3. The row is **insert-only**. `grants.sql` revokes `UPDATE` and `DELETE` from the runtime role
+   on this table specifically, so the operator and reason on record cannot be rewritten — by the
+   application, by a retry, or by whoever runs the ceremony a second time.
+4. `idempotency_key` is claimed in the same row rather than generated per invocation. A ceremony
+   that crashes after the kernel call resumes against the same key, so the recovery path that
+   already exists for the API applies unchanged and a retry cannot mint a second Principal.
+
+**The ceremony holds no credential.** The kernel user is created with a required
+credential-setting action, so the first human interaction establishes the credential. A ceremony
+that set a password would be a process holding a credential for an identity it also authorized,
+which is the concentration `ADR-IAM-001 §5.2` exists to prevent.
+
+**Why not simply relax the API for the first call.** A route that accepts an unauthenticated
+request when a table is empty is a route whose authorization depends on data. The table is empty
+in every fresh environment, including a restored-from-backup one and a mistakenly-pointed-at one,
+and the failure is silent: the request succeeds.
 
 ## Data Model
 

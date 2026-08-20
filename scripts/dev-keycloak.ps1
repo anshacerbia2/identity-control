@@ -11,7 +11,11 @@
 #   $env:KC_ADMIN_PASSWORD            = '...'   # Keycloak bootstrap admin
 #   $env:IDENTITY_CONTROL_SECRET      = '...'   # the service's Admin API client secret
 #   $env:IDENTITY_CALLER_SECRET       = '...'   # harness caller client secret
-#   $env:IDENTITY_CALLER_PASSWORD     = '...'   # harness caller user password
+#
+# This script creates no user. The first Principal is created by the bootstrap ceremony
+# (`scripts/dev-bootstrap.ps1`), because ADR-IAM-001 §5.8 gives that authority to the Identity
+# Control Service and nothing else. An earlier version of this script minted one out-of-band and
+# said so in a comment; the ceremony exists so that comment is no longer needed.
 #
 # Usage: pwsh ./scripts/dev-keycloak.ps1
 
@@ -32,7 +36,6 @@ function Require-Env($name) {
 $kcAdminPassword = Require-Env "KC_ADMIN_PASSWORD"
 $serviceSecret   = Require-Env "IDENTITY_CONTROL_SECRET"
 $callerSecret    = Require-Env "IDENTITY_CALLER_SECRET"
-$callerPassword  = Require-Env "IDENTITY_CALLER_PASSWORD"
 
 $tokenBody = @{
     grant_type = "password"
@@ -47,7 +50,7 @@ $H = @{ Authorization = "Bearer $adminToken" }
 # ---------------------------------------------------------------------------------------------
 # 1. Realm
 # ---------------------------------------------------------------------------------------------
-Write-Host "[1/6] realm $realm"
+Write-Host "[1/5] realm $realm"
 $realms = Invoke-RestMethod -Uri "$kcBase/admin/realms" -Headers $H
 if ($realms | Where-Object { $_.realm -eq $realm }) {
     Write-Host "      exists"
@@ -70,7 +73,7 @@ if ($realms | Where-Object { $_.realm -eq $realm }) {
 # ---------------------------------------------------------------------------------------------
 # 2. Signing key
 # ---------------------------------------------------------------------------------------------
-Write-Host "[2/6] PS256 / 3072-bit signing key"
+Write-Host "[2/5] PS256 / 3072-bit signing key"
 # A fresh realm is provisioned with a 2048-bit RS256 key. STD-IAM-002 3.2.2 requires PS256 at
 # 3072 bits, and ADR-IAM-002 records why: FAPI 2.0 prohibits RS256, and the verifier in
 # foundation-platform permits exactly one algorithm so an attacker cannot negotiate a weaker
@@ -102,7 +105,7 @@ if ($components | Where-Object { $_.name -eq "scnehaux-ps256" }) {
 # ---------------------------------------------------------------------------------------------
 # 3. User profile attributes
 # ---------------------------------------------------------------------------------------------
-Write-Host "[3/6] Scnehaux user attributes"
+Write-Host "[3/5] Scnehaux user attributes"
 # Keycloak 24+ silently discards attributes the user profile does not declare. Without this,
 # identity-control's create call succeeds, the attribute never lands, and the token carries no
 # principal_id — a failure with no error anywhere in the chain.
@@ -150,7 +153,7 @@ function Upsert-Client($payload) {
 # ---------------------------------------------------------------------------------------------
 # 4. The service client
 # ---------------------------------------------------------------------------------------------
-Write-Host "[4/6] client identity-control"
+Write-Host "[4/5] client identity-control"
 $serviceClientId = Upsert-Client @{
     clientId                  = "identity-control"
     name                      = "Identity Control Service"
@@ -184,7 +187,7 @@ Write-Host "      roles: $(($grant | ForEach-Object { $_.name }) -join ', ')"
 # ---------------------------------------------------------------------------------------------
 # 5. The harness caller client
 # ---------------------------------------------------------------------------------------------
-Write-Host "[5/6] client identity-control-caller"
+Write-Host "[5/5] client identity-control-caller"
 # Direct access grant is enabled for this client and this client alone, so a developer can get a
 # token without a browser. STD-IAM-001 3.2 forbids the flow outside development; the client name
 # says so, and it exists in no environment this script is not run against.
@@ -257,76 +260,20 @@ foreach ($mapper in $mappers) {
 }
 
 # ---------------------------------------------------------------------------------------------
-# 6. The bootstrap caller
+# The first Principal is deliberately NOT created here.
 # ---------------------------------------------------------------------------------------------
-Write-Host "[6/6] user bootstrap-operator"
-# THE BOOTSTRAP PROBLEM, stated rather than hidden.
+# ADR-IAM-001 5.8 gives the authority to issue a principal_id to the Identity Control Service
+# and to nothing else. A script that wrote the attribute directly would be the out-of-band
+# creation TDD-identity-control-001 prohibits, and an earlier version of this file did exactly
+# that with a comment admitting it. Run the ceremony instead:
 #
-# TDD-identity-control-001 closes every Principal creation path except POST /v1/principals, and
-# that endpoint requires an authenticated caller who already holds a principal_id. So the first
-# Principal in a realm cannot be created through the only sanctioned path. This script mints one
-# out-of-band and `dev-database.ps1` records it, which is exactly the out-of-band creation the
-# design prohibits. Acceptable locally; NOT a production procedure. The estate needs a designed
-# bootstrap — a break-glass identity, or an operator-initiated first-Principal ceremony — and
-# ROADMAP.md carries it as an open governance question.
-function New-UUIDv7 {
-    $bytes = New-Object byte[] 16
-    # RandomNumberGenerator::Fill is .NET Core only; Windows PowerShell 5.1 runs .NET Framework.
-    $rng = New-Object System.Security.Cryptography.RNGCryptoServiceProvider
-    $rng.GetBytes($bytes)
-    $rng.Dispose()
-    $ms = [long][System.DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
-    for ($i = 0; $i -lt 6; $i++) { $bytes[$i] = [byte](($ms -shr (8 * (5 - $i))) -band 0xFF) }
-    $bytes[6] = [byte](($bytes[6] -band 0x0F) -bor 0x70)  # version 7
-    $bytes[8] = [byte](($bytes[8] -band 0x3F) -bor 0x80)  # RFC 4122 variant
-    $hex = ($bytes | ForEach-Object { $_.ToString("x2") }) -join ""
-    return "$($hex.Substring(0,8))-$($hex.Substring(8,4))-$($hex.Substring(12,4))-$($hex.Substring(16,4))-$($hex.Substring(20,12))"
-}
-
-$callerUsername = "bootstrap-operator"
-$found = Invoke-RestMethod -Headers $H `
-    -Uri "$kcBase/admin/realms/$realm/users?username=$callerUsername&exact=true"
-
-if ($found.Count -gt 0) {
-    $userId = $found[0].id
-    $principalId = $found[0].attributes.scnehaux_principal_id[0]
-} else {
-    $principalId = New-UUIDv7
-    $newUser = @{
-        username      = $callerUsername
-        enabled       = $true
-        emailVerified = $true
-        email         = "$callerUsername@scnehaux.local"
-        # firstName and lastName are required by the default user profile, and a user missing
-        # them is refused with "Account is not fully set up" rather than a validation error.
-        firstName     = "Bootstrap"
-        lastName      = "Operator"
-        attributes    = @{
-            scnehaux_principal_id = @($principalId)
-            scnehaux_subject_type = @("human")
-        }
-        credentials   = @(@{ type = "password"; value = $callerPassword; temporary = $false })
-    }
-    Invoke-RestMethod -Method Post -Uri "$kcBase/admin/realms/$realm/users" -Headers $H `
-        -Body ($newUser | ConvertTo-Json -Depth 8) -ContentType "application/json" | Out-Null
-    $userId = (Invoke-RestMethod -Headers $H `
-        -Uri "$kcBase/admin/realms/$realm/users?username=$callerUsername&exact=true")[0].id
-}
-
-# Verify rather than assume. A discarded attribute is invisible at the write, and the symptom
-# appears three steps later as an unexplained 401.
-$stored = Invoke-RestMethod -Uri "$kcBase/admin/realms/$realm/users/$userId" -Headers $H
-if (-not $stored.attributes.scnehaux_principal_id) {
-    throw "Keycloak discarded scnehaux_principal_id: the user profile declaration did not take effect"
-}
+#   ./scripts/dev-bootstrap.ps1
 
 Write-Host ""
 Write-Host "keycloak ready."
-Write-Host "  realm               $realm"
-Write-Host "  bootstrap principal $principalId"
-Write-Host "  keycloak user id    $userId"
+Write-Host "  realm                 $realm"
+Write-Host "  service client        identity-control (service account, narrow realm-management roles)"
+Write-Host "  caller client         identity-control-caller (direct access grant, local harness only)"
+Write-Host "  signing key           PS256 / 3072-bit"
 Write-Host ""
-Write-Host "Record the bootstrap Principal in the control database:"
-Write-Host "  `$env:BOOTSTRAP_PRINCIPAL_ID = '$principalId'"
-Write-Host "  `$env:BOOTSTRAP_KEYCLOAK_ID  = '$userId'"
-Write-Host "  ./scripts/dev-database.ps1 -SeedBootstrapPrincipal"
+Write-Host "No user exists yet. Next: ./scripts/dev-database.ps1 then ./scripts/dev-bootstrap.ps1"

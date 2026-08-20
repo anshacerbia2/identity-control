@@ -126,6 +126,12 @@ func (a *Admin) CreateUser(ctx context.Context, req CreateUserRequest) (UserID, 
 	if req.Email != "" {
 		payload["email"] = req.Email
 	}
+	// A required action is an instruction to the kernel, never a credential. It is what lets
+	// this service create a human Principal without holding the credential that Principal will
+	// authenticate with. Omitted for a workload, which authenticates by client credential.
+	if actions := req.RequiredActions(); len(actions) > 0 {
+		payload["requiredActions"] = actions
+	}
 
 	// mutating: true. A transport failure on a create is reported as ambiguous rather than
 	// unavailable, because the request may have been written and the response lost. The

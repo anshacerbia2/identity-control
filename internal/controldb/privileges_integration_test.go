@@ -162,6 +162,72 @@ func TestRuntimeRoleHoldsNoDDL(t *testing.T) {
 	}
 }
 
+// TestBootstrapCeremonyRecordIsInsertOnly is the privilege half of ADR-IAM-001 §5.8.
+//
+// The ceremony record names the human who created the one Principal nobody else authorized. If
+// the runtime role can UPDATE it, whoever runs the ceremony a second time can rewrite who ran it
+// the first — which is the entire value of keeping a record. DELETE would let the single-use
+// constraint be reset, turning the ceremony into a repeatable Principal factory.
+//
+// The narrowing is a REVOKE applied after the schema-wide grant, so it is exactly the kind of
+// thing a later edit to grants.sql could drop silently. Asserted against the catalog for that
+// reason rather than trusted to the file.
+func TestBootstrapCeremonyRecordIsInsertOnly(t *testing.T) {
+	pool, ctx := openPool(t)
+
+	const table = "identity.bootstrap_ceremony"
+
+	for _, privilege := range []string{"SELECT", "INSERT"} {
+		if !queryBool(t, pool, ctx,
+			`SELECT has_table_privilege($1, $2, $3)`, runtimeRole, table, privilege) {
+			t.Errorf("%s lacks %s on %s; the ceremony cannot claim or resume", runtimeRole, privilege, table)
+		}
+	}
+
+	for _, privilege := range []string{"UPDATE", "DELETE", "TRUNCATE"} {
+		if queryBool(t, pool, ctx,
+			`SELECT has_table_privilege($1, $2, $3)`, runtimeRole, table, privilege) {
+			t.Errorf("%s holds %s on %s; the ceremony record must be immutable", runtimeRole, privilege, table)
+		}
+	}
+}
+
+// TestBootstrapCeremonyCannotHoldASecondRow asserts the single-use guarantee where it lives.
+//
+// ADR-IAM-001 §5.8 requires the ceremony to be unrepeatable, and the mechanism is a constraint
+// rather than a check in Go: a count() in the application would race two concurrent ceremonies
+// into two Principals, and could be dropped by a refactor with nothing to fail.
+func TestBootstrapCeremonyCannotHoldASecondRow(t *testing.T) {
+	pool, ctx := openPool(t)
+
+	single := queryInt(t, pool, ctx,
+		`SELECT count(*) FROM pg_constraint
+		  WHERE conrelid = 'identity.bootstrap_ceremony'::regclass
+		    AND contype = 'c'
+		    AND conname = 'bootstrap_ceremony_single_row'`)
+	if single != 1 {
+		t.Error("identity.bootstrap_ceremony carries no single-row check constraint; the ceremony is repeatable")
+	}
+
+	primary := queryInt(t, pool, ctx,
+		`SELECT count(*) FROM pg_constraint
+		  WHERE conrelid = 'identity.bootstrap_ceremony'::regclass
+		    AND contype = 'p'`)
+	if primary != 1 {
+		t.Error("identity.bootstrap_ceremony has no primary key; the single-row check alone permits duplicates")
+	}
+
+	// A blank operator would produce evidence naming nobody, which is indistinguishable from
+	// keeping none.
+	named := queryInt(t, pool, ctx,
+		`SELECT count(*) FROM pg_constraint
+		  WHERE conrelid = 'identity.bootstrap_ceremony'::regclass
+		    AND conname = 'bootstrap_ceremony_operator_named'`)
+	if named != 1 {
+		t.Error("identity.bootstrap_ceremony permits a blank operator or reason")
+	}
+}
+
 // TestRuntimeRoleCannotRewriteMigrationHistory closes a leak found by running the pipeline
 // rather than by reading it.
 //

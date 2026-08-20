@@ -22,6 +22,19 @@
       "internal/keycloak"
     ],
     "cmd/identity-migrate": ["internal/controldb"],
+
+    "_comment_bootstrap": [
+      "cmd/identity-bootstrap performs the single ceremony that creates a realm's first",
+      "Principal, per ADR-IAM-001 5.8. It reaches provisioning and keycloak and NOT httpapi:",
+      "the ceremony is a command precisely so that no route exists which creates a Principal",
+      "without an authenticated caller, and an edge to httpapi would be the first step toward",
+      "one."
+    ],
+    "cmd/identity-bootstrap": [
+      "internal/config",
+      "internal/identity/provisioning",
+      "internal/keycloak"
+    ],
     "internal/config": [],
     "internal/controldb": [],
 
