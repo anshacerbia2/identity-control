@@ -3,7 +3,7 @@
 // This file is the composition root and the only place in the repository that constructs
 // anything. Every dependency is built here and passed down explicitly: no package-level
 // singleton, no init() side effect, and nothing started by the act of being linked, per
-// STD-GLB-BE-001 rules 8 and 11.
+// STD-GLB-BE-001 rule 10.
 //
 // The service owns no authentication, no credential store, no session, and no token. Keycloak
 // is the identity kernel and holds all four. What lives here is the canonical Principal
@@ -85,7 +85,7 @@ func run() error {
 		slog.Int("max_conns", int(cfg.DBMaxConns)))
 
 	// The administration credential lives in this process and nowhere else in the estate,
-	// per ADR-IAM-001 §5.5. It is read from configuration once, held by the client, and never
+	// per ADR-IAM-001 §5.10. It is read from configuration once, held by the client, and never
 	// logged: the startup line below names the realm and the base URL and stops there.
 	kernel, err := keycloak.NewAdmin(keycloak.AdminConfig{
 		BaseURL:      cfg.KeycloakBaseURL,

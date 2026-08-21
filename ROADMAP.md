@@ -160,7 +160,7 @@ inconvenience: `TDD-identity-control-001` closes every creation path except `POS
 that endpoint requires a caller holding a `principal_id`, and only that endpoint issues one. A
 fresh production realm had no entry point.
 
-`ADR-IAM-001 §5.8` decided the shape — a single-use ceremony on the deployable — and rejected the
+`ADR-IAM-001 §5.11` decided the shape — a single-use ceremony on the deployable — and rejected the
 standing break-glass identity as `Alternative F`. The reasoning that settled it: a break-glass
 identity creates a credential that can create Principals *forever*, in exchange for solving a
 problem that occurs once, and because it must exist before the service does it can only be placed
@@ -257,7 +257,7 @@ removal, Keycloak administration credential rotation rehearsed, and runbooks wri
 for unmapped-Principal triage, duplicate-identifier containment, pending-mapping
 recovery, and projection drift repair.
 
-**The first-Principal bootstrap blocker is cleared.** `ADR-IAM-001 §5.8` decided it and
+**The first-Principal bootstrap blocker is cleared.** `ADR-IAM-001 §5.11` decided it and
 `cmd/identity-bootstrap` implements it, so standing up a production realm no longer requires the
 out-of-band `INSERT` that `ADR-ORG-001` prohibits. What remains for the production gate is
 operational rather than architectural: the ceremony needs a runbook naming who is authorized to

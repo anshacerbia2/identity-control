@@ -1,10 +1,10 @@
-﻿# Performs the bootstrap ceremony, then makes the resulting Principal usable locally.
+# Performs the bootstrap ceremony, then makes the resulting Principal usable locally.
 #
 # Two steps, and only the first is a production procedure:
 #
 #   1. `identity-bootstrap` — the ceremony. Creates the first Principal through the same path
 #      POST /v1/principals uses, records who ran it and why, and can succeed at most once per
-#      Control Database. ADR-IAM-001 §5.8.
+#      Control Database. ADR-IAM-001 §5.11.
 #
 #   2. Setting a password and clearing the required action. DEVELOPMENT ONLY. The ceremony
 #      deliberately leaves the Principal owing a credential so that no process in the estate

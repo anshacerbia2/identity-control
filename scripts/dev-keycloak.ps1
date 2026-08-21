@@ -1,4 +1,4 @@
-﻿# Prepares a local Keycloak so identity-control can be run against it.
+# Prepares a local Keycloak so identity-control can be run against it.
 #
 # Idempotent: every step checks before it writes, so re-running after a partial failure is
 # safe. Nothing here is a deployment mechanism — the production kernel is configured by the
@@ -13,7 +13,7 @@
 #   $env:IDENTITY_CALLER_SECRET       = '...'   # harness caller client secret
 #
 # This script creates no user. The first Principal is created by the bootstrap ceremony
-# (`scripts/dev-bootstrap.ps1`), because ADR-IAM-001 §5.8 gives that authority to the Identity
+# (`scripts/dev-bootstrap.ps1`), because ADR-IAM-001 §5.11 gives that authority to the Identity
 # Control Service and nothing else. An earlier version of this script minted one out-of-band and
 # said so in a comment; the ceremony exists so that comment is no longer needed.
 #
@@ -262,7 +262,7 @@ foreach ($mapper in $mappers) {
 # ---------------------------------------------------------------------------------------------
 # The first Principal is deliberately NOT created here.
 # ---------------------------------------------------------------------------------------------
-# ADR-IAM-001 5.8 gives the authority to issue a principal_id to the Identity Control Service
+# ADR-IAM-001 5.11 gives the authority to issue a principal_id to the Identity Control Service
 # and to nothing else. A script that wrote the attribute directly would be the out-of-band
 # creation TDD-identity-control-001 prohibits, and an earlier version of this file did exactly
 # that with a comment admitting it. Run the ceremony instead:

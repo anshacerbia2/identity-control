@@ -135,7 +135,7 @@ prohibited path is open, and quarantines it.
 #### The Bootstrap Ceremony
 
 `POST /v1/principals` requires a caller holding a `principal_id`, and it is the only path that
-issues one. A fresh realm therefore has no entry point, and the ceremony is it. `ADR-IAM-001 §5.8`
+issues one. A fresh realm therefore has no entry point, and the ceremony is it. `ADR-IAM-001 §5.11`
 records the decision and why a standing break-glass identity was rejected.
 
 It is a command on the deployable rather than an endpoint, because an endpoint that creates a
@@ -170,7 +170,7 @@ CREATE TABLE identity.bootstrap_ceremony (
 **The ceremony holds no credential.** The kernel user is created with a required
 credential-setting action, so the first human interaction establishes the credential. A ceremony
 that set a password would be a process holding a credential for an identity it also authorized,
-which is the concentration `ADR-IAM-001 §5.2` exists to prevent.
+which is the concentration `ADR-IAM-001 §5.10` exists to prevent.
 
 **Why not simply relax the API for the first call.** A route that accepts an unauthenticated
 request when a table is empty is a route whose authorization depends on data. The table is empty

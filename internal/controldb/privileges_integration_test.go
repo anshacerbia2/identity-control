@@ -162,7 +162,7 @@ func TestRuntimeRoleHoldsNoDDL(t *testing.T) {
 	}
 }
 
-// TestBootstrapCeremonyRecordIsInsertOnly is the privilege half of ADR-IAM-001 §5.8.
+// TestBootstrapCeremonyRecordIsInsertOnly is the privilege half of ADR-IAM-001 §5.11.
 //
 // The ceremony record names the human who created the one Principal nobody else authorized. If
 // the runtime role can UPDATE it, whoever runs the ceremony a second time can rewrite who ran it
@@ -194,7 +194,7 @@ func TestBootstrapCeremonyRecordIsInsertOnly(t *testing.T) {
 
 // TestBootstrapCeremonyCannotHoldASecondRow asserts the single-use guarantee where it lives.
 //
-// ADR-IAM-001 §5.8 requires the ceremony to be unrepeatable, and the mechanism is a constraint
+// ADR-IAM-001 §5.11 requires the ceremony to be unrepeatable, and the mechanism is a constraint
 // rather than a check in Go: a count() in the application would race two concurrent ceremonies
 // into two Principals, and could be dropped by a refactor with nothing to fail.
 func TestBootstrapCeremonyCannotHoldASecondRow(t *testing.T) {

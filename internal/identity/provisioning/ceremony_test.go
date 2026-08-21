@@ -2,7 +2,7 @@ package provisioning_test
 
 // The bootstrap ceremony, stated as tests.
 //
-// The properties under test are the ones ADR-IAM-001 §5.8 commits to, and each is about a refusal
+// The properties under test are the ones ADR-IAM-001 §5.11 commits to, and each is about a refusal
 // rather than a success: the ceremony must be unrepeatable, must refuse a populated registry, must
 // not let a retry rewrite who is on record, and must not hold a credential. A test that only
 // proved the happy path would leave every one of those unchecked.

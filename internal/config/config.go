@@ -45,7 +45,7 @@ type Config struct {
 
 	// KeycloakBaseURL is the kernel root. KeycloakClientID and KeycloakClientSecret are the
 	// administration service account, sourced from the approved secret manager. This process
-	// is the only one in the estate holding them, per ADR-IAM-001 §5.5.
+	// is the only one in the estate holding them, per ADR-IAM-001 §5.10.
 	KeycloakBaseURL      string
 	KeycloakClientID     string
 	KeycloakClientSecret string

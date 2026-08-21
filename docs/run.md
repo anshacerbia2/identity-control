@@ -20,7 +20,7 @@ Not that the process starts — that it behaves the way the governance documents
 | A workload Principal without an accountable owner is refused | TDD-identity-control-001 |
 | A client cannot supply `keycloak_user_id` | TDD-identity-control-001 |
 | The runtime role holds DML and no DDL, and cannot reach Atlas's revision table | ADR-GLB-004 |
-| The first Principal is created by an evidenced ceremony that can succeed once | ADR-IAM-001 §5.8 |
+| The first Principal is created by an evidenced ceremony that can succeed once | ADR-IAM-001 §5.11 |
 | No step writes a Principal out of band | ADR-ORG-001 §5.3 |
 
 ## Prerequisites
@@ -82,7 +82,7 @@ This creates the realm, adds a **PS256 / 3072-bit** signing key, declares the th
 `scnehaux_*` user attributes, and creates both clients with their protocol mappers.
 
 It creates no user. Issuing a `principal_id` is the Identity Control Service's authority and
-nothing else's, per `ADR-IAM-001 §5.8`, so the first Principal comes from the ceremony in step 5.
+nothing else's, per `ADR-IAM-001 §5.11`, so the first Principal comes from the ceremony in step 5.
 
 Two of those steps are not optional, and both were found by running the service rather than by
 reading the configuration:
@@ -117,7 +117,7 @@ The registry is left empty. This script writes no Principal.
 
 This is the entry point into a realm with no Principals. `POST /v1/principals` requires a caller
 holding a `principal_id` and is the only path that issues one, so without the ceremony the API
-cannot be reached at all. `ADR-IAM-001 §5.8` records the decision and why a standing break-glass
+cannot be reached at all. `ADR-IAM-001 §5.11` records the decision and why a standing break-glass
 identity was rejected.
 
 The command prints the identifier and then something that reads like a failure but is not:
@@ -215,7 +215,7 @@ all cases passed.
 
   Earlier versions of this document listed the first Principal as a design gap, because
   `dev-keycloak.ps1` minted one out of band and `dev-database.ps1` inserted the row directly.
-  Both are gone: `ADR-IAM-001 §5.8` decided the ceremony and `cmd/identity-bootstrap` implements
+  Both are gone: `ADR-IAM-001 §5.11` decided the ceremony and `cmd/identity-bootstrap` implements
   it, so no step in this harness writes a Principal the authority did not issue.
 
 - **Direct access grant is enabled on `identity-control-caller`.** It is the only way to get a
