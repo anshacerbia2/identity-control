@@ -33,8 +33,9 @@ envelope, idempotency, and problem-details packages from day one, and reimplemen
 any of them here would produce a second revocation enforcement interval while both
 services reported compliance.
 
-Pinned at `v0.2.1`. `v0.2.0` shipped a platform migration set that could only be applied
-once; see the findings table under Week 2½.
+Pinned at `v0.2.2`. `v0.2.0` shipped a platform migration set that could only be applied
+once — see the findings table under Week 2½ — and `v0.2.2` added the `request-in-progress`
+problem type this service needed.
 
 `identity-kernel` is a parallel track, not a predecessor. Keycloak calls in this
 service sit behind a port with a fake implementation, so the full creation and
@@ -127,7 +128,7 @@ under an authenticated caller rather than globally.
 | `identity.principal_mapping` stored no username, so the recovery retry branch was unwritable | The row now carries the creation payload. Without it, a create failing after the key was claimed left that key in-progress permanently, and the caller retrying with the same key would receive `ErrInProgress` forever with no path out. Recorded as a departure in TDD-identity-control-001 |
 | `RecoverPending` originally took a `CreateRequest` | A sweep resolves many mappings from different requests, so one caller's username would have been applied to all of them. It now reads the payload from each row |
 | TDD-identity-control-004 named a workload lifetime class, then a later revision "corrected" it | Both were wrong, in opposite directions. The class letters were reassigned while two rewrites of STD-IAM-002 ran in parallel: in the standard as merged, `L2` is external and `L3` is workload. This design now states both. The lesson is recorded there: **a lifetime class must be cited with its audience, never by letter alone** — a bare letter resolves to a real class saying something else, so nothing catches it |
-| foundation-platform's problem registry carries no in-progress type | A request duplicating one still in flight maps to `state-transition-refused`, which returns the correct 409 with a slightly wrong name. The registry is compiled and deliberately prevents a handler inventing a type, so this wants a `request-in-progress` entry upstream |
+| foundation-platform's problem registry carried no in-progress type | ✅ Closed upstream in `v0.2.2`. A duplicate in-flight request mapped to `state-transition-refused`: the right 409 with the opposite advice, since a refused transition means no retry will help and this one means the retry is what will. The registry is compiled precisely so a handler cannot invent a type, which is why it had to be fixed there rather than worked around here |
 | A transport failure on a create cannot be distinguished from a lost response | The Admin client classes every statusless mutation as `ErrAmbiguous` and every statusless read as `ErrUnavailable`. Being wrong toward ambiguous costs one extra search; being wrong the other way creates a second Principal |
 
 ### Week 2½ · Running it

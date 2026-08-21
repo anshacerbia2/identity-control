@@ -129,12 +129,12 @@ func writeProvisioningError(w http.ResponseWriter, r *http.Request, err error) {
 			"The key was first used with a different request")
 
 	case errors.Is(err, idempotency.ErrInProgress):
-		// The registry carries no in-progress type. StateTransitionRefused is the closest
-		// entry and returns 409, which is the correct status for a request that duplicates
-		// one still in flight. Recorded in ROADMAP.md as a gap in the shared registry
-		// rather than papered over with a locally invented type, which the registry
-		// deliberately makes impossible.
-		httpapi.Problem(w, r, httpapi.StateTransitionRefused,
+		// RequestInProgress rather than StateTransitionRefused. Both answer 409, and the
+		// distinction is the advice they carry: a refused transition means no retry will help,
+		// while this one means the retry is what will. The registry had no such type until
+		// foundation-platform v0.2.2 added it, which is why an earlier revision here used the
+		// refusal and recorded the gap rather than inventing a local type.
+		httpapi.Problem(w, r, httpapi.RequestInProgress,
 			"An identical request is already in progress; retry after it completes")
 
 	case errors.Is(err, keycloak.ErrConflict):
