@@ -127,18 +127,13 @@ $stored | Add-Member -NotePropertyName firstName       -NotePropertyValue "Boots
 $stored | Add-Member -NotePropertyName lastName        -NotePropertyValue "Operator"  -Force
 $stored | Add-Member -NotePropertyName requiredActions -NotePropertyValue @()         -Force
 
-# The provider scope, granted here because nothing yet decides who may grant one.
+# The provider scope is NOT set here any more.
 #
-# STD-IAM-002 3.1.1 requires a provider-scope token to name a registered bounded authority, and
-# the verifier accepts exactly one value. But granting that authority is an authorization act, and
-# identity-control has authentication without authorization: no artifact says which Principal may
-# hold `provider:identity-control`, or where that grant is recorded and reviewed. Setting it in
-# this dev-only step keeps the gap visible instead of burying it in a plausible-looking mapper.
-# Carried as an open question in ROADMAP.md.
-$attrs = @{}
-if ($stored.attributes) { $stored.attributes.PSObject.Properties | ForEach-Object { $attrs[$_.Name] = $_.Value } }
-$attrs["scnehaux_provider_scope"] = @("provider:identity-control")
-$stored | Add-Member -NotePropertyName attributes -NotePropertyValue $attrs -Force
+# ADR-IAM-001 5.6 places the authority for a provider grant in the Organization Platform,
+# projected into the kernel through ADR-ORG-001 5.4, and makes the bootstrap ceremony the one
+# exception. So the ceremony grants it, inside the same call that creates the Principal and
+# under the same immutable record. An earlier version of this script wrote the attribute
+# directly, which is indistinguishable from the prohibited path once it looks normal.
 Invoke-RestMethod -Method Put -Headers $H -ContentType "application/json" `
     -Uri "$kcBase/admin/realms/$realm/users/$userId" `
     -Body ($stored | ConvertTo-Json -Depth 10) | Out-Null

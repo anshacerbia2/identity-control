@@ -115,6 +115,83 @@ func TestBootstrapHoldsNoCredential(t *testing.T) {
 	}
 }
 
+// TestOnlyTheCeremonyGrantsAProviderScope is ADR-IAM-001 §5.6 expressed as a test.
+//
+// The authority for a provider grant belongs to the Organization Platform, projected into the
+// kernel through ADR-ORG-001 §5.4. The ceremony is the single exception, and the exception has to
+// be bounded by something a later edit cannot widen: the ordinary creation path refuses the field
+// outright, so a handler that started setting it would fail rather than quietly mint authority.
+func TestOnlyTheCeremonyGrantsAProviderScope(t *testing.T) {
+	t.Run("the ceremony grants exactly one registered scope", func(t *testing.T) {
+		tx := &fakeTx{txs: []*dbtest.Tx{
+			ceremonyClaimed("ansha@example.com", "reason", "bootstrap:scnehaux", 0),
+			claimed(), claimed(),
+		}}
+		kernel := keycloakfake.New()
+		response, _, err := newProvisioner(t, tx, kernel).
+			Bootstrap(context.Background(), ceremonyRequest())
+		if err != nil {
+			t.Fatalf("Bootstrap: %v", err)
+		}
+
+		found, err := kernel.FindByPrincipalID(context.Background(), "scnehaux", response.PrincipalID)
+		if err != nil || len(found) != 1 {
+			t.Fatalf("FindByPrincipalID: %v (%d found)", err, len(found))
+		}
+		if got := kernel.ProviderScope(found[0].ID); got != provisioning.CeremonyProviderScope {
+			t.Errorf("provider scope = %q, want %q", got, provisioning.CeremonyProviderScope)
+		}
+	})
+
+	t.Run("the ordinary path grants none", func(t *testing.T) {
+		tx := &fakeTx{txs: []*dbtest.Tx{claimed(), claimed()}}
+		kernel := keycloakfake.New()
+		response, err := newProvisioner(t, tx, kernel).Create(context.Background(), humanCreate())
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		found, err := kernel.FindByPrincipalID(context.Background(), "scnehaux", response.PrincipalID)
+		if err != nil || len(found) != 1 {
+			t.Fatalf("FindByPrincipalID: %v (%d found)", err, len(found))
+		}
+		if got := kernel.ProviderScope(found[0].ID); got != "" {
+			t.Errorf("the ordinary creation path granted provider scope %q", got)
+		}
+	})
+
+	t.Run("an ordinary request asking for one is refused", func(t *testing.T) {
+		request := humanCreate()
+		request.ProviderScope = provisioning.CeremonyProviderScope
+
+		kernel := keycloakfake.New()
+		// No transaction configured: the refusal must happen before anything durable, so a
+		// request that reached the database would fail the fake instead.
+		if _, err := newProvisioner(t, &fakeTx{}, kernel).
+			Create(context.Background(), request); err == nil {
+			t.Fatal("an ordinary request was granted a provider scope")
+		}
+		if kernel.Calls.CreateUser != 0 {
+			t.Errorf("the kernel was called %d times for a refused grant", kernel.Calls.CreateUser)
+		}
+	})
+
+	t.Run("a workload cannot hold one", func(t *testing.T) {
+		// Enforced at the port as well as here, because STD-IAM-002 §3.2 prohibits the claim on
+		// the workload class and a workload authenticating by client credential presents no `acr`
+		// for PAD-PLT-002 §3.3 invariant 22 to evaluate.
+		if err := (keycloak.CreateUserRequest{
+			Realm:         "scnehaux",
+			Username:      "svc.reporting",
+			PrincipalID:   mustUUID(t),
+			SubjectType:   keycloak.SubjectWorkload,
+			WorkloadOwner: mustUUID(t),
+			ProviderScope: provisioning.CeremonyProviderScope,
+		}).Validate(); err == nil {
+			t.Fatal("a workload was accepted with a provider scope")
+		}
+	})
+}
+
 // TestBootstrapRefusesAPopulatedRegistry closes the path by which the ceremony could be used to
 // inject a Principal into a running estate rather than to start one.
 func TestBootstrapRefusesAPopulatedRegistry(t *testing.T) {

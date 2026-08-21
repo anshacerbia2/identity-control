@@ -37,6 +37,18 @@ const ceremonyRowID = 1
 // can never be replayed or consumed by an authenticated caller.
 const ceremonyScope = "ceremony:bootstrap"
 
+// CeremonyProviderScope is the bounded provider authority the ceremony grants to the first
+// Principal.
+//
+// ADR-IAM-001 §5.6 keeps every later grant with the Organization Platform, projected through
+// ADR-ORG-001 §5.4. The ceremony grants this one because it runs before any Organization authority
+// can exist, and a first Principal holding no scope could not reach the API that issues every
+// later Principal — the ceremony would produce an identity that can do nothing.
+//
+// One fixed value rather than a parameter: a ceremony that could be asked for an arbitrary scope
+// would be a way to mint provider authority, bounded only by what the operator typed.
+const CeremonyProviderScope = "provider:identity-control"
+
 var (
 	// ErrCeremonyAlreadyPerformed reports that this Control Database already has its first
 	// Principal. It is a refusal rather than a failure: the ceremony is meant to be
@@ -200,6 +212,7 @@ func (p *Provisioner) Bootstrap(ctx context.Context, req CeremonyRequest) (Respo
 		Username:       req.Username,
 		Email:          req.Email,
 		SubjectType:    keycloak.SubjectHuman,
+		ProviderScope:  CeremonyProviderScope,
 	})
 	if err != nil {
 		return Response{}, record, err

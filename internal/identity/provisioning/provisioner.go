@@ -31,6 +31,11 @@ type CreateRequest struct {
 	Email         string
 	SubjectType   keycloak.SubjectType
 	WorkloadOwner id.UUID
+
+	// ProviderScope is set by the bootstrap ceremony and by nothing else. ADR-IAM-001 §5.6 keeps
+	// the authority for a provider grant in the Organization Platform; validateCreate refuses it
+	// on any request that did not come from the ceremony.
+	ProviderScope string
 }
 
 // Response is what a caller receives. It carries no kernel identifier, and the type is the
@@ -192,6 +197,7 @@ func (p *Provisioner) Create(ctx context.Context, req CreateRequest) (Response, 
 		PrincipalID:   principalID,
 		SubjectType:   req.SubjectType,
 		WorkloadOwner: req.WorkloadOwner,
+		ProviderScope: req.ProviderScope,
 	})
 	if createErr != nil {
 		// The mapping stays pending on purpose. Rolling it back would discard the
@@ -341,6 +347,12 @@ func validateCreate(req CreateRequest) error {
 		return errors.New("provisioning: a workload requires an accountable workload_owner")
 	case req.SubjectType == keycloak.SubjectHuman && !req.WorkloadOwner.IsNil():
 		return errors.New("provisioning: a human must not carry a workload_owner")
+	// ADR-IAM-001 §5.6 places the authority for a provider grant in the Organization Platform, so
+	// no ordinary creation may carry one. Refused here rather than at the HTTP edge, because a
+	// repair script or a future caller reaching this package directly must be held to the same
+	// rule as a request — and the ceremony sets the field after this check by design.
+	case req.CallerScope != ceremonyScope && req.ProviderScope != "":
+		return errors.New("provisioning: only the bootstrap ceremony may grant a provider_scope")
 	}
 	return nil
 }

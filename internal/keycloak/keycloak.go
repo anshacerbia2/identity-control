@@ -93,6 +93,10 @@ const (
 	AttrPrincipalID   = "scnehaux_principal_id"
 	AttrSubjectType   = "scnehaux_subject_type"
 	AttrWorkloadOwner = "scnehaux_workload_owner"
+
+	// AttrProviderScope carries the bounded provider authority. Written by the bootstrap ceremony
+	// and, once organization-control exists, by the projection path in ADR-ORG-001 §5.4.
+	AttrProviderScope = "scnehaux_provider_scope"
 )
 
 // CreateUserRequest is the sole authorized Principal creation payload.
@@ -117,6 +121,17 @@ type CreateUserRequest struct {
 	// and must be nil for a human, which the constraint on
 	// identity.principal_mapping also enforces.
 	WorkloadOwner id.UUID
+
+	// ProviderScope grants a bounded provider authority, and only the bootstrap ceremony sets it.
+	//
+	// ADR-IAM-001 §5.6 places the authority for a provider scope in the Organization Platform and
+	// requires every grant to reach the kernel through the projection path. The ceremony is the
+	// one exception, because §5.11 runs before any Organization authority can exist and a first
+	// Principal holding no scope could not call the API that issues every later one.
+	//
+	// The API creation path leaves this empty, and a test asserts it: a request handler that could
+	// set it would be a route that grants provider authority, which is the thing §5.6 prohibits.
+	ProviderScope string
 }
 
 // ActionUpdatePassword is the kernel's required-action alias for establishing a password.
@@ -170,6 +185,13 @@ func (r CreateUserRequest) Validate() error {
 	}
 	if r.SubjectType == SubjectHuman && !r.WorkloadOwner.IsNil() {
 		return fmt.Errorf("keycloak: a human must not carry a workload_owner")
+	}
+	// A workload cannot hold a provider scope. STD-IAM-002 §3.2 prohibits `provider_scope` on the
+	// `workload` class outright, and PAD-PLT-002 §3.3 invariant 22 requires cross-tenant
+	// administration to carry elevated assurance — which a workload, authenticating by client
+	// credential with no `acr`, cannot present.
+	if r.SubjectType == SubjectWorkload && r.ProviderScope != "" {
+		return fmt.Errorf("keycloak: a workload must not carry a provider_scope")
 	}
 	return nil
 }

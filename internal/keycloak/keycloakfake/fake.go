@@ -94,6 +94,11 @@ type stored struct {
 	// deliberately carries no such field — this service must not read one back — so it is held
 	// beside the user rather than on it, and reachable only through RequiredActions below.
 	requiredActions []string
+
+	// providerScope is what the create call granted. Held beside the user because the port's User
+	// type carries no such field: reading a grant back would make this service a reader of an
+	// authority ADR-IAM-001 §5.6 places in the Organization Platform.
+	providerScope string
 }
 
 // New returns an empty fake.
@@ -142,6 +147,7 @@ func (c *Client) CreateUser(ctx context.Context, req keycloak.CreateUserRequest)
 			WorkloadOwner: req.WorkloadOwner,
 		},
 		requiredActions: req.RequiredActions(),
+		providerScope:   req.ProviderScope,
 	}
 
 	// The user is recorded and the caller is told the call failed. This is the state the
@@ -304,6 +310,13 @@ func (c *Client) RequiredActions(userID keycloak.UserID) []string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.users[userID].requiredActions
+}
+
+// ProviderScope returns what the create call granted, so a test can prove the API path grants none.
+func (c *Client) ProviderScope(userID keycloak.UserID) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.users[userID].providerScope
 }
 
 // Count returns how many users the fake holds.

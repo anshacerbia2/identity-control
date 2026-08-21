@@ -271,15 +271,31 @@ longer.
 | The PS256 key provider was attached to the realm **name** instead of the realm **id** | Keycloak 26 generates the realm id as a UUID. The create returned 201, the component was readable at `?parent=<name>`, and the realm kept signing with its default 2048-bit key. The verifier then refused every token with "signing material is unavailable" because §3.2.2 requires 3072 bits. `dev-keycloak.ps1` now asserts the published key width instead of trusting the call |
 | `Upsert-Client` only created, never updated | Every client configuration change after the first run was silently not applied. A setup script that reports success while applying nothing is worse than one that fails |
 
-#### Open question: who may hold a provider scope
+#### Resolved: who may hold a provider scope
 
-`provider_scope` is mandatory and the verifier accepts exactly one registered value, so the claim
-is enforced. Granting it is not. No artifact says which Principal may hold
-`provider:identity-control`, where that grant is recorded, or who reviews it — and this service has
-authentication without authorization, so nothing here can decide it either. The harness sets the
-attribute in its dev-only step and says so, which keeps the gap visible rather than buried in a
-plausible-looking mapper. It wants a decision in ADR-IAM-001 §5.6, alongside the authorization
-boundary that section already governs.
+Recorded as an open question, then answered by reading the artifacts rather than by deciding
+anything new. `PAD-PLT-002 §3.1` already places provider cross-tenant scope in the Tenancy
+Administration context and `ADR-ORG-001 §5.1` already makes organization-administrative roles the
+Organization Platform's sole authority. The grant therefore travels the projection path
+`ADR-ORG-001 §5.4` fixes for Membership — it is not this platform's to create.
+
+The harness had been setting the kernel attribute directly, which would have made the kernel a
+second authority for a fact Organization owns. `ADR-IAM-001 §5.6` now records the rule and the one
+exception: the bootstrap ceremony grants exactly one scope to exactly one Principal, because §5.11
+runs before any Organization authority can exist and a first Principal holding no scope could not
+reach the API that issues every later one — the ceremony would produce an identity that can do
+nothing.
+
+The bound is structural rather than procedural. `CeremonyProviderScope` is a fixed constant, not a
+parameter, because a ceremony that could be asked for an arbitrary scope would be a way to mint
+provider authority bounded only by what the operator typed. `validateCreate` refuses the field on
+any request whose caller scope is not the ceremony's, so a handler that started setting it fails
+rather than quietly granting. And the port refuses it on a workload outright: `STD-IAM-002 §3.2`
+prohibits the claim there, and a workload authenticating by client credential presents no `acr` for
+`PAD-PLT-002 §3.3` invariant 22 to evaluate.
+
+Verified in the live realm: `bootstrap-operator` carries `provider:identity-control` and the two
+Principals created through the API carry none.
 
 ### Week 3 · Event translation and consumption
 
