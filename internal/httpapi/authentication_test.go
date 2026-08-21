@@ -99,11 +99,33 @@ func token(t *testing.T, extra map[string]any) string {
 	return signed + "." + base64.RawURLEncoding.EncodeToString(signature)
 }
 
+// validClaims is the full `privileged` / `provider-scope` claim set of STD-IAM-002 §3.2.
+//
+// Every entry is mandatory for this audience, so the helper is the specification restated: a claim
+// removed from here is a claim the verifier must refuse, and TestRequirementRejects... asserts that
+// for each one individually.
 func validClaims() map[string]any {
 	return map[string]any{
-		"principal_id": "019235f1-8c4a-7c1e-9d0b-3f4a2b6e5d71",
-		"subject_type": "human",
+		"principal_id":   "019235f1-8c4a-7c1e-9d0b-3f4a2b6e5d71",
+		"subject_type":   "human",
+		"provider_scope": httpapi.ProviderScopeIdentityControl,
+		"acr":            "urn:scnehaux:acr:mfa",
+		"auth_time":      authNow.Add(-2 * time.Minute).Unix(),
 	}
+}
+
+// withClaims returns the valid set with overrides applied. A nil value removes the claim, which is
+// how a test states "this mandatory claim is absent" without rebuilding the whole set.
+func withClaims(overrides map[string]any) map[string]any {
+	claims := validClaims()
+	for name, value := range overrides {
+		if value == nil {
+			delete(claims, name)
+			continue
+		}
+		claims[name] = value
+	}
+	return claims
 }
 
 // scopeEcho reports the caller scope the middleware established, so a test can assert what
@@ -268,11 +290,15 @@ func TestEveryRejectionProducesTheSameDocument(t *testing.T) {
 
 	rejected := map[string]string{
 		"bad signature":   forged(t),
-		"wrong audience":  token(t, map[string]any{"aud": []string{"organization-control"}, "principal_id": "019235f1-8c4a-7c1e-9d0b-3f4a2b6e5d71", "subject_type": "human"}),
-		"expired":         token(t, map[string]any{"exp": authNow.Add(-time.Hour).Unix(), "principal_id": "019235f1-8c4a-7c1e-9d0b-3f4a2b6e5d71", "subject_type": "human"}),
-		"no principal_id": token(t, map[string]any{"subject_type": "human"}),
-		"no subject_type": token(t, map[string]any{"principal_id": "019235f1-8c4a-7c1e-9d0b-3f4a2b6e5d71"}),
-		"unknown subject": token(t, map[string]any{"principal_id": "019235f1-8c4a-7c1e-9d0b-3f4a2b6e5d71", "subject_type": "service"}),
+		"wrong audience":  token(t, withClaims(map[string]any{"aud": []string{"organization-control"}})),
+		"expired":         token(t, withClaims(map[string]any{"exp": authNow.Add(-time.Hour).Unix()})),
+		"no principal_id": token(t, withClaims(map[string]any{"principal_id": nil})),
+		"no subject_type": token(t, withClaims(map[string]any{"subject_type": nil})),
+		"unknown subject": token(t, withClaims(map[string]any{"subject_type": "service"})),
+		"no provider":     token(t, withClaims(map[string]any{"provider_scope": nil})),
+		"tenant present":  token(t, withClaims(map[string]any{"tenant_id": "019235f1-0000-7000-8000-000000000001"})),
+		"no acr":          token(t, withClaims(map[string]any{"acr": nil})),
+		"no auth_time":    token(t, withClaims(map[string]any{"auth_time": nil})),
 		"malformed":       "not.a.token",
 	}
 
@@ -286,7 +312,8 @@ func TestEveryRejectionProducesTheSameDocument(t *testing.T) {
 				t.Fatalf("status = %d, want 401: %s", w.Code, w.Body.String())
 			}
 			body := w.Body.String()
-			for _, leak := range []string{"signature", "issuer", "audience", "expired", "kid", "principal_id", "subject_type"} {
+			for _, leak := range []string{"signature", "issuer", "audience", "expired", "kid",
+				"principal_id", "subject_type", "provider_scope", "tenant_id", "auth_time"} {
 				if strings.Contains(strings.ToLower(body), leak) {
 					t.Errorf("the response names %q: %s", leak, body)
 				}
@@ -303,19 +330,25 @@ func TestEveryRejectionProducesTheSameDocument(t *testing.T) {
 	}
 }
 
-// TestRequirementRejectsEitherMissingClaim exercises the rule this service supplies. It is where
-// STD-IAM-002 §3.5 rule 6 is enforced, because foundation-platform may not name the claim.
-func TestRequirementRejectsEitherMissingClaim(t *testing.T) {
+// TestRequirementRejectsEveryMissingMandatoryClaim walks the `privileged` / `provider-scope`
+// column of STD-IAM-002 §3.2 one claim at a time.
+//
+// One case per claim rather than one case with several missing: a rule that rejected only when two
+// claims were absent together would pass a combined test and let a single-claim omission through.
+func TestRequirementRejectsEveryMissingMandatoryClaim(t *testing.T) {
 	cases := map[string]map[string]any{
-		"neither claim":        {},
-		"no principal_id":      {"subject_type": "human"},
-		"no subject_type":      {"principal_id": "019235f1-8c4a-7c1e-9d0b-3f4a2b6e5d71"},
-		"unknown subject type": {"principal_id": "019235f1-8c4a-7c1e-9d0b-3f4a2b6e5d71", "subject_type": "agent"},
+		"no claims at all":     {"principal_id": nil, "subject_type": nil, "provider_scope": nil, "acr": nil, "auth_time": nil},
+		"no principal_id":      {"principal_id": nil},
+		"no subject_type":      {"subject_type": nil},
+		"unknown subject type": {"subject_type": "agent"},
+		"no provider_scope":    {"provider_scope": nil},
+		"no acr":               {"acr": nil},
+		"no auth_time":         {"auth_time": nil},
 	}
 
-	for name, claims := range cases {
+	for name, overrides := range cases {
 		t.Run(name, func(t *testing.T) {
-			if _, err := realVerifier(t).Verify(token(t, claims)); err == nil {
+			if _, err := realVerifier(t).Verify(token(t, withClaims(overrides))); err == nil {
 				t.Fatal("the requirement accepted a token it should refuse")
 			}
 		})
@@ -323,19 +356,62 @@ func TestRequirementRejectsEitherMissingClaim(t *testing.T) {
 
 	// A workload token satisfies the rule too: the claim must be one of the two values, not one
 	// specific value.
-	if _, err := realVerifier(t).Verify(token(t, map[string]any{
+	if _, err := realVerifier(t).Verify(token(t, withClaims(map[string]any{
 		"principal_id": "019236a1-8c4a-7c1e-9d0b-3f4a2b6e5d71", "subject_type": "workload",
-	})); err != nil {
+	}))); err != nil {
 		t.Errorf("a workload token was refused: %v", err)
+	}
+}
+
+// TestScopeFormMustBeUnambiguous is STD-IAM-002 §3.5 rule 9.
+//
+// A privileged token carrying both context claims, or neither, has no determinable bounded
+// authority. The standard refuses rather than resolving the ambiguity, because the two plausible
+// resolutions differ in exactly the wrong direction: reading it as tenant-scoped would silently
+// narrow a provider action, and reading it as provider-scope would silently widen a tenant one.
+func TestScopeFormMustBeUnambiguous(t *testing.T) {
+	cases := map[string]map[string]any{
+		"both claims present": {"tenant_id": "019235f1-0000-7000-8000-000000000001"},
+		"neither claim":       {"provider_scope": nil},
+		"tenant only":         {"provider_scope": nil, "tenant_id": "019235f1-0000-7000-8000-000000000001"},
+	}
+
+	for name, overrides := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := realVerifier(t).Verify(token(t, withClaims(overrides))); err == nil {
+				t.Fatal("a token with an ambiguous scope form was accepted")
+			}
+		})
+	}
+}
+
+// TestOnlyARegisteredProviderScopeIsAccepted closes the widening path. §3.1.1 requires the claim to
+// name a registered scope, so any non-empty string being enough would make the bound decorative and
+// would accept a token minted for a different provider surface.
+func TestOnlyARegisteredProviderScopeIsAccepted(t *testing.T) {
+	for _, scope := range []string{
+		"", "provider:*", "*", "all", "provider:organization-control", "identity-control",
+	} {
+		t.Run(scope, func(t *testing.T) {
+			if _, err := realVerifier(t).Verify(token(t, withClaims(
+				map[string]any{"provider_scope": scope}))); err == nil {
+				t.Errorf("provider_scope %q was accepted", scope)
+			}
+		})
+	}
+
+	if _, err := realVerifier(t).Verify(token(t, withClaims(
+		map[string]any{"provider_scope": httpapi.ProviderScopeIdentityControl}))); err != nil {
+		t.Errorf("the registered scope was refused: %v", err)
 	}
 }
 
 // TestRequirementMessagesNameTheClaimAndNotItsValue matters because the verifier wraps this error
 // and a caller may log it. A value quoted here would travel further than the token did.
 func TestRequirementMessagesNameTheClaimAndNotItsValue(t *testing.T) {
-	_, err := realVerifier(t).Verify(token(t, map[string]any{
-		"principal_id": "019235f1-8c4a-7c1e-9d0b-3f4a2b6e5d71", "subject_type": "agent",
-	}))
+	_, err := realVerifier(t).Verify(token(t, withClaims(map[string]any{
+		"subject_type": "agent",
+	})))
 	if err == nil {
 		t.Fatal("an unknown subject_type was accepted")
 	}

@@ -18,7 +18,7 @@
 #   $env:IDENTITY_APP_PASSWORD = '...' # the login role identity-control authenticates as
 #
 # This script writes no Principal. An earlier version had a -SeedBootstrapPrincipal switch that
-# inserted one directly; that is the out-of-band write ADR-ORG-001 §5.3 prohibits, and the
+# inserted one directly; that is the out-of-band write ADR-IAM-001 §5.11 prohibits, and the
 # bootstrap ceremony (`scripts/dev-bootstrap.ps1`) replaced it.
 #
 # Usage: pwsh ./scripts/dev-database.ps1
@@ -44,8 +44,13 @@ $psql  = if ($env:PSQL) { $env:PSQL } else { "psql" }
 $atlas = if ($env:ATLAS) { $env:ATLAS } else { "atlas" }
 $superPassword = $env:PGPASSWORD
 
+# PGOPTIONS silences NOTICE. A NOTICE is not a failure — "role is already a member" is the
+# idempotent path succeeding — but PowerShell 5.1 wraps any native stderr line in an ErrorRecord,
+# so under `$ErrorActionPreference = "Stop"` a NOTICE aborts the script while psql reports success.
+# The exit code is the authority on whether psql failed, and it is checked below.
 function Invoke-Psql($db, $sql) {
     $env:PGPASSWORD = $superPassword
+    $env:PGOPTIONS  = "-c client_min_messages=warning"
     & $psql -U $pgSuper -h $pgHost -p $pgPort -d $db -v ON_ERROR_STOP=1 -q -c $sql
     if ($LASTEXITCODE -ne 0) { throw "psql failed on $db" }
 }

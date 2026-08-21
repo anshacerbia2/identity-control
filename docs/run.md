@@ -21,7 +21,9 @@ Not that the process starts — that it behaves the way the governance documents
 | A client cannot supply `keycloak_user_id` | TDD-identity-control-001 |
 | The runtime role holds DML and no DDL, and cannot reach Atlas's revision table | ADR-GLB-004 |
 | The first Principal is created by an evidenced ceremony that can succeed once | ADR-IAM-001 §5.11 |
-| No step writes a Principal out of band | ADR-ORG-001 §5.3 |
+| Only a `privileged` / `provider-scope` token is accepted | STD-IAM-002 §3.1.1, §3.2, §3.5 |
+| The token lifetime is class `L0` — four minutes | STD-IAM-002 §3.3 |
+| No step writes a Principal out of band | ADR-IAM-001 §5.11 |
 
 ## Prerequisites
 
@@ -218,12 +220,21 @@ all cases passed.
   Both are gone: `ADR-IAM-001 §5.11` decided the ceremony and `cmd/identity-bootstrap` implements
   it, so no step in this harness writes a Principal the authority did not issue.
 
-- **Direct access grant is enabled on `identity-control-caller`.** It is the only way to get a
-  token without a browser. STD-IAM-001 §3.2 forbids the flow outside development, and the client
-  name says so.
+- **No direct access grant.** An earlier version of this harness used one and cited a prohibition
+  in STD-IAM-001 §3.2 that did not exist. The standard now prohibits the grant for every client,
+  and the grant could not have produced a conformant `privileged` token anyway: `auth_time` exists
+  only for an authentication ceremony, and a direct grant has none.
+
+  `scripts/dev-token.ps1` performs Authorization Code with PKCE `S256` against the kernel's own
+  login form, without a browser. One deviation remains inside it and is commented there: Keycloak
+  marks its login cookies `Secure`, a browser accepts them on `http://localhost` because that is a
+  secure context by specification, and `System.Net.CookieContainer` implements no such exception.
+  The script re-adds them with the flag cleared. Over a real network the cookies stay `Secure` and
+  that code path is never reached.
 
 - **No TLS anywhere.** Keycloak in dev mode, `sslmode=disable` on both DSNs. Correct for a
-  loopback harness and forbidden by STD-GLB-005 for anything else.
+  loopback harness and forbidden by STD-GLB-005 for anything else. It is also the reason for the
+  cookie handling noted above.
 
 - **No broker.** Week 3 adds event consumption and the Keycloak context projection, which needs
   Kafka. Nothing in this harness publishes or consumes.

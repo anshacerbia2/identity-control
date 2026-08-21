@@ -1,4 +1,4 @@
-# Performs the bootstrap ceremony, then makes the resulting Principal usable locally.
+﻿# Performs the bootstrap ceremony, then makes the resulting Principal usable locally.
 #
 # Two steps, and only the first is a production procedure:
 #
@@ -126,6 +126,19 @@ Invoke-RestMethod -Method Put -Headers $H -ContentType "application/json" `
 $stored | Add-Member -NotePropertyName firstName       -NotePropertyValue "Bootstrap" -Force
 $stored | Add-Member -NotePropertyName lastName        -NotePropertyValue "Operator"  -Force
 $stored | Add-Member -NotePropertyName requiredActions -NotePropertyValue @()         -Force
+
+# The provider scope, granted here because nothing yet decides who may grant one.
+#
+# STD-IAM-002 3.1.1 requires a provider-scope token to name a registered bounded authority, and
+# the verifier accepts exactly one value. But granting that authority is an authorization act, and
+# identity-control has authentication without authorization: no artifact says which Principal may
+# hold `provider:identity-control`, or where that grant is recorded and reviewed. Setting it in
+# this dev-only step keeps the gap visible instead of burying it in a plausible-looking mapper.
+# Carried as an open question in ROADMAP.md.
+$attrs = @{}
+if ($stored.attributes) { $stored.attributes.PSObject.Properties | ForEach-Object { $attrs[$_.Name] = $_.Value } }
+$attrs["scnehaux_provider_scope"] = @("provider:identity-control")
+$stored | Add-Member -NotePropertyName attributes -NotePropertyValue $attrs -Force
 Invoke-RestMethod -Method Put -Headers $H -ContentType "application/json" `
     -Uri "$kcBase/admin/realms/$realm/users/$userId" `
     -Body ($stored | ConvertTo-Json -Depth 10) | Out-Null

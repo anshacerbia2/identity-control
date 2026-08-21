@@ -270,14 +270,21 @@ mechanisms do not apply. Two do:
 | Consumer read model updated | An already-issued access token naming the revoked context is rejected |
 
 Enforcement is therefore bounded by the propagation time plus the remaining access
-token lifetime of class `L1`, which STD-IAM-002 §3.3 sets at nine minutes for a
+token lifetime of class `L3`, which STD-IAM-002 §3.3 sets at nine minutes for the
 `workload` audience. A workload cannot extend that by refreshing, because refresh tokens
 are prohibited for the `workload` profile in `TDD-identity-control-003`.
 
-An earlier revision of this design named class `L3`. That is the `external` class, and a
-workload is not an external relying party: `L3` carries the external claim profile, which
-omits `principal_id` and `workload_owner` and would therefore make the accountability
-chain this design exists to establish unreadable at the verifier.
+Two earlier revisions got this wrong in opposite directions, and the reason is worth
+recording: the class letters were reassigned while two rewrites of STD-IAM-002 ran in
+parallel. One revision named `L3` believing it was external; a later one "corrected" it to
+`L1` against the other rewrite, where `L3` was indeed external. In the standard as merged,
+`L2` is the external and partner class and `L3` is the workload class, both at the lifetimes
+above. `TDD-identity-experience-004` has carried the merged table correctly throughout.
+
+**A lifetime class MUST be cited together with its audience, never by letter alone.** Citing
+`L3` by itself resolved to a real class saying something else, so neither the linter nor a
+reviewer had anything to catch: a reference that resolves to the wrong text fails silently,
+while a dangling one at least fails.
 
 Suspending a workload additionally revokes its client credential, which stops the next
 exchange outright.

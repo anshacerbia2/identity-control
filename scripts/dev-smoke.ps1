@@ -32,16 +32,12 @@ foreach ($name in @("IDENTITY_CALLER_SECRET", "IDENTITY_CALLER_PASSWORD")) {
 
 Add-Type -AssemblyName System.Net.Http
 
-$tokenResponse = Invoke-RestMethod -Method Post -ContentType "application/x-www-form-urlencoded" `
-    -Uri "$kcBase/realms/$realm/protocol/openid-connect/token" -Body @{
-        grant_type    = "password"
-        client_id     = "identity-control-caller"
-        client_secret = $env:IDENTITY_CALLER_SECRET
-        username      = "bootstrap-operator"
-        password      = $env:IDENTITY_CALLER_PASSWORD
-        scope         = "openid"
-    }
-$token = $tokenResponse.access_token
+# Authorization Code with PKCE, driven by scripts/dev-token.ps1. The direct access grant this
+# used to call is prohibited by STD-IAM-001 3.2 and could not have produced a conformant
+# privileged token: auth_time exists only for an authentication ceremony.
+. "$PSScriptRoot\dev-token.ps1"
+$token = Get-ScnehauxToken -Username "bootstrap-operator" `
+    -Password $env:IDENTITY_CALLER_PASSWORD -ClientSecret $env:IDENTITY_CALLER_SECRET
 
 function Decode-Segment($segment) {
     $s = $segment.Replace('-', '+').Replace('_', '/')
