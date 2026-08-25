@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-002
   title: Keycloak Context Projection, Session Removal, and Drift Reconciliation
   owner: Core Platform Team
-  version: 0.3.0
+  version: 1.0.0
   status: approved
   classification: restricted
   review_cycle_days: 90

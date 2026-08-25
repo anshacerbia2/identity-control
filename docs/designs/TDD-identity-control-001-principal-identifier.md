@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-001
   title: Canonical Principal Identifier and Creation Path
   owner: Core Platform Team
-  version: 0.4.0
+  version: 1.0.0
   status: approved
   classification: restricted
   review_cycle_days: 90
