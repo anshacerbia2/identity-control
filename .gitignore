@@ -19,3 +19,10 @@ atlas.sum.tmp
 *.swp
 .DS_Store
 Thumbs.db
+
+# Local development environment. .env.example is committed; the real one is not -- it holds
+# credentials, including the Keycloak client secret.
+.env
+.fmt.tmp
+.pkgs.tmp
+coverage.out
