@@ -46,7 +46,23 @@ func TestLoadRejectsWhitespaceOnlyDatabaseURL(t *testing.T) {
 	}
 }
 
+// TestLoadAppliesDefaults clears the optional keys before asserting their defaults.
+//
+// It used to set only the required ones and inherit the rest of the process environment, so it
+// asserted "the default applies" while the answer depended on the shell it ran in. A developer
+// with IDENTITY_LISTEN_ADDRESS exported — from a .env, a shell profile, or a Makefile that
+// exports one — saw `ListenAddress = "127.0.0.1:8097", want :8080`: a failure that says the
+// defaults are wrong when the defaults were never consulted.
 func TestLoadAppliesDefaults(t *testing.T) {
+	for _, key := range []string{
+		"IDENTITY_LISTEN_ADDRESS",
+		"DB_MAX_CONNS",
+		"HTTP_MAX_IN_FLIGHT",
+		"HTTP_REQUEST_TIMEOUT",
+	} {
+		t.Setenv(key, "")
+	}
+
 	t.Setenv("IDENTITY_DATABASE_URL", "postgres://runtime@localhost:5432/identity")
 	t.Setenv("IDENTITY_KEYCLOAK_REALM", "scnehaux")
 	t.Setenv("IDENTITY_KEYCLOAK_BASE_URL", "https://identity.example.com")
