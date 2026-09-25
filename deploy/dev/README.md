@@ -78,6 +78,68 @@ pwsh ./scripts/dev-smoke.ps1
 To call the API from off the server, add port `8082` to the tunnel. Keep it owner-only unless
 something else must reach it. Every mutation is refused without a provider-scope token either way.
 
+## Running the code from a laptop
+
+A realm has exactly one identity-control authority: one Control Database. A second instance with
+its own database would break three things:
+
+- **Mappings:** it would hold mappings the first has never seen.
+- **Reconciler:** each instance's reconciler would read the other's Principals as orphans and
+  disable them (TDD-identity-control-001).
+- **Ceremony:** its bootstrap ceremony would collide with the existing `bootstrap-operator`.
+
+So a laptop does not run a second authority. It runs a second *replica* of this one: the server's
+Control Database, the server's client secret, and the server's Keycloak. The service is built for
+several replicas, because idempotency and the outbox live in the database. Migrations stay with the
+server's migration job, so the laptop needs no Postgres and no Atlas.
+
+On the server, publish the Control Database on loopback from a local, uncommitted override, and
+add the port to the tunnel as **owner-only**:
+
+```yaml
+# compose.override.yaml
+services:
+  postgres:
+    ports: ["127.0.0.1:5433:5432"]
+```
+
+```sh
+docker compose up -d
+devtunnel port create <tunnel> -p 5433      # no --anonymous: owner-only
+```
+
+On the laptop, forward the tunnel's ports to localhost and keep that running. That forwards
+`8081` (Keycloak's private port) and `5433` (the Control Database). Then run the service with the
+server's values from `deploy/dev/.env`:
+
+```powershell
+devtunnel connect <tunnel>
+
+$env:IDENTITY_DATABASE_URL           = "postgres://identity_app:<IDENTITY_APP_PASSWORD>@localhost:5433/identity_control?sslmode=disable"
+$env:IDENTITY_LISTEN_ADDRESS         = ':8090'
+$env:IDENTITY_KEYCLOAK_REALM         = 'scnehaux'
+$env:IDENTITY_KEYCLOAK_BASE_URL      = 'http://localhost:8081'
+$env:IDENTITY_KEYCLOAK_CLIENT_ID     = 'identity-control'
+$env:IDENTITY_KEYCLOAK_CLIENT_SECRET = '<IDENTITY_KEYCLOAK_CLIENT_SECRET>'
+$env:IDENTITY_TOKEN_ISSUER           = '<KEYCLOAK_ISSUER>'
+$env:IDENTITY_TOKEN_AUDIENCE         = 'identity-control'
+$env:IDENTITY_JWKS_URL               = 'http://localhost:8081/realms/scnehaux/protocol/openid-connect/certs'
+go run ./cmd/identity-control
+```
+
+- **Keycloak:** the Admin API must be reached on the private port. The public port refuses
+  `/admin` to everyone, which is what keeps it off the internet.
+- **Do not run `scripts/dev-keycloak.ps1` against this realm.** It sets the clients' secrets from
+  your environment, and the server's replica would lose access to Keycloak. The clients are already
+  registered, by `create-kernel-clients.sh`.
+- **Do not run the ceremony again.** It succeeded once, on the server, and belongs to this Control
+  Database.
+- **Server replica:** it may keep running alongside the laptop's. If you would rather have every
+  request land on your code, stop it with `docker compose stop identity-control`.
+- **Schema changes still go through the server.** A migration you are developing is applied by the
+  migration job after you push, never by hand from the laptop. The runtime role cannot run DDL
+  anyway.
+
 ## What it does not do
 
 - **It writes nothing into the realm.** Scopes, attributes, and keys are `identity-kernel`'s
