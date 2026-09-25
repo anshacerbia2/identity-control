@@ -17,6 +17,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -46,6 +48,8 @@ type kernel struct {
 	lastQuery     string
 	lastBody      []byte
 	lastAuth      string
+	// adminBodyFor, when set, answers per request instead of adminBody -- for a kernel that pages.
+	adminBodyFor func(query url.Values) string
 }
 
 func (k *kernel) handler() http.Handler {
@@ -84,7 +88,9 @@ func (k *kernel) handler() http.Handler {
 			status = http.StatusOK
 		}
 		w.WriteHeader(status)
-		if k.adminBody != "" {
+		if k.adminBodyFor != nil {
+			_, _ = io.WriteString(w, k.adminBodyFor(r.URL.Query()))
+		} else if k.adminBody != "" {
 			_, _ = io.WriteString(w, k.adminBody)
 		}
 	})
@@ -310,6 +316,81 @@ func TestFindFiltersToExactEquality(t *testing.T) {
 	}
 	if !strings.Contains(k.lastQuery, keycloak.AttrPrincipalID) {
 		t.Errorf("the query does not name the attribute: %s", k.lastQuery)
+	}
+}
+
+// TestFindReadsEveryPage is the many-match case. The caller quarantines every user sharing an
+// identifier, so a search that stopped at its first page would leave the rest enabled. The kernel
+// here pages the way the pinned release does (identity-kernel question 2): by first and max.
+func TestFindReadsEveryPage(t *testing.T) {
+	shared := newUUID(t)
+	const holders = 45
+	k := &kernel{adminBodyFor: func(query url.Values) string {
+		first, _ := strconv.Atoi(query.Get("first"))
+		max, _ := strconv.Atoi(query.Get("max"))
+		var page []string
+		for i := first; i < holders && i < first+max; i++ {
+			page = append(page, fmt.Sprintf(`{"id":"kc-%d","username":"u%d","enabled":true,`+
+				`"attributes":{"scnehaux_principal_id":["%s"]}}`, i, i, shared))
+		}
+		return "[" + strings.Join(page, ",") + "]"
+	}}
+
+	admin, _ := newAdmin(t, k)
+	found, err := admin.FindByPrincipalID(context.Background(), testRealm, shared)
+	if err != nil {
+		t.Fatalf("FindByPrincipalID: %v", err)
+	}
+	if len(found) != holders {
+		t.Fatalf("found %d of %d users sharing one identifier: quarantine would leave %d enabled",
+			len(found), holders, holders-len(found))
+	}
+}
+
+// TestFindStopsWhenTheKernelIgnoresPaging guards the loop. A kernel that answers every page with
+// the same full page must end the search rather than hold the caller forever.
+func TestFindStopsWhenTheKernelIgnoresPaging(t *testing.T) {
+	shared := newUUID(t)
+	var page []string
+	for i := range 20 {
+		page = append(page, fmt.Sprintf(`{"id":"kc-%d","username":"u%d","enabled":true,`+
+			`"attributes":{"scnehaux_principal_id":["%s"]}}`, i, i, shared))
+	}
+	k := &kernel{adminBody: "[" + strings.Join(page, ",") + "]"}
+
+	admin, _ := newAdmin(t, k)
+	found, err := admin.FindByPrincipalID(context.Background(), testRealm, shared)
+	if err != nil {
+		t.Fatalf("FindByPrincipalID: %v", err)
+	}
+	if len(found) != 20 {
+		t.Errorf("found %d users, want the 20 distinct ones", len(found))
+	}
+	if calls := k.adminCalls.Load(); calls != 2 {
+		t.Errorf("made %d search calls, want 2: one page, and one that proved paging is ignored", calls)
+	}
+}
+
+// TestFindTreatsACaseVariantAsTheSameIdentifier follows the kernel. The pinned release's attribute
+// search is case-insensitive, so a stored uppercase variant is returned for the lowercase query; it
+// is the same identifier, and dropping it would hide a duplicate from quarantine.
+func TestFindTreatsACaseVariantAsTheSameIdentifier(t *testing.T) {
+	wanted := newUUID(t)
+	k := &kernel{adminBody: fmt.Sprintf(`[
+	  {"id":"kc-1","username":"lower","enabled":true,"attributes":{"scnehaux_principal_id":["%s"]}},
+	  {"id":"kc-2","username":"upper","enabled":true,"attributes":{"scnehaux_principal_id":["%s"]}}
+	]`, wanted, strings.ToUpper(wanted.String()))}
+
+	admin, _ := newAdmin(t, k)
+	found, err := admin.FindByPrincipalID(context.Background(), testRealm, wanted)
+	if err != nil {
+		t.Fatalf("FindByPrincipalID: %v", err)
+	}
+	if len(found) != 2 {
+		t.Fatalf("found %d users, want both: a case variant is the same identifier to the kernel", len(found))
+	}
+	if !strings.Contains(k.lastQuery, strings.ToLower(wanted.String())) {
+		t.Errorf("the query does not carry the canonical lowercase identifier: %s", k.lastQuery)
 	}
 }
 

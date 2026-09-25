@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-001
   title: Canonical Principal Identifier and Creation Path
   owner: Core Platform Team
-  version: 1.0.0
+  version: 1.1.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-10
-  last_reviewed: 2026-08-14
+  last_reviewed: 2026-09-25
   parent_sad: SAD-001
 ---
 
@@ -263,9 +263,27 @@ The canonical identifier is stored as a user attribute:
 }
 ```
 
-The attribute is treated as immutable. Realm configuration removes it from the
-user-editable attribute set so that account self-service and administrator edits
-cannot alter it.
+The attribute is treated as immutable. Keycloak enforces this against the user, but
+not against an administrator.
+
+- **Self-service is closed.** Realm configuration removes the attribute from the
+  user-editable set, and the account API refuses a change.
+- **An administrator's edit is applied.** No declarative profile can make the attribute
+  write-once. `identity-kernel` proof-of-concept question 3 answered this against the
+  pinned release: an attribute nobody may edit is silently dropped at creation.
+
+Immutability against administrators therefore rests on two things:
+
+- **Who holds `manage-users`.** This service's Admin API client is the only holder
+  outside break-glass. That role can already reset any user's credentials, so rewriting
+  an identifier gives it nothing new.
+- **Reconciler detection.** A rewritten identifier reads as an orphan, or as a duplicate
+  when it names another Principal. Either way the user is disabled on the next sweep, and
+  until then the rewritten value is carried into tokens.
+
+The identifier is always written as the canonical lowercase form `id.UUID.String`
+produces. The kernel's attribute search is case-insensitive, so two values differing only
+in case are one identifier to it.
 
 ### Token Claim
 
@@ -313,9 +331,19 @@ active human `workload_owner`. `keycloak_user_id` is never present in any respon
 | Enumerate users | `GET /admin/realms/{realm}/users` (paged) | Reconciliation sweep |
 | Disable user | `PUT /admin/realms/{realm}/users/{id}` | Quarantine |
 
-Attribute search behavior differs across Keycloak releases. The proof-of-concept
-verifies that attribute search is exact-match and returns the created user against
-the pinned release before implementation begins.
+Attribute search behavior differs across Keycloak releases. `identity-kernel`
+proof-of-concept question 2 answered it against the pinned release (26.7.4):
+
+- **Exact.** No prefix, substring, or extension matches.
+- **Case-insensitive.**
+- **Disabled users.** They are found.
+- **Paging.** `first` and `max` page without loss.
+- **Uniqueness.** It is not enforced.
+
+`compat/` fails a release that loosens the match. `FindByPrincipalID` still filters to
+exact equality, and it reads every page, because the many-match branch quarantines every
+match. A disable sent as `{"enabled": false}` keeps the identifier, and `compat/` asserts
+that too.
 
 ## Algorithms / Logic
 
@@ -546,9 +574,13 @@ appears in structured logs; `keycloak_user_id` does not.
 This design leaves `draft` when the following are answered against the pinned
 Keycloak release:
 
-1. Attribute search exact-match behavior and pagination semantics.
+1. Attribute search exact-match behavior and pagination semantics. **Answered
+   2026-09-25: exact, case-insensitive, pages without loss.** See §Keycloak Admin API.
 2. Protocol mapper coverage across access token, ID token, UserInfo, and
-   introspection.
-3. Declarative user profile enforcement of attribute immutability.
+   introspection. **Answered 2026-09-25: all four covered**, so the target configuration
+   is adopted.
+3. Declarative user profile enforcement of attribute immutability. **Answered
+   2026-09-25: enforced against the user, detected rather than enforced against an
+   administrator.** See §Data Model.
 4. Whether the issuer path form permits a vendor-neutral value, which determines the
    `iss` component of the identity pair retained in evidence.

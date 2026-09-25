@@ -158,35 +158,55 @@ func (a *Admin) CreateUser(ctx context.Context, req CreateUserRequest) (UserID, 
 	return "", fmt.Errorf("keycloak: created a user but the Location header carried no identifier: %w", ErrAmbiguous)
 }
 
+// findPageSize is the attribute-search page. The attribute is unique by invariant, so a second
+// page is only ever fetched when that invariant is already violated.
+const findPageSize = 20
+
 // FindByPrincipalID returns every user whose canonical identifier attribute equals the value.
 //
-// The kernel's attribute query semantics are unsettled against the pinned release, so the
-// result is filtered to exact equality here. A prefix or substring query therefore cannot
-// widen what this method returns, and the caller's cardinality check remains the second half
-// of the same defence.
+// Against the pinned release (identity-kernel proof-of-concept question 2) the query is exact
+// and case-insensitive, finds disabled users, and pages without loss. The result is still
+// filtered to exact equality here: it costs nothing, and a release that loosened the match
+// would otherwise hand recovery a stranger's user. Parsing normalises case, so a value
+// differing only in case compares equal — which is what the kernel's own index says it is.
+//
+// Every page is read. The many-match case is the one the caller quarantines, and it quarantines
+// every match; a single page would leave the twenty-first duplicate enabled until the sweep.
 func (a *Admin) FindByPrincipalID(ctx context.Context, realm Realm, principalID id.UUID) ([]User, error) {
 	if principalID.IsNil() {
 		return nil, errors.New("keycloak: refusing to search for a nil principal_id")
 	}
 
-	query := url.Values{}
-	query.Set("q", fmt.Sprintf("%s:%s", AttrPrincipalID, principalID.String()))
-	// The attribute is unique by invariant, so a page larger than a handful only matters
-	// when that invariant is already violated — which is the case the caller quarantines.
-	query.Set("max", "20")
+	var exact []User
+	seen := map[UserID]bool{}
+	for first := 0; ; first += findPageSize {
+		query := url.Values{}
+		query.Set("q", fmt.Sprintf("%s:%s", AttrPrincipalID, principalID.String()))
+		query.Set("first", strconv.Itoa(first))
+		query.Set("max", strconv.Itoa(findPageSize))
 
-	users, err := a.listUsers(ctx, realm, query)
-	if err != nil {
-		return nil, err
-	}
+		users, err := a.listUsers(ctx, realm, query)
+		if err != nil {
+			return nil, err
+		}
 
-	exact := make([]User, 0, len(users))
-	for _, user := range users {
-		if user.PrincipalID == principalID {
-			exact = append(exact, user)
+		fresh := 0
+		for _, user := range users {
+			if seen[user.ID] {
+				continue
+			}
+			seen[user.ID] = true
+			fresh++
+			if user.PrincipalID == principalID {
+				exact = append(exact, user)
+			}
+		}
+		// A short page is the end. A full page of users already seen means the kernel ignored
+		// first, and reading on would loop forever over the same page.
+		if len(users) < findPageSize || fresh == 0 {
+			return exact, nil
 		}
 	}
-	return exact, nil
 }
 
 // ListUsers enumerates a page for the reconciliation sweep.
