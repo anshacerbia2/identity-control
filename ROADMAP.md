@@ -316,8 +316,8 @@ none of them blocks the work above.
 
 | Component | Blocked by |
 | :-- | :-- |
-| `KeycloakAdminClient` create and search | Attribute search semantics — is `q=scnehaux_principal_id:{id}` exact-match, and how does it paginate |
-| Pending-state recovery strategy | Attribute search semantics |
+| ~~`KeycloakAdminClient` create and search~~ | ✅ Unblocked. Attribute search is exact, case-insensitive, and pages without loss (`identity-kernel` question 2). `FindByPrincipalID` now reads every page |
+| ~~Pending-state recovery strategy~~ | ✅ Unblocked by the same answer. Recovery branches on the count as designed |
 | `KeycloakProjector` | Projected context representation — Organizations, Groups, or user attributes |
 | `SessionContainer` | Session removal granularity — per Principal and Tenant context, or per Principal only |
 
@@ -325,17 +325,21 @@ The remaining proof-of-concept questions — protocol mapper coverage, attribute
 immutability, issuer URI form, context switch mechanism — are answered in
 `identity-kernel` and change realm configuration rather than code here.
 
-Two of them have provisional answers now, from running against Keycloak 26.7.1. They are
-recorded as evidence for `identity-kernel` to confirm, not as decisions taken here:
+`identity-kernel` has since answered two of them against the digest-pinned 26.7.4, in
+compat runs 36105049194 and 36106484382:
 
-- **Protocol mapper coverage.** An `oidc-usermodel-attribute-mapper` projects
-  `scnehaux_principal_id` and `scnehaux_subject_type` into the access token, and an
-  `oidc-audience-mapper` is required for `aud` — Keycloak does not add a second service's
-  audience on its own.
-- **Attribute immutability.** The user profile controls it. An attribute declared with `edit`
-  restricted to `admin` cannot be written by the user it belongs to, which is the property
-  `principal_id` needs. An *undeclared* attribute is discarded outright, so the declaration is
-  mandatory rather than a hardening step.
+- **Protocol mapper coverage: confirmed.** All four surfaces carry the claims. An
+  `oidc-audience-mapper` is still required for `aud`, and introspection is
+  audience-restricted.
+- **Attribute immutability: corrected.** The provisional answer said "the user profile
+  controls it", which is true of the user only.
+  - An administrator's edit is applied.
+  - No declarative profile gives write-once: an attribute nobody may edit is silently
+    dropped at creation.
+  - Against administrators, immutability rests on who holds `manage-users` plus reconciler
+    detection. TDD-identity-control-001 records it.
+  - An undeclared attribute is still discarded outright, so the declaration remains
+    mandatory.
 
 ## Not this service
 
