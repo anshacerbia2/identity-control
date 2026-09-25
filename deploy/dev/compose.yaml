@@ -1,0 +1,96 @@
+# identity-control on the development server, beside identity-kernel's deploy/dev stack.
+#
+#   docker compose up -d --build
+#
+# Its own Control Database -- EAD-003 keeps each domain's persistence private -- a one-shot migration
+# job that must succeed before the service starts, and the service. It reaches Keycloak over the
+# kernel's scnehaux-identity-api network, which carries Keycloak alone, so it cannot reach the
+# kernel's database or proxy. Start the kernel stack first; that network is created there.
+
+name: scnehaux-identity-control-dev
+
+services:
+  postgres:
+    # postgres:17.11-alpine
+    image: postgres@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    networks: [internal]
+
+  migrate:
+    build:
+      context: ../..
+      target: migrate
+    restart: "no"
+    environment:
+      POSTGRES_SUPER_URL: postgres://postgres:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432
+      IDENTITY_APP_PASSWORD: ${IDENTITY_APP_PASSWORD:?set IDENTITY_APP_PASSWORD in .env}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [internal]
+
+  # The bootstrap ceremony, run once by an operator through bootstrap.sh -- never by `up`, which is
+  # what the profile is for. It uses the runtime credential, not the migration one: a ceremony able
+  # to alter the schema could remove the constraint that makes it single-use.
+  bootstrap:
+    build:
+      context: ../..
+      target: migrate
+    profiles: ["ceremony"]
+    entrypoint: ["identity-bootstrap"]
+    environment:
+      IDENTITY_DATABASE_URL: postgres://identity_app:${IDENTITY_APP_PASSWORD:?set IDENTITY_APP_PASSWORD in .env}@postgres:5432/identity_control?sslmode=disable
+      IDENTITY_KEYCLOAK_REALM: scnehaux
+      IDENTITY_KEYCLOAK_BASE_URL: http://keycloak:8080
+      IDENTITY_KEYCLOAK_CLIENT_ID: identity-control
+      IDENTITY_KEYCLOAK_CLIENT_SECRET: ${IDENTITY_KEYCLOAK_CLIENT_SECRET:?run create-kernel-clients.sh and set it in .env}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks: [internal, kernel]
+
+  identity-control:
+    build:
+      context: ../..
+      target: service
+    restart: unless-stopped
+    environment:
+      # The runtime login role: DML, no DDL.
+      IDENTITY_DATABASE_URL: postgres://identity_app:${IDENTITY_APP_PASSWORD:?set IDENTITY_APP_PASSWORD in .env}@postgres:5432/identity_control?sslmode=disable
+      IDENTITY_LISTEN_ADDRESS: ":8090"
+      IDENTITY_KEYCLOAK_REALM: scnehaux
+      IDENTITY_KEYCLOAK_BASE_URL: http://keycloak:8080
+      IDENTITY_KEYCLOAK_CLIENT_ID: identity-control
+      IDENTITY_KEYCLOAK_CLIENT_SECRET: ${IDENTITY_KEYCLOAK_CLIENT_SECRET:?run create-kernel-clients.sh and set it in .env}
+      # The issuer is the kernel's public one, whatever address Keycloak is reached on: Keycloak's
+      # hostname fixes iss. The key set is fetched over the private network. It is configuration and
+      # never read from a token, because a token that could name its own key source would choose the
+      # key that validates it.
+      IDENTITY_TOKEN_ISSUER: ${KEYCLOAK_ISSUER:?set KEYCLOAK_ISSUER in .env}
+      IDENTITY_TOKEN_AUDIENCE: identity-control
+      IDENTITY_JWKS_URL: http://keycloak:8080/realms/scnehaux/protocol/openid-connect/certs
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:${IDENTITY_CONTROL_PORT:-8082}:8090"
+    networks: [internal, kernel]
+
+volumes:
+  postgres:
+
+networks:
+  internal:
+  kernel:
+    external: true
+    name: scnehaux-identity-api

@@ -1,4 +1,4 @@
-﻿# Obtains an access token through Authorization Code with PKCE, without a browser.
+# Obtains an access token through Authorization Code with PKCE, without a browser.
 #
 # Dot-source it and call Get-ScnehauxToken.
 #
@@ -170,6 +170,9 @@ function Get-ScnehauxToken {
 
     $query = [System.Web.HttpUtility]::ParseQueryString(([uri]$codeUri).Query)
     if ($query["error"]) { throw "the kernel refused the authorization: $($query["error"])" }
+    # A redirect that is not to the redirect URI is the kernel interrupting the login -- a required action,
+    # or an incomplete profile -- rather than a forged response, and saying so is what makes it fixable.
+    if (-not $codeUri.StartsWith($RedirectUri)) { throw "the login was interrupted: the kernel redirected to $(($codeUri -split '\?')[0]) rather than the redirect URI; complete the account's pending action or profile" }
     if ($query["state"] -ne $state) { throw "the state parameter did not match; refusing the code" }
     $code = $query["code"]
     if (-not $code) { throw "no authorization code in the redirect" }

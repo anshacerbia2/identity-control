@@ -1,0 +1,9 @@
+# Credentials never enter an image, and neither does anything the build does not read.
+.env
+**/.env
+.git
+.github
+coverage
+cov-src
+*.out
+.atlas

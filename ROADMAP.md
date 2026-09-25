@@ -10,7 +10,7 @@ Week numbers are relative to the first build week, not calendar dates.
 
 | TDD | Subject | Status |
 | :-- | :-- | :-- |
-| `TDD-identity-control-001` | Canonical Principal identifier and creation path | approved; implementation-gated by PoC |
+| `TDD-identity-control-001` | Canonical Principal identifier and creation path | approved; every proof-of-concept question it depended on is answered |
 | `TDD-identity-control-002` | Keycloak context projection, durable retry, session removal | approved; implementation-gated by PoC |
 | `TDD-identity-control-003` | Protocol client and protected-resource registration | approved |
 | `TDD-identity-control-004` | Workload and bounded agent identity | approved |
@@ -340,6 +340,46 @@ compat runs 36105049194 and 36106484382:
     detection. TDD-identity-control-001 records it.
   - An undeclared attribute is still discarded outright, so the declaration remains
     mandatory.
+
+## Development server
+
+✅ [`deploy/dev/`](deploy/dev/README.md) runs this service beside `identity-kernel`'s development
+Keycloak. CI brings up the same stack end to end against the kernel's `main`:
+
+- the realm is applied;
+- this service's clients are registered;
+- the Control Database is migrated;
+- the bootstrap ceremony is performed, and a second ceremony is refused;
+- the smoke suite runs with a provider-scope token from the kernel's login form.
+
+What it runs:
+
+- **Two images from one Dockerfile.** Both are digest-pinned (SAD-001 §7.6), and every base carries
+  the tag it was resolved from beside it:
+  - the service, on distroless as a non-root user;
+  - the migration job, on the Postgres image. It runs the same four-source pipeline as
+    `scripts/dev-database.ps1`.
+- **Its own Control Database** (EAD-003). It reaches Keycloak over the kernel's
+  `scnehaux-identity-api` network, which carries Keycloak alone.
+- **Two clients, registered by `create-kernel-clients.sh`:**
+  - The Admin API client holds `manage-users` and `view-users` and nothing else, as this repository's
+    TDD-001 states.
+  - The development caller uses Authorization Code with PKCE and the kernel's `scnehaux-provider`
+    scope, with a 240-second token (class `L0`).
+
+The realm itself is `identity-kernel`'s. Nothing here writes a scope, attribute, or key.
+
+Two decisions are recorded here because nothing else records them yet:
+
+- **Client registration will need client management, and TDD-001 and TDD-002 both exclude it.**
+  `TDD-identity-control-003` registers protocol clients through the Admin API, which needs
+  `manage-clients`. The recommendation is a separate credential for the registration path, so the
+  Principal path keeps its narrow set. This must be decided before `TDD-003` is built, and the
+  decided option written into all three designs.
+- **Container images have no enterprise standard.** SAD-004 says only "compiled as an OCI image".
+  The images here follow the kernel's precedent: pinned digests, distroless, non-root. Scanning the
+  built image for vulnerabilities, which SAD-001 §7.6 requires, is not yet in CI. Both are
+  production-gate items.
 
 ## Not this service
 
