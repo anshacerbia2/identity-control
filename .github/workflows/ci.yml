@@ -88,8 +88,14 @@ jobs:
       # command requires the schema to already exist on the dev server. Without this the
       # first Atlas step fails with `schema "identity" was not found`, which reads like a
       # broken migration rather than an unprepared throwaway database.
+      #
+      # psql gets the same url with its query string cut off. search_path is an Atlas url
+      # parameter, not a libpq one, and libpq refuses it outright -- `invalid URI query
+      # parameter: "search_path"` -- which failed this step on every run from the day it was
+      # added, so nothing after it had run since. Derived from ATLAS_DEV_URL rather than
+      # written out again, so the host and port cannot drift from the service definition.
       - name: prepare the Atlas dev schema
-        run: psql "$ATLAS_DEV_URL" -v ON_ERROR_STOP=1 -c 'CREATE SCHEMA IF NOT EXISTS identity;'
+        run: psql -v ON_ERROR_STOP=1 -c 'CREATE SCHEMA IF NOT EXISTS identity;' -d "${ATLAS_DEV_URL%%\?*}"
         env:
           PGPASSWORD: atlas
 
