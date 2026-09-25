@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-001
   title: Canonical Principal Identifier and Creation Path
   owner: Core Platform Team
-  version: 1.1.0
+  version: 1.2.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -583,4 +583,8 @@ Keycloak release:
    2026-09-25: enforced against the user, detected rather than enforced against an
    administrator.** See §Data Model.
 4. Whether the issuer path form permits a vendor-neutral value, which determines the
-   `iss` component of the identity pair retained in evidence.
+   `iss` component of the identity pair retained in evidence. **Answered 2026-09-25:
+   no.** `iss` is `{frontend URL}/realms/{realm name}`, and a realm rename moves it
+   (`identity-kernel` question 4). The `iss` retained in evidence therefore names the
+   realm. This design is unaffected, because it already retains `iss` and `sub` beside
+   `principal_id` precisely so that a future issuer change stays reconcilable.
