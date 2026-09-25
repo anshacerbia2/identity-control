@@ -76,18 +76,37 @@ Create `keycloak_dev` first if it does not exist. Keycloak does not create its o
 
 ## 3. Configure the realm
 
+The realm belongs to `identity-kernel`, so it is applied from that repository's definition. This
+is the same source the development server's realm comes from:
+
+```powershell
+cd ../identity-kernel            # a clean checkout: realm-apply records the commit it applied
+$env:KEYCLOAK_ADMIN_USER     = 'admin'
+$env:KEYCLOAK_ADMIN_PASSWORD = $env:KC_ADMIN_PASSWORD
+go run ./cmd/realm-apply -environment local -url http://127.0.0.1:8081 -apply
+cd ../identity-control
+```
+
+That creates the realm with its **PS256 / 3072-bit** signing key, the `scnehaux_*` user
+attributes, and the `scnehaux-provider` scope this service's callers need (STD-IAM-002 §3.2.1). A
+realm an earlier version of this harness built is one `realm-apply` never applied, and it refuses
+it; add `-adopt` once to take it over.
+
+Then register this service's two clients against it:
+
 ```powershell
 ./scripts/dev-keycloak.ps1
 ```
 
-This creates the realm, adds a **PS256 / 3072-bit** signing key, declares the three
-`scnehaux_*` user attributes, and creates both clients with their protocol mappers.
+This registers the service client, with `manage-users` and `view-users` only, and the harness
+caller: Authorization Code with PKCE, the provider scope attached, `identity-control` in `aud`,
+and a 240-second token. It removes the client-management roles an earlier version granted.
 
 It creates no user. Issuing a `principal_id` is the Identity Control Service's authority and
 nothing else's, per `ADR-IAM-001 §5.11`, so the first Principal comes from the ceremony in step 5.
 
-Two of those steps are not optional, and both were found by running the service rather than by
-reading the configuration:
+Two settings the realm needs are not optional, and both were found by running the service rather
+than by reading the configuration. `identity-kernel`'s `compat/` now asserts both on every release:
 
 - **The signing key.** A fresh realm is provisioned with a 2048-bit RS256 key. The verifier
   permits exactly one algorithm, so every token signed with the default key is rejected. FAPI 2.0

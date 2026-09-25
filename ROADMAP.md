@@ -41,11 +41,14 @@ problem type this service needed.
 service sit behind a port with a fake implementation, so the full creation and
 recovery suite runs before the kernel repository produces anything.
 
-That said, the realm shape is no longer hypothetical here. `scripts/dev-keycloak.ps1` encodes
-what `ADR-IAM-001` and `STD-IAM-002` require of a realm — the PS256 key, the declared
-attributes, the narrow service-account roles, the protocol mappers — and `identity-kernel`
-should be read as the authority on all of it. Two of those settings are not merely
-recommended: without them the verifier rejects every token, silently in one case.
+The realm shape is `identity-kernel`'s. Its `realm/` declares what `ADR-IAM-001` and `STD-IAM-002`
+require of a realm: the PS256 key, the declared attributes, and the claim scopes, including
+`scnehaux-provider`, which this service's callers need. Its `compat/` asserts them. This
+repository registers only its own clients against that realm, through `scripts/dev-keycloak.ps1`
+locally and `deploy/dev/create-kernel-clients.sh` on the development server.
+
+Two of those settings are not merely recommended: without them the verifier rejects every token,
+silently in one case.
 
 ## Buildable now
 
