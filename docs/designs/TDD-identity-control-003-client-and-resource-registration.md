@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-003
   title: Protocol Client and Protected-Resource Registration
   owner: Core Platform Team
-  version: 1.1.0
+  version: 1.2.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-11
-  last_reviewed: 2026-08-14
+  last_reviewed: 2026-09-26
   parent_sad: SAD-001
 ---
 
@@ -344,6 +344,8 @@ becomes available.
 | `IDENTITY_CREDENTIAL_ROTATION_OVERLAP` | `7d` | Window during which both credentials are valid |
 | `IDENTITY_REGISTRATION_RECONCILE_INTERVAL` | `1h` | Drift sweep cadence |
 | `IDENTITY_APPLICATION_AUTHORITY` | `manual` | Becomes the Software Catalog authority name once chartered |
+| `IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID` | none, required | The registration path's own Admin API client, `identity-control-registration` |
+| `IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_SECRET` | none, required | Its secret, from the secret manager; never the Principal path's |
 
 ## Testing Strategy
 
@@ -370,6 +372,8 @@ becomes available.
 - No secret value is written to `identity.client_credential`, to a log, or to an event.
 - Both credentials authenticate during the overlap window.
 - The retiring credential is revoked at the end of the window without manual action.
+- The registration credential cannot create, modify, or disable a user, and the Principal path's
+  credential cannot create or modify a client. Both are asserted against a live kernel.
 
 ### Drift
 
@@ -389,6 +393,19 @@ becomes available.
   recovery adopts the existing client rather than creating a second one.
 
 ## Security Notes
+
+**The registration path has its own Admin API credential.** It is a separate Keycloak client,
+`identity-control-registration`, whose service account holds the realm-management roles
+`manage-clients` and `view-clients`. It holds nothing else: no user management, no realm
+administration, no credential read. The Principal path keeps its own credential, with user roles
+only (`TDD-identity-control-001`), and so does the projector (`TDD-identity-control-002`).
+All three designs therefore stay true: none of those credentials holds client management.
+
+The split limits what one leaked secret can do. A credential that could both create users and
+register clients would let whoever holds it mint a Principal, and register a client that redirects
+its tokens to them, in one step. Split, each secret opens one of those capabilities only. The cost is
+a second secret to rotate, and a registration component that cannot reach the Principal path's
+credential even by mistake, because it is configured with a different one.
 
 Client secrets are held by Keycloak and never by this service. The control-plane record
 proves a credential exists and when it expires, which is what rotation and audit need,

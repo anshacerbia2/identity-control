@@ -1,4 +1,4 @@
-﻿# Performs the bootstrap ceremony, then makes the resulting Principal usable locally.
+# Performs the bootstrap ceremony, then makes the resulting Principal usable locally.
 #
 # Two steps, and only the first is a production procedure:
 #
@@ -121,11 +121,9 @@ Invoke-RestMethod -Method Put -Headers $H -ContentType "application/json" `
     -Uri "$kcBase/admin/realms/$realm/users/$userId/reset-password" `
     -Body (@{ type = "password"; value = $callerPassword; temporary = $false } | ConvertTo-Json) | Out-Null
 
-# firstName and lastName are required by the default user profile, and an account missing them is
-# refused with "Account is not fully set up" rather than a validation error naming the field.
-$stored | Add-Member -NotePropertyName firstName       -NotePropertyValue "Bootstrap" -Force
-$stored | Add-Member -NotePropertyName lastName        -NotePropertyValue "Operator"  -Force
-$stored | Add-Member -NotePropertyName requiredActions -NotePropertyValue @()         -Force
+# No names are set. identity-kernel's realm makes firstName and lastName optional (PAD-PLT-001 minimizes
+# personal data by purpose), so a Principal the ceremony created logs in without them.
+$stored | Add-Member -NotePropertyName requiredActions -NotePropertyValue @() -Force
 
 # The provider scope is NOT set here any more.
 #

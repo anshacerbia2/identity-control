@@ -372,13 +372,13 @@ What it runs:
 
 The realm itself is `identity-kernel`'s. Nothing here writes a scope, attribute, or key.
 
-Two decisions are recorded here because nothing else records them yet:
+Two decisions are recorded here:
 
-- **Client registration will need client management, and TDD-001 and TDD-002 both exclude it.**
-  `TDD-identity-control-003` registers protocol clients through the Admin API, which needs
-  `manage-clients`. The recommendation is a separate credential for the registration path, so the
-  Principal path keeps its narrow set. This must be decided before `TDD-003` is built, and the
-  decided option written into all three designs.
+- **Client registration uses its own credential. Decided on 2026-09-26.** `TDD-identity-control-003`
+  registers protocol clients through the Admin API, which needs `manage-clients`. It gets a separate
+  Keycloak client, `identity-control-registration`, holding `manage-clients` and `view-clients`
+  only, so the Principal path keeps its narrow set and TDD-001 and TDD-002 stay true. Recorded in
+  TDD-003's Security Notes. The client is created when TDD-003 is built, not before.
 - **Container images have no enterprise standard.** SAD-004 says only "compiled as an OCI image".
   The images here follow the kernel's precedent: pinned digests, distroless, non-root. Scanning the
   built image for vulnerabilities, which SAD-001 §7.6 requires, is not yet in CI. Both are
