@@ -42,5 +42,8 @@ if [ -z "$user" ]; then
 	exit 1
 fi
 kc set-password -r scnehaux --userid "$user" --new-password "$IDENTITY_CALLER_PASSWORD"
-kc update "users/$user" -r scnehaux -s 'requiredActions=[]'
+# firstName and lastName are required by the kernel's default user profile, and a login with them missing
+# is interrupted by a profile-completion page instead of returning a code. A person would fill them in at
+# that page; this step stands in for that person, as scripts/dev-bootstrap.ps1 does locally.
+kc update "users/$user" -r scnehaux -s firstName=Bootstrap -s lastName=Operator -s 'requiredActions=[]'
 echo "      $username can now log in with IDENTITY_CALLER_PASSWORD"
