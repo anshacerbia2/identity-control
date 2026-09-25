@@ -12,7 +12,12 @@
 FROM golang@sha256:8ac98ca534ac3f51e1f420a1dd2c15e74c75cfa0f23f3ad27eb5d7236c349a0c AS build
 WORKDIR /src
 COPY go.mod go.sum ./
-RUN go mod download
+# Overridable for networks that intercept proxy.golang.org: pass GOPROXY=direct as a build arg, and
+# modules are fetched from their origins, which needs git -- installed in this stage only, and only
+# in that mode. Integrity does not depend on the proxy either way: go.sum and the checksum database
+# (GOSUMDB) verify every module. The default is Go's own.
+ARG GOPROXY=https://proxy.golang.org,direct
+RUN if [ "$GOPROXY" = "direct" ]; then apk add --no-cache git; fi && go mod download
 COPY . .
 # CGO off, so the binaries run on distroless static and on the Postgres image alike.
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/ ./cmd/identity-control ./cmd/identity-migrate ./cmd/identity-bootstrap
