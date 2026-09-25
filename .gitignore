@@ -19,3 +19,6 @@ atlas.sum.tmp
 *.swp
 .DS_Store
 Thumbs.db
+
+# Local development environment. Never committed: it holds this machine's credentials.
+.env
