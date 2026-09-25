@@ -114,11 +114,6 @@ jobs:
       - name: build
         run: go build ./...
 
-      # The race detector is the only thing separating correct synchronisation from
-      # synchronisation that has been lucky.
-      - name: test with race detector
-        run: go test ./... -race -count=1
-
       # Integrity of the migration directory. atlas.sum is a checksum over every file, so
       # this fails when a committed migration was edited after generation — which is how a
       # reviewed plan and an applied plan quietly stop being the same thing.
@@ -176,9 +171,20 @@ jobs:
       - name: apply runtime privileges
         run: go run ./cmd/identity-migrate -stage=post
 
+      # The race detector is the only thing separating correct synchronisation from
+      # synchronisation that has been lucky.
+      #
+      # After the three stages, not before. It ran first once, and with REQUIRE_INTEGRATION set
+      # the privilege suite in internal/controldb does not skip against an unmigrated database --
+      # it fails, correctly, because a role that does not exist is exactly what it guards
+      # against. That stayed invisible for three weeks behind an earlier step that never passed,
+      # and locally behind a development database that had been migrated long ago.
+      - name: test with race detector
+        run: go test ./... -race -count=1
+
       # This is the Week 1 exit criterion, asserted against the catalog rather than against
-      # the SQL that produced it. It reruns the suite because the assertions above only
-      # became answerable once the three stages had run.
+      # the SQL that produced it. Rerun verbosely on its own because each assertion names a
+      # control, and a reviewer reading a red build should see which one.
       - name: assert the runtime role holds no ownership and no DDL
         run: go test ./internal/controldb/... -count=1 -v
 
