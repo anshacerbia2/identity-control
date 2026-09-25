@@ -46,6 +46,22 @@ curl -fsS http://127.0.0.1:8082/readyz       # ready once the migration job has 
 The ceremony can succeed once per Control Database, and a second run is refused. That is the
 design, not a fault.
 
+If the network intercepts TLS to `proxy.golang.org`, the build fails at `go mod download`. Pass
+`GOPROXY=direct` as a build argument from a local, uncommitted compose override:
+
+```yaml
+services:
+  migrate:
+    build: { args: { GOPROXY: direct } }
+  bootstrap:
+    build: { args: { GOPROXY: direct } }
+  identity-control:
+    build: { args: { GOPROXY: direct } }
+```
+
+Modules are then fetched from their origins. `go.sum` and the checksum database still verify every
+one of them.
+
 ## Calling the API
 
 Every mutation needs a provider-scope token. Get one by logging in as `bootstrap-operator` with
