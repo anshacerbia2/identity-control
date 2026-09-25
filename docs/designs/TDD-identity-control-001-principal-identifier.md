@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-001
   title: Canonical Principal Identifier and Creation Path
   owner: Core Platform Team
-  version: 1.2.0
+  version: 1.3.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-10
-  last_reviewed: 2026-09-25
+  last_reviewed: 2026-09-26
   parent_sad: SAD-001
 ---
 
@@ -304,6 +304,35 @@ relying parties. `principal_id` is the enterprise reference. Internal domains pe
 `principal_id`. Audit and evidence records retain `principal_id` together with
 `iss` and `sub` so that protocol-level and enterprise-level identity remain
 reconcilable after any future issuer change.
+
+### Caller Token
+
+The token above is what a Principal carries to an internal API. A caller of this service carries
+a different one. Minting a Principal is irreversible and belongs to no Tenant, which makes it
+`privileged` in its `provider-scope` form (STD-IAM-002 §3.1.1). The kernel issues that token
+through its `scnehaux-provider` client scope, and this service accepts nothing else:
+
+```json
+{
+  "principal_id": "019235f1-8c4a-7c1e-9d0b-3f4a2b6e5d71",
+  "subject_type": "human",
+  "provider_scope": "provider:identity-control",
+  "acr": "1",
+  "auth_time": 1786000000,
+  "aud": ["identity-control"],
+  "exp": 1786000240
+}
+```
+
+`provider_scope` must name a registered provider scope. This design registers exactly one:
+
+| Provider scope | Authority | Granted by |
+| :-- | :-- | :-- |
+| `provider:identity-control` | Mint, read, quarantine, and retire Principals through this service | The bootstrap ceremony, to the first Principal; nothing else writes `scnehaux_provider_scope` |
+
+A token carrying `tenant_id`, lacking `provider_scope`, or naming any other scope is refused. The
+access token lifetime is class `L0`, 240 seconds, and is set on the calling client's
+registration.
 
 ## API / Interface
 
