@@ -104,10 +104,21 @@ jobs:
             exit 1
           fi
 
+      # The kernel's hostname is https://localhost, so its login form posts to https://localhost through
+      # Caddy, whose certificate comes from Caddy's own local CA. Trusting that CA is what lets the login run
+      # over TLS end to end, the way it does on a server whose tunnel or DNS name has a real certificate --
+      # rather than falling back to plain HTTP and taking a code path production never takes.
+      - name: trust the kernel proxy's local certificate authority
+        run: |
+          docker cp scnehaux-identity-dev-caddy-1:/data/caddy/pki/authorities/local/root.crt "$RUNNER_TEMP/caddy-root.crt"
+          sudo cp "$RUNNER_TEMP/caddy-root.crt" /usr/local/share/ca-certificates/caddy-local-root.crt
+          sudo update-ca-certificates
+          curl -fsS https://localhost/realms/scnehaux/.well-known/openid-configuration >/dev/null
+
       - name: smoke the API with a provider-scope token
         run: |
           set -a; . deploy/dev/.env; set +a
-          export IDENTITY_API_URL=http://127.0.0.1:8082 KC_BASE_URL=http://localhost:8080
+          export IDENTITY_API_URL=http://127.0.0.1:8082 KC_BASE_URL=https://localhost
           pwsh -NoProfile -File scripts/dev-smoke.ps1
 
       - name: stack logs
