@@ -312,6 +312,83 @@ Principals created through the API carry none.
 **Exit:** no code path in this service constructs an Organization Database connection,
 asserted by test.
 
+## Proof B · Keycloak drift
+
+Not started. `organization-control` backlog item 10. It was labelled P2 in RESPONSE-7 to RESPONSE-10
+and listed with the P1 backlog in RESPONSE-23.
+
+**The claim to prove** (RESPONSE-4 §4): drift between reviewed desired state and live Keycloak can
+be detected, classified, reconciled, and shown to converge. This service is not merely a
+controlled proxy to the Admin API. The first two scenarios:
+
+| Scenario | Policy |
+| :-- | :-- |
+| Access token lifespan on one client changed in the console | auto-reconcile |
+| Redirect URI on one client changed in the console | detect and block |
+
+Acceptance criteria, also from RESPONSE-4 §4:
+
+- A reconciler runs on a schedule, and its last run is observable.
+- Drift is told apart from a sanctioned change through Keycloak admin events, with a time-bound
+  exception. A class of change with no attribution is never auto-reconciled.
+- An unreachable Keycloak yields `unresolved`, neither a failure nor a success.
+- Convergence time is recorded as evidence.
+- The principal portability test rides along: blank a mapping's `keycloak_user_id`, provision
+  again, and require `principal_id` and its Memberships to be intact.
+
+**What exists** (surveyed 2026-09-27):
+
+- `identity-kernel`'s `realm-apply` records the applied git revision in the realm and refuses to
+  apply over console drift (exit 2). It covers realm settings, keys, client scopes and the user
+  profile only. It never reads clients, runs only at deploy, and never reconciles on its own.
+  Its packages are under `internal/`, so this module cannot import them.
+- TDD-003 designs client registration, and none of it is built:
+  - the `identity.client_registration` desired-state table (redirect URIs, lifetime class);
+  - `GET /v1/registrations:drift` and `POST /v1/registrations:reconcile`;
+  - a drift algorithm and a 1h interval;
+  - the `identity-control-registration` credential with `manage-clients` and `view-clients`.
+- TDD-002 designs `identity.drift_finding`, and it is not built.
+
+**What is missing:**
+
+- Clients are not declared anywhere. The two scenario targets sit on `identity-control-caller`,
+  which imperative scripts create (`deploy/dev/create-kernel-clients.sh`,
+  `scripts/dev-keycloak.ps1`): redirect URI `http://127.0.0.1:8099/callback`,
+  `access.token.lifespan` 240.
+- This service has no scheduler, no reconciler, and no last-run record.
+  `identity.projection_cursor.last_reconciled_at` exists and nothing writes it.
+- Its Keycloak credential holds `manage-users` and `view-users` only. It cannot read or change
+  clients, and cannot read admin events, which need `view-events`.
+- Admin events are not enabled in `identity-kernel`'s realm definition, although
+  TDD-identity-kernel-003 specifies them, with details and a retention floor.
+- The mapping state machine has no way back from `active`. A blanked `keycloak_user_id` on an
+  active row is picked up by nothing, so the portability test needs a designed transition.
+
+**Decisions it needs before building:**
+
+1. **Where desired state lives.** RESPONSE-4 proposed a reviewed file in git. TDD-003, which is
+   later and approved, puts it in the Control Database, written through the registration API.
+   Recommended: TDD-003.
+2. **Redirect URI policy.** RESPONSE-4 says detect and block. TDD-003 says apply desired state
+   and record a repair finding. Recommended: detect and block, because silently restoring a
+   redirect URI hides a possible takeover. TDD-003 would be edited to match.
+3. **The registration credential on the development server.** `create-kernel-clients.sh` must
+   not be run there again. So it needs a separate one-time script, refusing when the client
+   exists, run once by whoever operates the server.
+4. **Portability.** Which transition takes an active mapping with a blank `keycloak_user_id`
+   back through provisioning, and what the reconciler does when it meets one.
+
+**Proposed order, one PR each:**
+
+1. Enable admin events in `identity-kernel`'s realm definition.
+2. Edit TDD-003 and TDD-001 with the decisions above.
+3. Add the registration table and credential.
+4. Build the reconciler: interval, last run, findings, lifespan repair, redirect-URI block,
+   exception through admin events, `unresolved`.
+5. Add a Proof B end-to-end job in `deploy-dev.yml` against a real Keycloak: both scenarios, the
+   exception, Keycloak down, and convergence time.
+6. Add the portability test.
+
 ## Waiting on the Keycloak proof-of-concept
 
 Each item names the question that unblocks it. All of them are adapters, which is why
