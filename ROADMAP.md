@@ -460,7 +460,7 @@ Acceptance criteria, also from RESPONSE-4 §4:
 **Found while building, and not part of Proof B:**
 
 - **Credential issuance:** confidential and workload registration, with `identity.client_credential`, rotation and revocation (TDD-003 §Credential Records, §Credential Rotation).
-- **Disabling unmanaged clients:** it needs this service's own clients registered first, and it must exempt the clients Keycloak creates in every realm.
+- **Disabling unmanaged clients:** it needs this service's own clients registered first, and it must exempt the clients Keycloak creates in every realm. `identity-experience-bff`, the BFF's confidential client, is in the same position: `identity-experience`'s `deploy/dev/create-bff-client.sh` creates it on the dev server because confidential registration is not built. It must be registered before this runs, or it is disabled with every open session.
 - **The rest of the Principal sweep:** its unmapped, orphan and duplicate branches (TDD-001 §Reconciliation Sweep) are not built. Only the dangling branch and pending recovery run.
 - **Kernel scopes:** `identity-kernel` must declare `scnehaux-workload` and a tenant-scope privileged scope before registrations of those classes can exist.
 
