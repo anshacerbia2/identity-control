@@ -1,7 +1,7 @@
 // Package reconcile compares registered desired state against the live Keycloak clients, and
 // repairs or blocks what drifted (TDD-identity-control-003 §Drift Reconciliation).
 //
-// An absent client is recreated from desired state. Two field classes are compared, the two
+// An absent client is held for an operator, not recreated. Two field classes are compared, the two
 // the drift proof exercises: a client's access token
 // lifespan, which is repaired, and its redirect URIs, which are blocked. Each divergence is
 // attributed through Keycloak's admin events before anything is done about it. A change an
@@ -46,6 +46,7 @@ const (
 	Blocked      FindingClass = "blocked"
 	Sanctioned   FindingClass = "sanctioned"
 	Unattributed FindingClass = "unattributed"
+	Missing      FindingClass = "missing"
 	Recreated    FindingClass = "recreated"
 )
 
@@ -63,9 +64,9 @@ var (
 	// at a time is the point.
 	ErrSweepInProgress = errors.New("reconcile: a registration sweep is already running")
 
-	// ErrNotResolvable means a named finding is not an open blocked or unattributed one, the only
-	// kinds an operator's reconcile applies desired state to.
-	ErrNotResolvable = errors.New("reconcile: the finding is not an open blocked or unattributed finding")
+	// ErrNotResolvable means a named finding is not an open blocked, unattributed or missing one,
+	// the only kinds an operator's reconcile applies desired state to.
+	ErrNotResolvable = errors.New("reconcile: the finding is not an open blocked, unattributed or missing finding")
 
 	// ErrInvalid is a request this package refuses before touching anything.
 	ErrInvalid = errors.New("reconcile: invalid request")
@@ -92,8 +93,8 @@ type Config struct {
 	CallTimeout time.Duration
 
 	// Recreate builds a registration's client again from desired state and returns the new
-	// client's identifier. The registration service supplies it. Nil leaves an absent client
-	// reported and not recreated.
+	// client's identifier. The registration service supplies it. Only an operator's reconcile
+	// naming a 'missing' finding calls it: a sweep never recreates a client on its own.
 	Recreate func(ctx context.Context, registration id.UUID) (keycloak.ClientUUID, error)
 }
 
@@ -241,7 +242,7 @@ func (r *Reconciler) Sweep(ctx context.Context) (Run, error) {
 
 	written, diverged := 0, len(absent) > 0
 	for _, reg := range absent {
-		wrote, err := r.recreate(ctx, run.ID, reg, latest)
+		wrote, err := r.holdMissing(ctx, run.ID, reg, open, latest)
 		if err != nil {
 			return Run{}, err
 		}
@@ -453,30 +454,28 @@ func call[T any](ctx context.Context, timeout time.Duration, fn func(context.Con
 	return fn(callCtx)
 }
 
-// recreate builds an absent client again. Unlike a field divergence it needs no attribution: a
-// client is removed by retiring its registration, and a console deletion breaks every login
-// through the client, which no emergency fix intends. Whoever the deletion's admin event names is
-// recorded. Without a Recreate function the client is only reported.
-func (r *Reconciler) recreate(ctx context.Context, run id.UUID, reg registration,
-	latest map[keycloak.ClientUUID]keycloak.AdminEvent) (bool, error) {
-	if r.cfg.Recreate == nil {
-		r.logger.ErrorContext(ctx, "a registered client is absent from the kernel and nothing can recreate it",
-			slog.String("client_key", reg.clientKey))
-		return false, nil
-	}
-	client, err := r.cfg.Recreate(ctx, reg.id)
-	if err != nil {
-		return false, fmt.Errorf("reconcile: recreate %s: %w", reg.clientKey, err)
-	}
-	r.logger.ErrorContext(ctx, "a registered client was absent from the kernel; recreated from desired state",
-		slog.String("client_key", reg.clientKey))
+// holdMissing records a registered client absent from the kernel as an open 'missing' finding, and
+// does not recreate it. Deleting a client in the console is how an operator contains a compromised
+// one while the registration lifecycle (:suspend, :retire) is not built, and recreating it
+// automatically would undo that containment within one interval. An operator's reconcile naming
+// the finding recreates it. Whoever the deletion's admin event names is recorded.
+func (r *Reconciler) holdMissing(ctx context.Context, run id.UUID, reg registration,
+	open map[findingKey]openFinding, latest map[keycloak.ClientUUID]keycloak.AdminEvent) (bool, error) {
+	existing, isOpen := open[findingKey{reg.client, ""}]
 	now := r.now()
-	write := findingWrite{run: run, registration: reg.id, client: reg.client, class: Recreated,
-		desired: map[string]string{"client": string(client)}, observed: nil, detectedAt: now, convergedAt: &now,
-		newID: r.newID}
+	write := findingWrite{run: run, registration: reg.id, client: reg.client, class: Missing,
+		desired: map[string]string{"client_key": reg.clientKey}, observed: nil, detectedAt: now, newID: r.newID}
+	if isOpen {
+		write.existing = &existing
+		write.actor, write.changedAt = existing.actor, existing.changedAt
+	}
 	if event, ok := latest[reg.client]; ok {
 		at := event.Time
 		write.actor, write.changedAt = event.UserID, &at
+	}
+	if !isOpen {
+		r.logger.ErrorContext(ctx, "a registered client is absent from the kernel; it is held for an operator, not recreated",
+			slog.String("client_key", reg.clientKey), slog.String("actor", write.actor))
 	}
 	return true, r.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error { return writeFinding(ctx, tx, write) })
 }

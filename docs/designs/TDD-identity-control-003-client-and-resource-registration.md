@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-003
   title: Protocol Client and Protected-Resource Registration
   owner: Core Platform Team
-  version: 1.6.0
+  version: 1.7.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -254,7 +254,7 @@ CREATE TABLE identity.registration_finding (
             ('redirect_uris', 'token_lifespan', 'audience_scope', 'signing_algorithm', 'profile')),
     CONSTRAINT registration_finding_class_check
         CHECK (finding_class IN
-            ('repaired', 'blocked', 'sanctioned', 'unattributed', 'recreated', 'unmanaged')),
+            ('repaired', 'blocked', 'sanctioned', 'unattributed', 'missing', 'recreated', 'unmanaged')),
     CONSTRAINT registration_finding_resolution_check
         CHECK ((resolved_by IS NULL) = (resolution_reason IS NULL)
             AND (resolution_reason IS NULL OR btrim(resolution_reason) <> ''))
@@ -343,7 +343,7 @@ POST   /v1/registrations:reconcile
 converged, and every finding that has not converged. A repair converges inside the sweep
 that made it, so it is never open: the last run's findings, and one registration's
 findings (`/findings`, newest first), are where its convergence time is read. `POST /v1/registrations:reconcile` runs a sweep now. With
-`X-Administrative-Reason` and the ids of open `blocked` or `unattributed` findings, it
+`X-Administrative-Reason` and the ids of open `blocked`, `unattributed` or `missing` findings, it
 also applies desired state to those, which a scheduled sweep never does on its own.
 The reason and the caller are recorded on the finding.
 
@@ -455,7 +455,7 @@ sweep():
 
     for each active registration:
         if its client is absent:
-            recreate it from desired state, record 'recreated'
+            record 'missing', leave it absent, raise an alert
             continue
         for each field class whose live value differs from desired state:
             event := the latest admin event on this client since the previous run,
@@ -529,11 +529,15 @@ wrong actor.
 `redirect_uris`, the two the drift proof exercises. `audience_scope`,
 `signing_algorithm` and `profile` are designed above and not compared yet.
 
-- **An absent client is recreated** from desired state, and recorded as a converged
-  `recreated` finding naming whoever the deletion's admin event names. Unlike a field
-  divergence, this needs no attribution. A client is removed by retiring its
-  registration, and a console deletion breaks every login through the client, which no
-  emergency fix intends.
+- **An absent client is held, not recreated.** It is recorded as one open `missing`
+  finding naming whoever the deletion's admin event names, and every sweep leaves it
+  absent. Only an operator's reconcile naming the finding recreates it from desired state,
+  which closes the finding as `recreated` with the operator and the reason. Deleting a
+  client in the console is how an operator contains a compromised one, and the runtime
+  stop path that would make deletion unnecessary, `:suspend` and `:retire`, is not
+  built. A sweep that recreated the client would undo that containment within one
+  interval. When the lifecycle exists, this can be revisited; until then, holding is the
+  conservative reading (RESPONSE-27, D5).
 - **No client is treated as unmanaged yet.** This service's own credentials are
   confidential clients, and confidential registration is not built, so they cannot be
   registered. Disabling every unregistered client would disable this service. When the
@@ -608,7 +612,9 @@ becomes available.
 
 ### Drift
 
-- A client deleted directly in Keycloak is recreated from desired state.
+- A client deleted directly in Keycloak is recorded `missing` and left absent by every
+  sweep. An operator's reconcile naming the finding recreates it, and the finding closes
+  as `recreated`.
 - A client whose redirect URIs were changed in the Admin Console is disabled and
   recorded `blocked`, with the changed value kept. A reconcile naming the finding
   restores desired state and re-enables it.

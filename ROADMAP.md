@@ -407,7 +407,8 @@ Acceptance criteria, also from RESPONSE-4 §4:
 5. ✅ Build the registration API: `POST /v1/registrations` (with an Idempotency-Key) and
    `GET /v1/registrations/{id}`. `internal/registration` records desired state as a pending row,
    creates the client, attaches the audience class's managed scope, and activates it. Pending
-   rows are recovered before each sweep. An absent client is now recreated. Found while building
+   rows are recovered before each sweep. An absent client is held as a `missing` finding and
+   recreated only by an operator's reconcile (RESPONSE-27, D5). Found while building
    step 4: the drift proof needs a registered client, and nothing wrote one. Scope, and what it
    leaves (TDD-003 §Validation, §Drift Reconciliation):
    - Only the `public` and `resource` profiles are built, which are enough for the drift proof.
@@ -429,6 +430,7 @@ Acceptance criteria, also from RESPONSE-4 §4:
    | Takeover redirect URI in the console | client disabled, URI kept, lifted only by an operator's reconcile | blocked 0.04 s after the change |
    | Lifespan change under a 40 s exception | left in place, then repaired | converged 2.19 s after the exception expired |
    | Keycloak stopped | `unresolved` while down | converged 0.57 s after it answered again |
+   | Client deleted in the console | held as `missing`; no sweep recreates it; an operator's reconcile does | the principal's D5 fix, RESPONSE-27 |
    | User deleted in the console (step 7) | reported, then relinked by an operator | same `principal_id`, one new user |
 
    These times are for a sweep the script requests right after each change. Left to the
