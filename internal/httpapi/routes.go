@@ -103,6 +103,7 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	api.HandleFunc("GET /v1/principals:dangling", cfg.Principals.Dangling)
 	api.HandleFunc("POST /v1/principals:reconcile", cfg.Principals.Reconcile)
 	api.HandleFunc("POST /v1/registrations", cfg.Registrations.Register)
+	api.HandleFunc("GET /v1/registrations", cfg.Registrations.ListRegistrations)
 	api.HandleFunc("GET /v1/registrations/{registration_id}", cfg.Registrations.GetRegistration)
 	api.HandleFunc("GET /v1/registrations/{registration_id}/findings", cfg.Registrations.Findings)
 	api.HandleFunc("GET /v1/registrations:drift", cfg.Registrations.Drift)

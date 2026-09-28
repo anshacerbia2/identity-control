@@ -532,6 +532,53 @@ func (s *Service) Recreate(ctx context.Context, registrationID id.UUID) (keycloa
 	return client, nil
 }
 
+// The page size a list returns when none is asked for, and the most it returns.
+const (
+	DefaultListLimit = 50
+	MaxListLimit     = 100
+)
+
+// ListQuery selects one page of the realm's registrations.
+type ListQuery struct {
+	// After is the last registration_id of the previous page; the nil identifier starts at the
+	// first registration.
+	After id.UUID
+	// Limit is the page size, 1 to MaxListLimit; zero takes DefaultListLimit.
+	Limit int
+	// State narrows the list to one lifecycle state; empty is every state, retired included.
+	State string
+}
+
+// Page is one page of registrations, in creation order. Next is the After of the following page,
+// and nil on the last.
+type Page struct {
+	Registrations []Registration `json:"registrations"`
+	Next          *string        `json:"next"`
+}
+
+var listStates = map[string]bool{"": true, "pending": true, "active": true, "suspended": true, "retired": true}
+
+// List reads one page of the configured realm's registrations (TDD-identity-control-003 §API /
+// Interface). It never carries a secret: none is stored.
+func (s *Service) List(ctx context.Context, query ListQuery) (Page, error) {
+	switch {
+	case query.Limit == 0:
+		query.Limit = DefaultListLimit
+	case query.Limit < 0 || query.Limit > MaxListLimit:
+		return Page{}, fmt.Errorf("%w: limit must be between 1 and %d", ErrInvalid, MaxListLimit)
+	}
+	if !listStates[query.State] {
+		return Page{}, fmt.Errorf("%w: state must be pending, active, suspended or retired", ErrInvalid)
+	}
+	var page Page
+	err := s.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		var err error
+		page, err = s.list(ctx, tx, query)
+		return err
+	})
+	return page, err
+}
+
 // Get reads one registration.
 func (s *Service) Get(ctx context.Context, registrationID id.UUID) (Registration, error) {
 	var registration Registration

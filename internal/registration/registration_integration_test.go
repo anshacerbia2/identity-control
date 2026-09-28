@@ -110,6 +110,65 @@ func (h *harness) clientsNamed(key string) []keycloak.Client {
 	return found
 }
 
+// The list pages through this realm's registrations in creation order by a registration_id cursor,
+// and a filter narrows it to one state.
+func TestTheListPagesByCursorInCreationOrder(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	var created []id.UUID
+	for _, key := range []string{"list-a", "list-b", "list-c"} {
+		registration, err := h.service.Register(ctx, h.request(key, ProfilePublic))
+		if err != nil {
+			t.Fatalf("register %s: %v", key, err)
+		}
+		created = append(created, registration.ID)
+	}
+
+	first, err := h.service.List(ctx, ListQuery{Limit: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Registrations) != 2 || first.Next == nil ||
+		first.Registrations[0].ID != created[0] || first.Registrations[1].ID != created[1] ||
+		*first.Next != created[1].String() {
+		t.Fatalf("first page = %+v", first)
+	}
+	if first.Registrations[0].ClientKey != "list-a" || first.Registrations[0].State != "active" ||
+		first.Registrations[0].AccessTokenLifespan != 240 {
+		t.Errorf("a listed registration differs from what Get returns: %+v", first.Registrations[0])
+	}
+
+	after, _ := id.Parse(*first.Next)
+	second, err := h.service.List(ctx, ListQuery{After: after, Limit: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Registrations) != 1 || second.Registrations[0].ID != created[2] || second.Next != nil {
+		t.Fatalf("last page = %+v", second)
+	}
+
+	retired, err := h.service.List(ctx, ListQuery{State: "retired"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(retired.Registrations) != 0 || retired.Next != nil || retired.Registrations == nil {
+		t.Errorf("retired = %+v; an empty page is an empty list, not null", retired)
+	}
+}
+
+func TestTheListRefusesALimitOrStateItDoesNotKnow(t *testing.T) {
+	h := newHarness(t)
+	for name, query := range map[string]ListQuery{
+		"a limit over the maximum": {Limit: MaxListLimit + 1},
+		"a negative limit":         {Limit: -1},
+		"an unknown state":         {State: "deleted"},
+	} {
+		if _, err := h.service.List(context.Background(), query); !errors.Is(err, ErrInvalid) {
+			t.Errorf("%s: err = %v, want ErrInvalid", name, err)
+		}
+	}
+}
+
 // A public client is created from desired state: exact redirect URIs, the managed scope of its
 // audience class, an audience mapper per resource, and a lifespan derived from those resources.
 func TestAPublicClientIsCreatedFromDesiredState(t *testing.T) {

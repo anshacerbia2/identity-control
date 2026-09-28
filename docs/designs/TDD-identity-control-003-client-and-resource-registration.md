@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-003
   title: Protocol Client and Protected-Resource Registration
   owner: Core Platform Team
-  version: 1.7.0
+  version: 1.8.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-11
-  last_reviewed: 2026-09-28
+  last_reviewed: 2026-09-29
   parent_sad: SAD-001
 ---
 
@@ -327,6 +327,7 @@ material the kernel already owns, which ADR-IAM-001 §5.2 prohibits.
 
 ```text
 POST   /v1/registrations
+GET    /v1/registrations
 GET    /v1/registrations/{registration_id}
 POST   /v1/registrations/{registration_id}:suspend
 POST   /v1/registrations/{registration_id}:restore
@@ -338,6 +339,18 @@ GET    /v1/registrations/{registration_id}/findings
 GET    /v1/registrations:drift
 POST   /v1/registrations:reconcile
 ```
+
+`GET /v1/registrations` lists the configured realm's registrations, one page at a time, in
+creation order: `?after=<registration_id>&limit=<1..100>&state=<state>`. The cursor is
+the last `registration_id` of the previous page. That identifier is a UUIDv7, so ordering
+on it is creation order, and a keyset on the primary key is what STD-GLB-001 requires in
+place of an offset. `limit` defaults to 50. `state` narrows the list to one lifecycle
+state, and without it every state is listed, `retired` included, because a retired
+registration is still the record of a client that existed. The response is
+`{"registrations": [...], "next": "<registration_id>" | null}`. Each item has the same
+shape as `GET /v1/registrations/{registration_id}` and carries no secret, since none is
+stored. It is what an administrative console lists before it opens one registration and
+its findings.
 
 `GET /v1/registrations:drift` returns the last run, the findings that run wrote or
 converged, and every finding that has not converged. A repair converges inside the sweep
@@ -600,6 +613,14 @@ becomes available.
   compatibility evidence is refused.
 - `none`, symmetric algorithms, and algorithms outside the STD-IAM-002 allowlist are
   refused before any Keycloak call.
+
+### Listing
+
+- The list pages by `registration_id` in creation order. The last page's `next` is
+  null, and an empty page is an empty list.
+- A listed registration has the same shape as a read of that registration.
+- `state` narrows the list. A limit outside 1 to 100, or an unknown state, is refused.
+- The list is scoped to the configured realm.
 
 ### Credentials
 

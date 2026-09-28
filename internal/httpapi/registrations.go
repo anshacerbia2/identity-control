@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,6 +35,7 @@ type Reconciler interface {
 type Registrar interface {
 	Register(ctx context.Context, req registration.Request) (registration.Registration, error)
 	Get(ctx context.Context, registrationID id.UUID) (registration.Registration, error)
+	List(ctx context.Context, query registration.ListQuery) (registration.Page, error)
 }
 
 // Registrations serves the registration and drift routes.
@@ -117,6 +119,46 @@ func (h *Registrations) GetRegistration(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusOK, found)
+}
+
+// ListRegistrations handles GET /v1/registrations: one page of the realm's registrations in
+// creation order, `?after=<registration_id>&limit=<1..100>&state=<state>`. The cursor is a
+// registration_id, never an offset (STD-GLB-001 §Pagination).
+func (h *Registrations) ListRegistrations(w http.ResponseWriter, r *http.Request) {
+	if _, ok := callerPrincipal(r); !ok {
+		httpapi.Problem(w, r, httpapi.AuthenticationRequired, "The request carries no authenticated caller")
+		return
+	}
+	params := r.URL.Query()
+	query := registration.ListQuery{State: params.Get("state")}
+	if raw := params.Get("after"); raw != "" {
+		after, err := id.Parse(raw)
+		if err != nil {
+			httpapi.Problem(w, r, httpapi.ValidationFailed, "after is not a valid registration_id")
+			return
+		}
+		query.After = after
+	}
+	if raw := params.Get("limit"); raw != "" {
+		// Zero is how the service is asked for its default, so a written limit must be at least one:
+		// a caller who writes zero is asking for nothing, not for fifty.
+		limit, err := strconv.Atoi(raw)
+		if err != nil || limit < 1 {
+			httpapi.Problem(w, r, httpapi.ValidationFailed, "limit must be a whole number of at least 1")
+			return
+		}
+		query.Limit = limit
+	}
+	page, err := h.registrar.List(r.Context(), query)
+	if err != nil {
+		if errors.Is(err, registration.ErrInvalid) {
+			httpapi.Problem(w, r, httpapi.ValidationFailed, err.Error())
+			return
+		}
+		httpapi.Problem(w, r, httpapi.Internal, "The registrations could not be read")
+		return
+	}
+	writeJSON(w, http.StatusOK, page)
 }
 
 // Findings handles GET /v1/registrations/{registration_id}/findings: that client's divergences,
