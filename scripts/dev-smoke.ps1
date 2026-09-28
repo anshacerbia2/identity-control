@@ -11,7 +11,8 @@
 #   6. a workload with an owner is created
 #   7. an unknown field is refused                         no client-supplied keycloak_user_id
 #   8. a missing Idempotency-Key is refused
-#   9. the registration sweep runs and reports    TDD-identity-control-003, Proof B step 4
+#  10. the registration sweep runs and reports    TDD-identity-control-003, Proof B step 4
+#   9. clients are registered from desired state  TDD-identity-control-003, Proof B step 5
 #
 # SECRETS: read from the environment.
 #   $env:IDENTITY_CALLER_SECRET   = '...'
@@ -141,7 +142,32 @@ $r = Send-Json "POST" "/v1/principals" '{"username":"carol","subject_type":"huma
 Expect "refused" $r.code 400
 
 Write-Host ""
-Write-Host "9. the registration sweep is observable"
+Write-Host "9. register a resource and a public client"
+$r = Send-Json "POST" "/v1/registrations" `
+    '{"client_key":"smoke-orders","profile":"resource","audience_class":"internal","application_ref":"smoke","lifetime_class":"L1"}' `
+    $token "smoke-register-orders"
+Expect "resource registered" $r.code 201
+$r = Send-Json "POST" "/v1/registrations" `
+    '{"client_key":"smoke-web","profile":"public","audience_class":"internal","application_ref":"smoke","audience":["smoke-orders"],"redirect_uris":["http://127.0.0.1:9999/callback"]}' `
+    $token "smoke-register-web"
+Expect "public client registered" $r.code 201
+if ($r.code -eq 201) {
+    $web = $r.body | ConvertFrom-Json
+    Expect "state" $web.state "active"
+    Expect "lifespan derived from L1" $web.access_token_lifespan 540
+    $g = Send-Json "GET" "/v1/registrations/$($web.registration_id)" $null $token $null
+    Expect "read back" $g.code 200
+}
+$r = Send-Json "POST" "/v1/registrations" `
+    '{"client_key":"identity-control-caller","profile":"public","audience_class":"internal","application_ref":"smoke","redirect_uris":["http://127.0.0.1:8099/callback"]}' `
+    $token "smoke-register-taken"
+Expect "an unregistered kernel client's key is refused" $r.code 409
+$r = Send-Json "POST" "/v1/registrations" `
+    '{"client_key":"smoke-wild","profile":"public","audience_class":"internal","application_ref":"smoke","redirect_uris":["https://*.example.com/cb"]}' `
+    $token "smoke-register-wild"
+Expect "a wildcard redirect is refused" $r.code 400
+Write-Host ""
+Write-Host "10. the registration sweep is observable"
 $r = Send-Json "GET" "/v1/registrations:drift" $null $null $null
 Expect "refused without a token" $r.code 401
 $r = Send-Json "POST" "/v1/registrations:reconcile" $null $token $null
@@ -152,7 +178,7 @@ if ($r.code -eq 200) {
     $deferred = $sweep.PSObject.Properties.Name -contains 'deferred'
     $outcome = if ($deferred) { "deferred" } else { $sweep.run.outcome }
     Write-Host "        outcome=$outcome attribution=$($sweep.run.attribution)"
-    # Converged: nothing is registered yet, so nothing can diverge. Attribution true: the
+    # Converged: what case 9 registered matches the kernel. Attribution true: the
     # registration credential read the kernel's admin events. Anything else is a wiring fault.
     if (-not $deferred) {
         Expect "the run converged" $sweep.run.outcome "converged"

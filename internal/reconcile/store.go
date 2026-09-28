@@ -10,6 +10,7 @@ import (
 	"github.com/anshacerbia2/foundation-platform/id"
 
 	"github.com/anshacerbia2/identity-control/internal/keycloak"
+	clientregistration "github.com/anshacerbia2/identity-control/internal/registration"
 )
 
 // The reads and writes of identity.reconcile_run, registration_finding and drift_exception, plus
@@ -37,27 +38,13 @@ SET finished_at = $2, outcome = $3, attribution = $4, findings = $5
 WHERE run_id = $1 AND finished_at IS NULL`
 
 // desiredStatement is every active registration the sweep compares, with its derived access token
-// lifespan (TDD-identity-control-003 §Data Model): the access token lifetime of the shortest
-// lifetime class among the resources in its audience, from STD-IAM-002 §3.3. An audience entry no
-// active resource registration names takes L0, as does an empty audience. The shortest class is
-// the safe reading of what nobody declared.
-const desiredStatement = `SELECT r.registration_id::text,
+// lifespan (registration.LifespanSQL, TDD-identity-control-003 §Data Model).
+var desiredStatement = `SELECT r.registration_id::text,
        r.client_key,
        r.kc_client_id,
        r.profile,
        coalesce(r.redirect_uris, '{}'::text[]),
-       coalesce((
-           SELECT min(coalesce(CASE a.lifetime_class
-                                   WHEN 'L0' THEN 240
-                                   WHEN 'L1' THEN 540
-                                   WHEN 'L2' THEN 900
-                                   WHEN 'L3' THEN 540
-                               END, 240))
-           FROM unnest(coalesce(r.audience, '{}'::text[])) AS aud(client_key)
-           LEFT JOIN identity.client_registration a
-                  ON a.realm = r.realm AND a.client_key = aud.client_key
-                 AND a.profile = 'resource' AND a.state <> 'retired'
-       ), 240)
+       ` + clientregistration.LifespanSQL("r.realm", "r.audience") + `
 FROM identity.client_registration r
 WHERE r.realm = $1 AND r.state = 'active' AND r.kc_client_id IS NOT NULL
 ORDER BY r.client_key`
@@ -198,9 +185,12 @@ func writeFinding(ctx context.Context, tx db.Tx, w findingWrite) error {
 	if err != nil {
 		return fmt.Errorf("reconcile: encode observed value: %w", err)
 	}
-	actor := any(nil)
+	actor, field := any(nil), any(nil)
 	if w.actor != "" {
 		actor = w.actor
+	}
+	if w.field != "" {
+		field = string(w.field)
 	}
 	if w.existing != nil {
 		if _, err := tx.Exec(ctx, updateFindingStatement, w.existing.id.String(), w.run.String(), string(w.class),
@@ -214,7 +204,7 @@ func writeFinding(ctx context.Context, tx db.Tx, w findingWrite) error {
 		return fmt.Errorf("reconcile: mint finding_id: %w", err)
 	}
 	if _, err := tx.Exec(ctx, insertFindingStatement, findingID.String(), w.run.String(), w.registration.String(),
-		string(w.client), string(w.field), string(w.class), string(desired), string(observed), actor,
+		string(w.client), field, string(w.class), string(desired), string(observed), actor,
 		w.changedAt, w.detectedAt, w.convergedAt); err != nil {
 		return fmt.Errorf("reconcile: insert finding: %w", err)
 	}

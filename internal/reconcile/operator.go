@@ -42,7 +42,7 @@ const lastRunStatement = `SELECT run_id::text, started_at, finished_at, coalesce
 FROM identity.reconcile_run WHERE sweep = 'registration'
 ORDER BY started_at DESC LIMIT 1`
 
-const openFindingDetailStatement = `SELECT f.finding_id::text, f.registration_id::text, r.client_key, f.field_class,
+const openFindingDetailStatement = `SELECT f.finding_id::text, f.registration_id::text, r.client_key, coalesce(f.field_class, ''),
        f.finding_class, coalesce(f.desired, 'null'::jsonb)::text, coalesce(f.observed, 'null'::jsonb)::text,
        coalesce(f.actor, ''), f.changed_at, f.detected_at
 FROM identity.registration_finding f

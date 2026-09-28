@@ -11,10 +11,12 @@ import (
 	"time"
 
 	"github.com/anshacerbia2/foundation-platform/id"
+	"github.com/anshacerbia2/foundation-platform/idempotency"
 
 	"github.com/anshacerbia2/identity-control/internal/httpapi"
 	"github.com/anshacerbia2/identity-control/internal/keycloak"
 	"github.com/anshacerbia2/identity-control/internal/reconcile"
+	"github.com/anshacerbia2/identity-control/internal/registration"
 )
 
 type stubReconciler struct {
@@ -51,7 +53,7 @@ func (s *stubReconciler) GrantException(_ context.Context, exception reconcile.E
 
 func registrationsHandler(t *testing.T, stub *stubReconciler) http.Handler {
 	t.Helper()
-	registrations, err := httpapi.NewRegistrations(stub)
+	registrations, err := httpapi.NewRegistrations(&stubRegistrar{}, stub)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +241,134 @@ func TestADriftExceptionRefusesWhatItCannotGrant(t *testing.T) {
 }
 
 func TestTheDriftHandlerNeedsAReconciler(t *testing.T) {
-	if _, err := httpapi.NewRegistrations(nil); err == nil {
+	if _, err := httpapi.NewRegistrations(nil, &stubReconciler{}); err == nil {
 		t.Error("a drift handler without a reconciler was built")
+	}
+}
+
+type stubRegistrar struct {
+	req     *registration.Request
+	created registration.Registration
+	err     error
+}
+
+func (s *stubRegistrar) Register(_ context.Context, req registration.Request) (registration.Registration, error) {
+	s.req = &req
+	return s.created, s.err
+}
+
+func (s *stubRegistrar) Get(_ context.Context, registrationID id.UUID) (registration.Registration, error) {
+	if s.err != nil {
+		return registration.Registration{}, s.err
+	}
+	return registration.Registration{ID: registrationID, ClientKey: "web"}, nil
+}
+
+func registrarHandler(t *testing.T, registrar *stubRegistrar) http.Handler {
+	t.Helper()
+	registrations, err := httpapi.NewRegistrations(registrar, &stubReconciler{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	principals, _ := httpapi.NewPrincipals(&stubProvisioner{}, realm)
+	built, err := httpapi.Routes(httpapi.RoutesConfig{Principals: principals, Registrations: registrations, Database: &stubProber{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := func(next http.Handler) http.Handler { return next }
+	return built.Mount(identity, identity)
+}
+
+const registerBody = `{"client_key":"web","profile":"public","audience_class":"internal","application_ref":"app",
+  "audience":["orders"],"redirect_uris":["https://app.example.com/cb"]}`
+
+// The caller, not the body, is the accountable Principal, and the key is claimed under the caller.
+func TestARegistrationIsRecordedUnderTheCaller(t *testing.T) {
+	registrar := &stubRegistrar{created: registration.Registration{ClientKey: "web", State: "active"}}
+	r, principal := asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/registrations", strings.NewReader(registerBody)))
+	r.Header.Set(httpapi.IdempotencyHeader, "register-1")
+	w := serve(registrarHandler(t, registrar), r)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status %d: %s", w.Code, w.Body)
+	}
+	got := registrar.req
+	if got.RegisteredBy != principal || got.CallerScope != "principal:"+principal.String() || got.IdempotencyKey != "register-1" ||
+		got.ClientKey != "web" || len(got.Audience) != 1 || len(got.RedirectURIs) != 1 {
+		t.Errorf("request = %+v", got)
+	}
+}
+
+func TestARegistrationRefusesWhatItCannotRead(t *testing.T) {
+	for name, c := range map[string]struct {
+		body string
+		key  string
+	}{
+		"no Idempotency-Key":   {registerBody, ""},
+		"an unknown field":     {`{"client_key":"web","secret":"x"}`, "k"},
+		"a malformed document": {`{`, "k"},
+	} {
+		registrar := &stubRegistrar{}
+		r, _ := asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/registrations", strings.NewReader(c.body)))
+		if c.key != "" {
+			r.Header.Set(httpapi.IdempotencyHeader, c.key)
+		}
+		if w := serve(registrarHandler(t, registrar), r); w.Code != http.StatusBadRequest || registrar.req != nil {
+			t.Errorf("%s answered %d", name, w.Code)
+		}
+	}
+	w := serve(registrarHandler(t, &stubRegistrar{}), httptest.NewRequest(http.MethodPost, "/v1/registrations", strings.NewReader(registerBody)))
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("an unauthenticated registration answered %d", w.Code)
+	}
+}
+
+func TestARegistrationMapsTheRegistrarsErrors(t *testing.T) {
+	for name, c := range map[string]struct {
+		err  error
+		want int
+	}{
+		"invalid":           {registration.ErrInvalid, http.StatusBadRequest},
+		"profile not built": {registration.ErrProfileNotBuilt, http.StatusBadRequest},
+		"scope undeclared":  {registration.ErrScopeUndeclared, http.StatusBadRequest},
+		"key taken":         {registration.ErrKeyTaken, http.StatusConflict},
+		"key reused":        {idempotency.ErrConflict, http.StatusConflict},
+		"in progress":       {idempotency.ErrInProgress, http.StatusConflict},
+		"kernel down":       {keycloak.ErrUnavailable, http.StatusServiceUnavailable},
+	} {
+		r, _ := asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/registrations", strings.NewReader(registerBody)))
+		r.Header.Set(httpapi.IdempotencyHeader, "k")
+		if w := serve(registrarHandler(t, &stubRegistrar{err: c.err}), r); w.Code != c.want {
+			t.Errorf("%s answered %d, want %d", name, w.Code, c.want)
+		}
+	}
+}
+
+func TestARegistrationIsReadByIdentifier(t *testing.T) {
+	registrationID := mustUUID(t)
+	r, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, "/v1/registrations/"+registrationID.String(), nil))
+	w := serve(registrarHandler(t, &stubRegistrar{}), r)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), registrationID.String()) {
+		t.Errorf("status %d: %s", w.Code, w.Body)
+	}
+	for path, want := range map[string]int{
+		"/v1/registrations/nope": http.StatusBadRequest,
+	} {
+		r, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, path, nil))
+		if w := serve(registrarHandler(t, &stubRegistrar{}), r); w.Code != want {
+			t.Errorf("%s answered %d", path, w.Code)
+		}
+	}
+	r, _ = asPrincipal(t, httptest.NewRequest(http.MethodGet, "/v1/registrations/"+registrationID.String(), nil))
+	if w := serve(registrarHandler(t, &stubRegistrar{err: registration.ErrNotFound}), r); w.Code != http.StatusNotFound {
+		t.Errorf("an unknown registration answered %d", w.Code)
+	}
+	if w := serve(registrarHandler(t, &stubRegistrar{}), httptest.NewRequest(http.MethodGet, "/v1/registrations/"+registrationID.String(), nil)); w.Code != http.StatusUnauthorized {
+		t.Errorf("an unauthenticated read answered %d", w.Code)
+	}
+}
+
+func TestTheRegistrationHandlerNeedsARegistrar(t *testing.T) {
+	if _, err := httpapi.NewRegistrations(&stubRegistrar{}, nil); err == nil {
+		t.Error("a handler without a reconciler was built")
 	}
 }

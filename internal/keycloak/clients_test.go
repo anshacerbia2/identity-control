@@ -216,3 +216,112 @@ func TestATokenThatIsNotAJWTNamesNoServiceAccount(t *testing.T) {
 		}
 	}
 }
+
+func TestCreateClientSendsAPublicClientAsTheProfileRequires(t *testing.T) {
+	k := &kernel{adminStatus: http.StatusCreated, adminLocation: "http://kc/admin/realms/scnehaux/clients/new-uuid"}
+	admin, _ := newAdmin(t, k)
+	client, err := admin.CreateClient(context.Background(), testRealm, keycloak.ClientSpec{ClientID: "web", Public: true,
+		RedirectURIs: []string{"https://app.example.com/cb"}, AccessTokenLifespan: 540, Audience: []string{"orders"}})
+	if err != nil || client != "new-uuid" {
+		t.Fatalf("CreateClient = %q, %v", client, err)
+	}
+	var sent map[string]any
+	if err := json.Unmarshal(k.lastBody, &sent); err != nil {
+		t.Fatal(err)
+	}
+	attributes := sent["attributes"].(map[string]any)
+	if sent["publicClient"] != true || sent["directAccessGrantsEnabled"] != false || sent["implicitFlowEnabled"] != false ||
+		attributes["pkce.code.challenge.method"] != "S256" || attributes["use.refresh.tokens"] != "false" ||
+		attributes["access.token.lifespan"] != "540" || attributes["access.token.signed.response.alg"] != "PS256" {
+		t.Errorf("sent %v", sent)
+	}
+	mappers := sent["protocolMappers"].([]any)
+	config := mappers[0].(map[string]any)["config"].(map[string]any)
+	if len(mappers) != 1 || config["included.client.audience"] != "orders" {
+		t.Errorf("audience mappers = %v", mappers)
+	}
+}
+
+func TestCreateClientSendsAResourceThatNobodyLogsInThrough(t *testing.T) {
+	k := &kernel{adminStatus: http.StatusCreated, adminLocation: "http://kc/admin/realms/scnehaux/clients/res"}
+	admin, _ := newAdmin(t, k)
+	if _, err := admin.CreateClient(context.Background(), testRealm, keycloak.ClientSpec{ClientID: "orders", Resource: true}); err != nil {
+		t.Fatal(err)
+	}
+	var sent map[string]any
+	_ = json.Unmarshal(k.lastBody, &sent)
+	if sent["bearerOnly"] != true || sent["standardFlowEnabled"] != false || sent["redirectUris"] != nil {
+		t.Errorf("sent %v", sent)
+	}
+}
+
+func TestCreateClientRefusesAnIncoherentSpec(t *testing.T) {
+	k := &kernel{}
+	admin, _ := newAdmin(t, k)
+	for name, spec := range map[string]keycloak.ClientSpec{
+		"no clientId":                 {Public: true, RedirectURIs: []string{"https://a"}, AccessTokenLifespan: 1},
+		"neither public nor resource": {ClientID: "x"},
+		"both":                        {ClientID: "x", Public: true, Resource: true},
+		"public without redirects":    {ClientID: "x", Public: true, AccessTokenLifespan: 1},
+		"a resource with an audience": {ClientID: "x", Resource: true, Audience: []string{"y"}},
+	} {
+		if _, err := admin.CreateClient(context.Background(), testRealm, spec); err == nil {
+			t.Errorf("%s was sent", name)
+		}
+	}
+	if k.adminCalls.Load() != 0 {
+		t.Error("an incoherent spec reached the kernel")
+	}
+}
+
+func TestACreateWithoutALocationIsAmbiguous(t *testing.T) {
+	admin, _ := newAdmin(t, &kernel{adminStatus: http.StatusCreated})
+	_, err := admin.CreateClient(context.Background(), testRealm, keycloak.ClientSpec{ClientID: "orders", Resource: true})
+	if !errors.Is(err, keycloak.ErrAmbiguous) {
+		t.Errorf("a 201 without a Location answered %v, want ErrAmbiguous", err)
+	}
+	conflict, _ := newAdmin(t, &kernel{adminStatus: http.StatusConflict})
+	if _, err := conflict.CreateClient(context.Background(), testRealm, keycloak.ClientSpec{ClientID: "orders", Resource: true}); !errors.Is(err, keycloak.ErrConflict) {
+		t.Errorf("a 409 answered %v", err)
+	}
+}
+
+func TestFindClientsIsExact(t *testing.T) {
+	k := &kernel{adminBody: `[{"id":"a","clientId":"web"},{"id":"b","clientId":"web-2"}]`}
+	admin, _ := newAdmin(t, k)
+	found, err := admin.FindClients(context.Background(), testRealm, "web")
+	if err != nil || len(found) != 1 || found[0].ID != "a" {
+		t.Errorf("found %+v, %v", found, err)
+	}
+	query, _ := url.ParseQuery(k.lastQuery)
+	if query.Get("clientId") != "web" || query.Get("search") != "false" {
+		t.Errorf("query = %v", query)
+	}
+	if _, err := admin.FindClients(context.Background(), testRealm, " "); err == nil {
+		t.Error("an empty clientId was searched")
+	}
+}
+
+func TestClientScopeIDFindsTheNamedScope(t *testing.T) {
+	admin, _ := newAdmin(t, &kernel{adminBody: `[{"id":"s1","name":"scnehaux-internal"},{"id":"s2","name":"profile"}]`})
+	if scope, err := admin.ClientScopeID(context.Background(), testRealm, "scnehaux-internal"); err != nil || scope != "s1" {
+		t.Errorf("scope = %q, %v", scope, err)
+	}
+	if _, err := admin.ClientScopeID(context.Background(), testRealm, "scnehaux-workload"); !errors.Is(err, keycloak.ErrNotFound) {
+		t.Errorf("an undeclared scope answered %v", err)
+	}
+}
+
+func TestAddDefaultClientScopeAttachesByIdentifier(t *testing.T) {
+	k := &kernel{adminStatus: http.StatusNoContent}
+	admin, _ := newAdmin(t, k)
+	if err := admin.AddDefaultClientScope(context.Background(), testRealm, "c1", "s1"); err != nil {
+		t.Fatal(err)
+	}
+	if k.lastMethod != http.MethodPut || k.lastPath != "/admin/realms/scnehaux/clients/c1/default-client-scopes/s1" {
+		t.Errorf("%s %s", k.lastMethod, k.lastPath)
+	}
+	if err := admin.AddDefaultClientScope(context.Background(), testRealm, "", "s1"); err == nil {
+		t.Error("an attachment without a client was sent")
+	}
+}

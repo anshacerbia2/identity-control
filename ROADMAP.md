@@ -314,7 +314,7 @@ asserted by test.
 
 ## Proof B · Keycloak drift
 
-In progress: decided 2026-09-28, steps 1 to 4 done. `organization-control` backlog item 10.
+In progress: decided 2026-09-28, steps 1 to 5 done. `organization-control` backlog item 10.
 It was labelled P2 in RESPONSE-7 to RESPONSE-10 and listed with the P1 backlog in RESPONSE-23.
 
 **The claim to prove** (RESPONSE-4 §4): drift between reviewed desired state and live Keycloak can
@@ -404,13 +404,28 @@ Acceptance criteria, also from RESPONSE-4 §4:
    hours. Two field classes are compared: `token_lifespan` and `redirect_uris`. An absent client
    is reported, not recreated, and no client is treated as unmanaged until step 5 registers them
    (TDD-003 §Drift Reconciliation).
-5. Build the registration API: `POST /v1/registrations` and `GET /v1/registrations/{id}`,
-   creating the client from desired state, with pending-state recovery. Then recreate an absent
-   client, and disable an unmanaged one, except the clients Keycloak creates in every realm.
-   Found while building step 4: the drift proof needs a registered client, and nothing writes one.
+5. ✅ Build the registration API: `POST /v1/registrations` (with an Idempotency-Key) and
+   `GET /v1/registrations/{id}`. `internal/registration` records desired state as a pending row,
+   creates the client, attaches the audience class's managed scope, and activates it. Pending
+   rows are recovered before each sweep. An absent client is now recreated. Found while building
+   step 4: the drift proof needs a registered client, and nothing wrote one. Scope, and what it
+   leaves (TDD-003 §Validation, §Drift Reconciliation):
+   - Only the `public` and `resource` profiles are built, which are enough for the drift proof.
+     `confidential` and `workload` are refused until credential issuance exists.
+   - The kernel declares no `scnehaux-workload` or tenant-scope privileged scope. Registrations
+     of those classes are refused, and TDD-003's scope names now follow the kernel's.
+   - A key an unregistered Keycloak client holds is refused, never adopted.
+   - Disabling unmanaged clients is still not built. This service's own credentials are
+     confidential clients that cannot be registered yet.
 6. Add a Proof B end-to-end job in `deploy-dev.yml` against a real Keycloak: both scenarios, the
    exception, Keycloak down, and convergence time.
 7. Add `:relink`, the dangling-mapping finding, and the portability test.
+
+**Found while building, and not part of Proof B:**
+
+- **Credential issuance:** confidential and workload registration, with `identity.client_credential`, rotation and revocation (TDD-003 §Credential Records, §Credential Rotation).
+- **Disabling unmanaged clients:** it needs this service's own clients registered first, and it must exempt the clients Keycloak creates in every realm.
+- **Kernel scopes:** `identity-kernel` must declare `scnehaux-workload` and a tenant-scope privileged scope before registrations of those classes can exist.
 
 ## Waiting on the Keycloak proof-of-concept
 

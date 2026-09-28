@@ -32,6 +32,7 @@ import (
 	"github.com/anshacerbia2/identity-control/internal/identity/provisioning"
 	"github.com/anshacerbia2/identity-control/internal/keycloak"
 	"github.com/anshacerbia2/identity-control/internal/reconcile"
+	"github.com/anshacerbia2/identity-control/internal/registration"
 )
 
 func main() {
@@ -127,16 +128,26 @@ func run() error {
 		return fmt.Errorf("registration kernel client: %w", err)
 	}
 
+	registrar, err := registration.New(pool, registry, registration.Config{
+		Realm:                keycloak.Realm(cfg.KeycloakRealm),
+		CallTimeout:          cfg.ProvisionTimeout,
+		PendingRecoveryAfter: cfg.PendingRecoveryAfter,
+	}, logger)
+	if err != nil {
+		return fmt.Errorf("registration service: %w", err)
+	}
+
 	reconciler, err := reconcile.New(pool, registry, reconcile.Config{
 		Realm:       keycloak.Realm(cfg.KeycloakRealm),
 		Interval:    cfg.RegistrationReconcileInterval,
 		CallTimeout: cfg.ProvisionTimeout,
+		Recreate:    registrar.Recreate,
 	}, logger)
 	if err != nil {
 		return fmt.Errorf("registration reconciler: %w", err)
 	}
 
-	registrations, err := httpapi.NewRegistrations(reconciler)
+	registrations, err := httpapi.NewRegistrations(registrar, reconciler)
 	if err != nil {
 		return fmt.Errorf("registration drift handler: %w", err)
 	}
@@ -229,7 +240,7 @@ func run() error {
 	// The registration sweep runs on a schedule from here, the one package allowed to start a
 	// goroutine. Every replica schedules it; the reconciler's run claim lets one sweep at a time
 	// through, so the others' ticks are skipped rather than duplicated.
-	go scheduleSweeps(ctx, reconciler, cfg.RegistrationReconcileInterval, logger)
+	go scheduleSweeps(ctx, registrar, reconciler, cfg.RegistrationReconcileInterval, logger)
 
 	select {
 	case err := <-serveErr:
@@ -255,10 +266,18 @@ func run() error {
 // scheduleSweeps runs a registration sweep at start and then every interval, until ctx ends. A
 // sweep cut off by shutdown leaves its run unfinished, which is how a stopped replica's run is
 // meant to look, and it stops blocking the next one after two intervals.
-func scheduleSweeps(ctx context.Context, reconciler *reconcile.Reconciler, interval time.Duration, logger *slog.Logger) {
+func scheduleSweeps(ctx context.Context, registrar *registration.Service, reconciler *reconcile.Reconciler,
+	interval time.Duration, logger *slog.Logger) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
+		// Pending registrations first, so a client whose creation was interrupted is adopted before
+		// the sweep compares the registrations that are active.
+		if resolved, err := registrar.RecoverPending(ctx); err != nil {
+			logger.Error("pending registration recovery failed", slog.String("error", err.Error()))
+		} else if resolved > 0 {
+			logger.Info("pending registrations recovered", slog.Int("resolved", resolved))
+		}
 		run, err := reconciler.Sweep(ctx)
 		switch {
 		case errors.Is(err, reconcile.ErrSweepInProgress):
