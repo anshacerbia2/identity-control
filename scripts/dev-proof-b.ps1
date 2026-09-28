@@ -103,10 +103,12 @@ function Admin-Token {
 
 function Kc($method, $path, $body) { return Send $method "$kcAdmin/admin/realms/$realm$path" $body (Admin-Token) $null }
 
-function Subject($jwt) {
-    $segment = $jwt.Split('.')[1].Replace('-', '+').Replace('_', '/')
-    switch ($segment.Length % 4) { 2 { $segment += '==' } 3 { $segment += '=' } }
-    return ([System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($segment)) | ConvertFrom-Json).sub
+# The administrator's user identifier, which admin events name. Read from the master realm rather
+# than from the token: admin-cli's access token carries no sub claim.
+function Administrator-ID {
+    $users = (Send "GET" "$kcAdmin/admin/realms/master/users?username=$adminUser&exact=true" $null (Admin-Token) $null).json
+    foreach ($user in @($users)) { if ($user.username -eq $adminUser) { return $user.id } }
+    throw "the console administrator $adminUser was not found in the master realm"
 }
 
 # A console change: read the client, change it, write it back.
@@ -169,7 +171,7 @@ $r = Api "POST" "/v1/registrations" "{`"client_key`":`"proofb-web`",`"profile`":
 Expect "public client registered" $r.code 201
 $registration = $r.json.registration_id
 $clientUuid = (Kc "GET" "/clients?clientId=proofb-web&search=false" $null).json[0].id
-$actor = Subject (Admin-Token)
+$actor = Administrator-ID
 Write-Host "        registration $registration, client $clientUuid, console administrator $actor"
 
 Write-Host ""
