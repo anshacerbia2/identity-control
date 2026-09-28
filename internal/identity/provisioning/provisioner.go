@@ -55,8 +55,13 @@ type Config struct {
 	// exceed ProvisionTimeout, or recovery races the request it is repairing.
 	PendingRecoveryAfter time.Duration
 
-	// RecoveryBatch bounds one recovery sweep.
+	// RecoveryBatch bounds one recovery sweep, and is the page size of the dangling-mapping
+	// enumeration.
 	RecoveryBatch int
+
+	// Realm is the realm the dangling-mapping sweep enumerates. Creation takes its realm from the
+	// request; the sweep has none.
+	Realm keycloak.Realm
 }
 
 func (c *Config) applyDefaults() {

@@ -33,12 +33,29 @@ type stubProvisioner struct {
 	err      error
 	calls    int
 	last     provisioning.CreateRequest
+	relinked *provisioning.RelinkRequest
+	dangling []provisioning.DanglingFinding
 }
 
 func (s *stubProvisioner) Create(_ context.Context, req provisioning.CreateRequest) (provisioning.Response, error) {
 	s.calls++
 	s.last = req
 	return s.response, s.err
+}
+
+func (s *stubProvisioner) Relink(_ context.Context, req provisioning.RelinkRequest) (provisioning.RelinkResult, error) {
+	s.calls++
+	s.relinked = &req
+	return provisioning.RelinkResult{PrincipalID: req.PrincipalID, State: provisioning.StateActive}, s.err
+}
+
+func (s *stubProvisioner) Dangling(context.Context) ([]provisioning.DanglingFinding, error) {
+	return s.dangling, s.err
+}
+
+func (s *stubProvisioner) Reconcile(context.Context) (int, int, error) {
+	s.calls++
+	return 0, len(s.dangling), s.err
 }
 
 func mustUUID(t *testing.T) id.UUID {

@@ -241,6 +241,25 @@ func (a *Admin) listUsers(ctx context.Context, realm Realm, query url.Values) ([
 	return users, nil
 }
 
+// GetUser reads one user.
+func (a *Admin) GetUser(ctx context.Context, realm Realm, userID UserID) (User, error) {
+	if userID == "" {
+		return User{}, errors.New("keycloak: a user identifier is required")
+	}
+	response, err := a.do(ctx, http.MethodGet,
+		fmt.Sprintf("/admin/realms/%s/users/%s", url.PathEscape(string(realm)), url.PathEscape(string(userID))),
+		nil, nil, false)
+	if err != nil {
+		return User{}, err
+	}
+	defer response.Close()
+	var representation userRepresentation
+	if err := json.Unmarshal(response.body, &representation); err != nil {
+		return User{}, fmt.Errorf("keycloak: decode user: %w", err)
+	}
+	return representation.toUser(), nil
+}
+
 // DisableUser disables a user and is idempotent.
 //
 // Disable rather than delete is deliberate: a false positive caused by a reconciler defect is

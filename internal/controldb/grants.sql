@@ -34,6 +34,8 @@ BEGIN
               ('identity.reconcile_run'),
               ('identity.registration_finding'),
               ('identity.drift_exception'),
+              ('identity.principal_relink'),
+              ('identity.principal_finding'),
               ('platform.outbox'),
               ('platform.processed_event'),
               ('platform.dead_letter'),
@@ -94,6 +96,11 @@ REVOKE DELETE, TRUNCATE ON identity.client_registration FROM identity_runtime;
 REVOKE DELETE, TRUNCATE ON identity.reconcile_run FROM identity_runtime;
 REVOKE DELETE, TRUNCATE ON identity.registration_finding FROM identity_runtime;
 REVOKE UPDATE, DELETE, TRUNCATE ON identity.drift_exception FROM identity_runtime;
+
+-- A relink record says who moved a Principal to a new Keycloak user and why, so it is insert-only.
+-- A dangling-mapping finding is evidence that a user disappeared, kept after it is resolved.
+REVOKE UPDATE, DELETE, TRUNCATE ON identity.principal_relink FROM identity_runtime;
+REVOKE DELETE, TRUNCATE ON identity.principal_finding FROM identity_runtime;
 
 -- platform.outbox_sequence is read by every append. Without USAGE the outbox write fails
 -- inside the caller's domain transaction, so a membership mutation would roll back.

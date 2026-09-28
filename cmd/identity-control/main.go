@@ -109,6 +109,7 @@ func run() error {
 		ProvisionTimeout:     cfg.ProvisionTimeout,
 		PendingRecoveryAfter: cfg.PendingRecoveryAfter,
 		RecoveryBatch:        cfg.ReconcilePageSize,
+		Realm:                keycloak.Realm(cfg.KeycloakRealm),
 	}, logger)
 	if err != nil {
 		return fmt.Errorf("principal provisioner: %w", err)
@@ -240,7 +241,7 @@ func run() error {
 	// The registration sweep runs on a schedule from here, the one package allowed to start a
 	// goroutine. Every replica schedules it; the reconciler's run claim lets one sweep at a time
 	// through, so the others' ticks are skipped rather than duplicated.
-	go scheduleSweeps(ctx, registrar, reconciler, cfg.RegistrationReconcileInterval, logger)
+	go scheduleSweeps(ctx, provisioner, registrar, reconciler, cfg.RegistrationReconcileInterval, logger)
 
 	select {
 	case err := <-serveErr:
@@ -266,11 +267,18 @@ func run() error {
 // scheduleSweeps runs a registration sweep at start and then every interval, until ctx ends. A
 // sweep cut off by shutdown leaves its run unfinished, which is how a stopped replica's run is
 // meant to look, and it stops blocking the next one after two intervals.
-func scheduleSweeps(ctx context.Context, registrar *registration.Service, reconciler *reconcile.Reconciler,
-	interval time.Duration, logger *slog.Logger) {
+func scheduleSweeps(ctx context.Context, provisioner *provisioning.Provisioner, registrar *registration.Service,
+	reconciler *reconcile.Reconciler, interval time.Duration, logger *slog.Logger) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
+		// Principals first: a mapping whose creation was interrupted is recovered, which nothing ran
+		// before this schedule existed, and an active mapping whose Keycloak user is gone is reported.
+		if recovered, dangling, err := provisioner.Reconcile(ctx); err != nil {
+			logger.Error("principal sweep failed", slog.String("error", err.Error()))
+		} else if recovered > 0 || dangling > 0 {
+			logger.Warn("principal sweep", slog.Int("recovered", recovered), slog.Int("dangling", dangling))
+		}
 		// Pending registrations first, so a client whose creation was interrupted is adopted before
 		// the sweep compares the registrations that are active.
 		if resolved, err := registrar.RecoverPending(ctx); err != nil {

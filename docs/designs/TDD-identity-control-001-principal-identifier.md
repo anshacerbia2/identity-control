@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-001
   title: Canonical Principal Identifier and Creation Path
   owner: Core Platform Team
-  version: 1.4.0
+  version: 1.5.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -264,6 +264,36 @@ The recovery below then does what it does for any pending mapping: it adopts a u
 carrying the identifier, or creates one with the same `principal_id`. Nothing outside
 this table changes, since `organization-control` holds Memberships by `principal_id`.
 
+```sql
+CREATE TABLE identity.principal_relink (
+    relink_id                 UUID        PRIMARY KEY,
+    principal_id              UUID        NOT NULL REFERENCES identity.principal_mapping(principal_id),
+    previous_keycloak_user_id TEXT        NOT NULL,
+    relinked_by               UUID        NOT NULL,
+    reason                    TEXT        NOT NULL CHECK (btrim(reason) <> ''),
+    relinked_at               TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE identity.principal_finding (
+    finding_id       UUID        PRIMARY KEY,
+    principal_id     UUID        NOT NULL REFERENCES identity.principal_mapping(principal_id),
+    finding_class    TEXT        NOT NULL CHECK (finding_class IN ('dangling')),
+    keycloak_user_id TEXT        NOT NULL,
+    detected_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    resolved_at      TIMESTAMPTZ,
+    resolution       TEXT,
+    CHECK ((resolved_at IS NULL) = (resolution IS NULL)
+        AND (resolution IS NULL OR resolution IN ('relinked', 'user_present')))
+);
+
+CREATE UNIQUE INDEX principal_finding_open ON identity.principal_finding (principal_id)
+    WHERE resolved_at IS NULL;
+```
+
+`principal_relink` is insert-only for the runtime role: a Principal's move to a new
+Keycloak user is exactly the change whose record must not be rewritable by the process
+that made it. A finding is kept after it resolves, and the runtime deletes none.
+
 ### Keycloak
 
 The canonical identifier is stored as a user attribute:
@@ -361,6 +391,7 @@ POST   /v1/principals/{principal_id}:quarantine
 POST   /v1/principals/{principal_id}:relink
 POST   /v1/principals/{principal_id}:retire
 GET    /v1/principals:unmapped
+GET    /v1/principals:dangling
 POST   /v1/principals:reconcile
 ```
 
@@ -468,6 +499,18 @@ deleted on purpose, by an administrator removing someone's access. A sweep that
 recreated every missing user would restore that access within one interval, with
 nobody having decided it. Relinking is an operator's decision, made through `:relink`
 with a reason.
+
+The users are enumerated before the active mappings are read, and a mapping activated
+during the enumeration is left for the next sweep, since its user may sit on a page
+already read. An enumeration that fails part way records nothing, because an unread page
+is not a missing user. When a later sweep finds the user present again, the open finding
+is resolved as `user_present`.
+
+**Built so far.** Pending recovery and the dangling-mapping sweep run on the registration
+reconcile schedule (TDD-identity-control-003), and on `POST /v1/principals:reconcile`.
+Before that schedule existed, nothing ran pending recovery: a creation interrupted after
+its checkpoint stayed pending until someone noticed. The unmapped, orphan and duplicate
+branches above are not built.
 
 Disabling rather than deleting is deliberate: a false positive caused by a
 reconciler defect is recoverable, while deletion of a Principal is not.
