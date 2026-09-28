@@ -50,7 +50,7 @@ $http.Timeout = [TimeSpan]::FromSeconds(60)
 $callback = "http://127.0.0.1:9998/callback"
 $takeover = "https://attacker.example.net/callback"
 
-# Under strict mode an absent property throws, and the service omits empty fields.
+# Under strict mode an absent property throws, and the service omits empty fields. A function that`n# returns an empty array returns $null to its caller, so its call sites are wrapped in @().
 function Get-Prop($object, [string] $name) {
     if ($null -ne $object -and $object.PSObject.Properties.Name -contains $name) { return $object.$name }
     return $null
@@ -242,18 +242,18 @@ $r = Api "POST" "/v1/principals" '{"username":"proofb.portable","email":"portabl
 Expect "Principal created" $r.code 201
 $principal = $r.json.principal_id
 function Users-Carrying($principalId) { return @((Kc "GET" "/users?q=scnehaux_principal_id:$principalId&exact=true" $null).json) }
-$original = (Users-Carrying $principal)[0].id
+$original = @(Users-Carrying $principal)[0].id
 Expect "the console administrator deletes the user" (Kc "DELETE" "/users/$original" $null).code 204
 $r = Api "POST" "/v1/principals:reconcile" $null $null
 Expect "the sweep ran" $r.code 200
 $listed = @((Api "GET" "/v1/principals:dangling" $null $null).json.dangling | Where-Object { $_.principal_id -eq $principal })
 Expect "the mapping is reported dangling" $listed.Count 1
-Expect "the sweep recreated nothing" (Users-Carrying $principal).Count 0
+Expect "the sweep recreated nothing" @(Users-Carrying $principal).Count 0
 Expect "a relink without a reason is refused" (Api "POST" "/v1/principals/${principal}:relink" $null $null).code 400
 $r = Api "POST" "/v1/principals/${principal}:relink" $null @{ "X-Administrative-Reason" = "proof-b: the user was deleted by mistake" }
 Expect "relinked" $r.code 200
 Expect "active again" (Get-Prop $r.json "state") "active"
-$carriers = Users-Carrying $principal
+$carriers = @(Users-Carrying $principal)
 Expect "exactly one user carries the same principal_id" $carriers.Count 1
 Expect "and it is a new user" ($carriers[0].id -ne $original) $true
 $listed = @((Api "GET" "/v1/principals:dangling" $null $null).json.dangling | Where-Object { $_.principal_id -eq $principal })
