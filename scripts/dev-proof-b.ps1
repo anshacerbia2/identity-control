@@ -12,15 +12,17 @@
 #      an operator's reconcile lifts it
 #   4. a change covered by a drift exception is left in place until the exception expires, and
 #      is then repaired
-#   5. an unreachable Keycloak is 'unresolved', and the sweep converges once it is back
+#   5. a Principal whose Keycloak user is deleted is reported, not recreated, and an operator's
+#      :relink provisions a new user carrying the same principal_id
+#   6. an unreachable Keycloak is 'unresolved', and the sweep converges once it is back
 #
 # SECRETS: read from the environment.
 #   IDENTITY_CALLER_SECRET, IDENTITY_CALLER_PASSWORD   a provider-scope token, as dev-smoke.ps1
 #   KC_BOOTSTRAP_ADMIN_USERNAME, KC_BOOTSTRAP_ADMIN_PASSWORD   the console administrator
 #
 # KC_BASE_URL is where the login form is served, KC_ADMIN_URL the kernel's private address where
-# /admin is reachable, and KERNEL_KEYCLOAK_CONTAINER the container scenario 5 stops. It is for a
-# kernel that exists for the length of a CI job. Scenario 5 stops Keycloak: never run it against a
+# /admin is reachable, and KERNEL_KEYCLOAK_CONTAINER the container scenario 6 stops. It is for a
+# kernel that exists for the length of a CI job. Scenario 6 stops Keycloak: never run it against a
 # shared server.
 #
 # Usage: pwsh ./scripts/dev-proof-b.ps1
@@ -235,7 +237,31 @@ $afterExpiry = Seconds $expires $f.converged_at
 Record "Lifespan change under an exception" "sanctioned, then repaired at expiry" "converged $afterExpiry s after the exception expired"
 
 Write-Host ""
-Write-Host "5. Keycloak unreachable: unresolved, then converged"
+Write-Host "5. portability: a Principal outlives its Keycloak user"
+$r = Api "POST" "/v1/principals" '{"username":"proofb.portable","email":"portable@scnehaux.local","subject_type":"human"}' @{ "Idempotency-Key" = "proofb-portable" }
+Expect "Principal created" $r.code 201
+$principal = $r.json.principal_id
+function Users-Carrying($principalId) { return @((Kc "GET" "/users?q=scnehaux_principal_id:$principalId&exact=true" $null).json) }
+$original = (Users-Carrying $principal)[0].id
+Expect "the console administrator deletes the user" (Kc "DELETE" "/users/$original" $null).code 204
+$r = Api "POST" "/v1/principals:reconcile" $null $null
+Expect "the sweep ran" $r.code 200
+$listed = @((Api "GET" "/v1/principals:dangling" $null $null).json.dangling | Where-Object { $_.principal_id -eq $principal })
+Expect "the mapping is reported dangling" $listed.Count 1
+Expect "the sweep recreated nothing" (Users-Carrying $principal).Count 0
+Expect "a relink without a reason is refused" (Api "POST" "/v1/principals/${principal}:relink" $null $null).code 400
+$r = Api "POST" "/v1/principals/${principal}:relink" $null @{ "X-Administrative-Reason" = "proof-b: the user was deleted by mistake" }
+Expect "relinked" $r.code 200
+Expect "active again" (Get-Prop $r.json "state") "active"
+$carriers = Users-Carrying $principal
+Expect "exactly one user carries the same principal_id" $carriers.Count 1
+Expect "and it is a new user" ($carriers[0].id -ne $original) $true
+$listed = @((Api "GET" "/v1/principals:dangling" $null $null).json.dangling | Where-Object { $_.principal_id -eq $principal })
+Expect "no longer dangling" $listed.Count 0
+Expect "a relink while the user exists is refused" (Api "POST" "/v1/principals/${principal}:relink" $null @{ "X-Administrative-Reason" = "again" }).code 409
+Record "User deleted in the console" "reported, then relinked by an operator" "same principal_id, new user $($carriers[0].id)"
+
+Write-Host "6. Keycloak unreachable: unresolved, then converged"
 # A fresh token first: none can be issued while the kernel is down, and the service verifies this
 # one against the key set it already holds.
 $script:apiTokenAt = [datetime]::MinValue

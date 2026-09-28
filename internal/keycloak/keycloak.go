@@ -258,6 +258,11 @@ type AdminClient interface {
 	// ListUsers enumerates a page of users for the reconciliation sweep.
 	ListUsers(ctx context.Context, realm Realm, page Page) ([]User, error)
 
+	// GetUser reads one user, or answers ErrNotFound when the kernel holds none by that identifier.
+	// It is how :relink proves a mapping's user is gone before letting it go: an unknown answer is
+	// not an absent user.
+	GetUser(ctx context.Context, realm Realm, userID UserID) (User, error)
+
 	// DisableUser disables a user. It is the containment action for an unmapped, orphan,
 	// or duplicate finding.
 	//

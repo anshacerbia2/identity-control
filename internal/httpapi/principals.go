@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/anshacerbia2/foundation-platform/httpapi"
 	"github.com/anshacerbia2/foundation-platform/id"
@@ -28,6 +29,9 @@ const maxBodyBytes = 64 << 10
 // database or a kernel, and so this package cannot reach past the two operations it needs.
 type Provisioner interface {
 	Create(ctx context.Context, req provisioning.CreateRequest) (provisioning.Response, error)
+	Relink(ctx context.Context, req provisioning.RelinkRequest) (provisioning.RelinkResult, error)
+	Dangling(ctx context.Context) ([]provisioning.DanglingFinding, error)
+	Reconcile(ctx context.Context) (recovered, dangling int, err error)
 }
 
 // Principals serves the Principal surface.
@@ -115,6 +119,73 @@ func (h *Principals) CreatePrincipal(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(response)
+}
+
+// PrincipalAction handles POST /v1/principals/{principal_id}:{action}. The mux matches whole
+// segments only, so the action is read from the segment here. :relink is the only action built.
+func (h *Principals) PrincipalAction(w http.ResponseWriter, r *http.Request) {
+	principal, ok := callerPrincipal(r)
+	if !ok {
+		httpapi.Problem(w, r, httpapi.AuthenticationRequired, "The request carries no authenticated caller")
+		return
+	}
+	raw, action, _ := strings.Cut(r.PathValue("target"), ":")
+	if action != "relink" {
+		httpapi.Problem(w, r, httpapi.NotFound, "No such Principal action")
+		return
+	}
+	target, err := id.Parse(raw)
+	if err != nil {
+		httpapi.Problem(w, r, httpapi.ValidationFailed, "principal_id is not a valid identifier")
+		return
+	}
+	reason := strings.TrimSpace(r.Header.Get(AdministrativeReasonHeader))
+	if reason == "" {
+		httpapi.Problem(w, r, httpapi.ValidationFailed, "A relink requires an X-Administrative-Reason header")
+		return
+	}
+	result, err := h.provisioner.Relink(r.Context(), provisioning.RelinkRequest{
+		PrincipalID: target, RelinkedBy: principal, Reason: reason})
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, result)
+	case errors.Is(err, provisioning.ErrUserStillExists):
+		httpapi.Problem(w, r, httpapi.StateTransitionRefused,
+			"The Principal's Keycloak user still exists; there is nothing to relink")
+	case errors.Is(err, provisioning.ErrInvalidTransition):
+		httpapi.Problem(w, r, httpapi.StateTransitionRefused, "Only an active Principal can be relinked")
+	default:
+		writeProvisioningError(w, r, err)
+	}
+}
+
+// Dangling handles GET /v1/principals:dangling: active Principals whose Keycloak user is gone.
+func (h *Principals) Dangling(w http.ResponseWriter, r *http.Request) {
+	if _, ok := callerPrincipal(r); !ok {
+		httpapi.Problem(w, r, httpapi.AuthenticationRequired, "The request carries no authenticated caller")
+		return
+	}
+	found, err := h.provisioner.Dangling(r.Context())
+	if err != nil {
+		httpapi.Problem(w, r, httpapi.Internal, "The dangling mappings could not be read")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"dangling": found})
+}
+
+// Reconcile handles POST /v1/principals:reconcile: pending recovery and the dangling-mapping sweep
+// now, as the schedule runs them.
+func (h *Principals) Reconcile(w http.ResponseWriter, r *http.Request) {
+	if _, ok := callerPrincipal(r); !ok {
+		httpapi.Problem(w, r, httpapi.AuthenticationRequired, "The request carries no authenticated caller")
+		return
+	}
+	recovered, dangling, err := h.provisioner.Reconcile(r.Context())
+	if err != nil {
+		httpapi.Problem(w, r, httpapi.DependencyUnavailable, "The identity kernel could not be enumerated; retry")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int{"recovered": recovered, "dangling": dangling})
 }
 
 // writeProvisioningError maps a domain error onto the compiled problem registry.

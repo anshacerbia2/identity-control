@@ -147,6 +147,137 @@ table "principal_mapping" {
   check "principal_mapping_owner_check" {
     expr = "(subject_type = 'human' AND workload_owner IS NULL) OR (subject_type = 'workload' AND workload_owner IS NOT NULL)"
   }
+
+  // An active mapping with no Keycloak user is served by nothing and recovered by nothing, because
+  // recovery reads only pending rows. Pending is the one state where the user may be absent, and
+  // :relink is how an active mapping whose user is gone gets back there (TDD-identity-control-001).
+  check "principal_mapping_active_linked_check" {
+    expr = "state <> 'active' OR keycloak_user_id IS NOT NULL"
+  }
+}
+
+// Every relink: who returned an active mapping to pending, why, and which Keycloak user it lost.
+// Insert-only (grants.sql): a Principal's link to a new Keycloak user is exactly the kind of change
+// whose record must not be rewritable by the process that made it.
+table "principal_relink" {
+  schema  = schema.identity
+  comment = "Each relink of an active mapping back to pending. Insert-only. TDD-identity-control-001."
+
+  column "relink_id" {
+    null = false
+    type = uuid
+  }
+
+  column "principal_id" {
+    null = false
+    type = uuid
+  }
+
+  column "previous_keycloak_user_id" {
+    null = false
+    type = text
+  }
+
+  column "relinked_by" {
+    null = false
+    type = uuid
+  }
+
+  column "reason" {
+    null = false
+    type = text
+  }
+
+  column "relinked_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+
+  primary_key {
+    columns = [column.relink_id]
+  }
+
+  foreign_key "principal_relink_principal_id_fkey" {
+    columns     = [column.principal_id]
+    ref_columns = [table.principal_mapping.column.principal_id]
+    on_update   = NO_ACTION
+    on_delete   = NO_ACTION
+  }
+
+  check "principal_relink_reason_named" {
+    expr = "btrim(reason) <> ''"
+  }
+}
+
+// A Principal whose Keycloak user no longer exists. The sweep records it and never relinks it: a
+// user deleted on purpose must not come back by itself.
+table "principal_finding" {
+  schema  = schema.identity
+  comment = "A dangling mapping: an active Principal whose Keycloak user is gone. TDD-identity-control-001."
+
+  column "finding_id" {
+    null = false
+    type = uuid
+  }
+
+  column "principal_id" {
+    null = false
+    type = uuid
+  }
+
+  column "finding_class" {
+    null = false
+    type = text
+  }
+
+  column "keycloak_user_id" {
+    null    = false
+    type    = text
+    comment = "The user the mapping pointed at when it was found missing."
+  }
+
+  column "detected_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+
+  column "resolved_at" {
+    null = true
+    type = timestamptz
+  }
+
+  column "resolution" {
+    null = true
+    type = text
+  }
+
+  primary_key {
+    columns = [column.finding_id]
+  }
+
+  foreign_key "principal_finding_principal_id_fkey" {
+    columns     = [column.principal_id]
+    ref_columns = [table.principal_mapping.column.principal_id]
+    on_update   = NO_ACTION
+    on_delete   = NO_ACTION
+  }
+
+  // One open finding per Principal: a later sweep that still finds the user missing keeps it.
+  index "principal_finding_open" {
+    unique  = true
+    columns = [column.principal_id]
+    where   = "resolved_at IS NULL"
+  }
+
+  check "principal_finding_class_check" {
+    expr = "finding_class IN ('dangling')"
+  }
+
+  check "principal_finding_resolution_check" {
+    expr = "(resolved_at IS NULL) = (resolution IS NULL) AND (resolution IS NULL OR resolution IN ('relinked', 'user_present'))"
+  }
 }
 
 // The record of the one ceremony that created the first Principal.

@@ -273,6 +273,30 @@ func (c *Client) DisableUser(ctx context.Context, realm keycloak.Realm, userID k
 // that obvious and are used only to construct a scenario or assert an outcome.
 
 // Seed inserts a user directly, modelling one that reached the kernel outside the
+// GetUser returns a stored user, or ErrNotFound. FailFind, when set, is returned instead.
+func (c *Client) GetUser(ctx context.Context, realm keycloak.Realm, userID keycloak.UserID) (keycloak.User, error) {
+	if err := ctx.Err(); err != nil {
+		return keycloak.User{}, err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.FailFind != nil {
+		return keycloak.User{}, c.FailFind
+	}
+	stored, ok := c.users[userID]
+	if !ok || stored.realm != realm {
+		return keycloak.User{}, keycloak.ErrNotFound
+	}
+	return stored.user, nil
+}
+
+// DeleteUser removes a user, as an administrator deleting it in the console would.
+func (c *Client) DeleteUser(userID keycloak.UserID) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.users, userID)
+}
+
 // authorized creation path. A nil principalID produces the unmapped case.
 func (c *Client) Seed(realm keycloak.Realm, username string, principalID id.UUID, subjectType keycloak.SubjectType) keycloak.UserID {
 	c.mu.Lock()

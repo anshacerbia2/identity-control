@@ -34,6 +34,7 @@ func TestStateMachineRejectsEveryUndeclaredTransition(t *testing.T) {
 			provisioning.StateQuarantined: true,
 		},
 		provisioning.StateActive: {
+			provisioning.StatePending:     true,
 			provisioning.StateRetired:     true,
 			provisioning.StateQuarantined: true,
 		},

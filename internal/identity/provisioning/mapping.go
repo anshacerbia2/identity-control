@@ -55,8 +55,10 @@ var (
 // test can assert that every transition absent from this table is rejected. A switch
 // statement supports asserting the transitions someone remembered to write.
 var transitions = map[State][]State{
-	StatePending:     {StateActive, StateQuarantined},
-	StateActive:      {StateRetired, StateQuarantined},
+	StatePending: {StateActive, StateQuarantined},
+	// Active to pending is :relink, the one way back: a mapping whose Keycloak user is gone is
+	// provisioned again under the same principal_id.
+	StateActive:      {StatePending, StateRetired, StateQuarantined},
 	StateQuarantined: {},
 	StateRetired:     {},
 }

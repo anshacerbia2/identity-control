@@ -396,6 +396,8 @@ func TestRegistrationRecordsAreNeverDeleted(t *testing.T) {
 		{"identity.reconcile_run", []string{"SELECT", "INSERT", "UPDATE"}, []string{"DELETE", "TRUNCATE"}},
 		{"identity.registration_finding", []string{"SELECT", "INSERT", "UPDATE"}, []string{"DELETE", "TRUNCATE"}},
 		{"identity.drift_exception", []string{"SELECT", "INSERT"}, []string{"UPDATE", "DELETE", "TRUNCATE"}},
+		{"identity.principal_relink", []string{"SELECT", "INSERT"}, []string{"UPDATE", "DELETE", "TRUNCATE"}},
+		{"identity.principal_finding", []string{"SELECT", "INSERT", "UPDATE"}, []string{"DELETE", "TRUNCATE"}},
 	} {
 		for _, privilege := range want.held {
 			if !queryBool(t, pool, ctx,
@@ -451,6 +453,9 @@ func TestRegistrationConstraintsHold(t *testing.T) {
 	    SELECT '01a0e7a0-0000-7000-8000-000000000003', registration_id, 'token_lifespan', 'admin-user',
 	           'emergency', '01a0e7a0-0000-7000-8000-000000000002', now() + interval '25 hours' FROM r`,
 		"confidential", "L1")
+	refused("principal_mapping_active_linked_check", `INSERT INTO identity.principal_mapping
+	    (principal_id, realm, username, subject_type, state)
+	    VALUES ('01a0e7a0-0000-7000-8000-000000000005', 'scnehaux', 'probe', 'human', 'active')`)
 	refused("reconcile_run_finished_check", `
 	    INSERT INTO identity.reconcile_run (run_id, sweep, finished_at)
 	    VALUES ('01a0e7a0-0000-7000-8000-000000000004', 'registration', now())`)
