@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 	"time"
@@ -160,7 +161,7 @@ type Resolution struct {
 }
 
 const resolvableStatement = `SELECT count(*) FROM identity.registration_finding
-WHERE finding_id = $1 AND converged_at IS NULL AND finding_class IN ('blocked', 'unattributed')`
+WHERE finding_id = $1 AND converged_at IS NULL AND finding_class IN ('blocked', 'unattributed', 'missing')`
 
 const resolveStatement = `UPDATE identity.registration_finding
 SET converged_at = $2, resolved_by = $3, resolution_reason = $4
@@ -221,6 +222,12 @@ func (r *Reconciler) Resolve(ctx context.Context, resolution Resolution) error {
 	}
 
 	for _, t := range targets {
+		if t.field == "" {
+			if err := r.recreateMissing(ctx, t.finding, t.reg, resolution); err != nil {
+				return err
+			}
+			continue
+		}
 		var patch keycloak.ClientPatch
 		switch t.field {
 		case TokenLifespan:
@@ -245,6 +252,37 @@ func (r *Reconciler) Resolve(ctx context.Context, resolution Resolution) error {
 			return fmt.Errorf("reconcile: record the resolution: %w", err)
 		}
 	}
+	return nil
+}
+
+const recreatedStatement = `UPDATE identity.registration_finding
+SET finding_class = 'recreated', desired = $5::jsonb, converged_at = $2, resolved_by = $3, resolution_reason = $4
+WHERE finding_id = $1 AND converged_at IS NULL AND finding_class = 'missing'`
+
+// recreateMissing is the one path that builds a missing client again: an operator's reconcile,
+// with a reason, naming the finding.
+func (r *Reconciler) recreateMissing(ctx context.Context, finding id.UUID, reg registration, resolution Resolution) error {
+	if r.cfg.Recreate == nil {
+		return fmt.Errorf("%w: nothing is configured to recreate %s", ErrNotResolvable, reg.clientKey)
+	}
+	client, err := r.cfg.Recreate(ctx, reg.id)
+	if err != nil {
+		return fmt.Errorf("reconcile: recreate %s: %w", reg.clientKey, err)
+	}
+	desired, err := json.Marshal(map[string]string{"client_key": reg.clientKey, "client": string(client)})
+	if err != nil {
+		return err
+	}
+	at := r.now()
+	if err := r.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		_, err := tx.Exec(ctx, recreatedStatement, finding.String(), at, resolution.ResolvedBy.String(),
+			resolution.Reason, string(desired))
+		return err
+	}); err != nil {
+		return fmt.Errorf("reconcile: record the recreation: %w", err)
+	}
+	r.logger.WarnContext(ctx, "a missing client was recreated by an operator's reconcile",
+		slog.String("client_key", reg.clientKey))
 	return nil
 }
 

@@ -504,20 +504,33 @@ func TestAnExceptionIsBoundedAndNamesAnActiveRegistration(t *testing.T) {
 	}
 }
 
-// An absent client is drift, reported and not recreated: recreating it is registering it again,
-// which the registration API does.
-func TestAnAbsentClientIsReportedAsDrift(t *testing.T) {
+// An absent client is held as an open 'missing' finding, and one finding however many sweeps see
+// it. Nothing recreates it without an operator, even with a recreator wired in: deleting a client
+// is how a compromised one is contained while :suspend and :retire are not built.
+func TestAnAbsentClientIsHeldNotRecreated(t *testing.T) {
 	h := newHarness(t)
+	recreations := 0
+	h.reconciler.cfg.Recreate = func(context.Context, id.UUID) (keycloak.ClientUUID, error) {
+		recreations++
+		return "", errors.New("the sweep must not call this")
+	}
 	caller := h.caller()
 	h.sweep()
+	h.tick(time.Second)
 	h.kernel.Remove(admin, caller.client)
 	h.tick(time.Minute)
 	run := h.sweep()
-	if run.Outcome != Drift || run.Findings != 0 {
-		t.Errorf("run = %+v, want drift with no finding", run)
+	if run.Outcome != Drift || run.Findings != 1 {
+		t.Errorf("run = %+v, want drift with one finding", run)
 	}
-	if _, ok := h.kernel.Client(caller.client); ok {
-		t.Error("the absent client was recreated")
+	h.tick(time.Minute)
+	h.sweep()
+	if _, ok := h.kernel.Client(caller.client); ok || recreations != 0 {
+		t.Errorf("the absent client was recreated by a sweep (%d call(s))", recreations)
+	}
+	f := h.findings(caller.client)
+	if len(f) != 1 || f[0].class != string(Missing) || f[0].field != "" || f[0].actor != admin || f[0].convergedAt != nil {
+		t.Errorf("findings = %+v, want one open missing finding naming %s", f, admin)
 	}
 }
 
@@ -548,9 +561,9 @@ func TestStatusReportsTheOpenFindings(t *testing.T) {
 	}
 }
 
-// With the registration service wired in, a client deleted in the console is recreated from desired
-// state, and the deletion's actor is recorded on a converged 'recreated' finding.
-func TestADeletedClientIsRecreated(t *testing.T) {
+// A client deleted in the console is recreated from desired state only by an operator's reconcile
+// naming its finding, which then records the deletion's actor, the operator and the reason.
+func TestADeletedClientIsRecreatedOnlyByAnOperator(t *testing.T) {
 	h := newHarness(t)
 	service, err := clientregistration.New(h.pool, h.kernel, clientregistration.Config{Realm: realm,
 		CallTimeout: time.Second, PendingRecoveryAfter: time.Minute}, slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -577,12 +590,27 @@ func TestADeletedClientIsRecreated(t *testing.T) {
 	run := h.sweep()
 
 	found, _ = h.kernel.FindClients(context.Background(), realm, "proof-b-client")
-	if len(found) != 1 || found[0].ID == original || run.Outcome != Drift || run.Findings != 1 {
-		t.Fatalf("after the sweep: %d client(s), run %+v", len(found), run)
+	if len(found) != 0 || run.Outcome != Drift || run.Findings != 1 {
+		t.Fatalf("after the sweep: %d client(s), run %+v; want none recreated", len(found), run)
+	}
+	missing := h.findings(original)
+	if len(missing) != 1 || missing[0].class != string(Missing) {
+		t.Fatalf("findings = %+v, want one open missing finding", missing)
+	}
+
+	operator, _ := id.NewV7()
+	if err := h.reconciler.Resolve(context.Background(), Resolution{Findings: []id.UUID{missing[0].id},
+		ResolvedBy: operator, Reason: "the deletion was a mistake"}); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	found, _ = h.kernel.FindClients(context.Background(), realm, "proof-b-client")
+	if len(found) != 1 || found[0].ID == original {
+		t.Fatalf("after the operator's reconcile: %d client(s)", len(found))
 	}
 	f := h.findings(original)
-	if len(f) != 1 || f[0].class != string(Recreated) || f[0].actor != admin || f[0].convergedAt == nil {
-		t.Errorf("findings = %+v, want one converged recreated finding naming %s", f, admin)
+	if len(f) != 1 || f[0].class != string(Recreated) || f[0].actor != admin || f[0].convergedAt == nil ||
+		f[0].resolvedBy != operator.String() {
+		t.Errorf("findings = %+v, want the finding recreated, naming %s and resolved by the operator", f, admin)
 	}
 	current, _ := service.Get(context.Background(), registered.ID)
 	h.tick(time.Minute)
@@ -617,5 +645,26 @@ func TestStatusReportsTheLastRunsConvergedRepair(t *testing.T) {
 	if f.Class != Repaired || f.Actor != admin || f.ChangedAt == nil || f.ConvergedAt == nil ||
 		f.ConvergedAt.Sub(*f.ChangedAt) != 3*time.Second {
 		t.Errorf("last run finding = %+v", f)
+	}
+}
+
+// Without a recreator configured, an operator's reconcile of a missing client is refused rather
+// than recorded as done.
+func TestAMissingClientNeedsSomethingToRecreateIt(t *testing.T) {
+	h := newHarness(t)
+	caller := h.caller()
+	h.sweep()
+	h.kernel.Remove(admin, caller.client)
+	h.tick(time.Minute)
+	h.sweep()
+	missing := h.findings(caller.client)
+	operator, _ := id.NewV7()
+	err := h.reconciler.Resolve(context.Background(), Resolution{Findings: []id.UUID{missing[0].id},
+		ResolvedBy: operator, Reason: "recreate it"})
+	if !errors.Is(err, ErrNotResolvable) {
+		t.Errorf("resolving without a recreator answered %v, want ErrNotResolvable", err)
+	}
+	if f := h.findings(caller.client); f[0].convergedAt != nil {
+		t.Error("the refused resolution closed the finding")
 	}
 }

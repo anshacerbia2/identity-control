@@ -738,7 +738,7 @@ table "registration_finding" {
   }
 
   check "registration_finding_class_check" {
-    expr = "finding_class IN ('repaired', 'blocked', 'sanctioned', 'unattributed', 'recreated', 'unmanaged')"
+    expr = "finding_class IN ('repaired', 'blocked', 'sanctioned', 'unattributed', 'missing', 'recreated', 'unmanaged')"
   }
 
   // An operator's resolution names who and why, or it is not one.

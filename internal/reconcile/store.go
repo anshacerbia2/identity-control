@@ -76,10 +76,11 @@ func readDesired(ctx context.Context, tx db.Tx, realm keycloak.Realm) ([]registr
 	return out, rows.Err()
 }
 
-const openFindingsStatement = `SELECT finding_id::text, kc_client_id, field_class, finding_class,
+// A finding with no field class, a missing client, is keyed by the empty field class.
+const openFindingsStatement = `SELECT finding_id::text, kc_client_id, coalesce(field_class, ''), finding_class,
        coalesce(actor, ''), changed_at
 FROM identity.registration_finding
-WHERE converged_at IS NULL AND field_class IS NOT NULL`
+WHERE converged_at IS NULL`
 
 type findingKey struct {
 	client keycloak.ClientUUID

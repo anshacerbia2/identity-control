@@ -12,17 +12,19 @@
 #      an operator's reconcile lifts it
 #   4. a change covered by a drift exception is left in place until the exception expires, and
 #      is then repaired
-#   5. a Principal whose Keycloak user is deleted is reported, not recreated, and an operator's
+#   5. a client deleted in the console is held as a finding, not recreated, until an operator's
+#      reconcile recreates it: deletion is how a compromised client is contained
+#   6. a Principal whose Keycloak user is deleted is reported, not recreated, and an operator's
 #      :relink provisions a new user carrying the same principal_id
-#   6. an unreachable Keycloak is 'unresolved', and the sweep converges once it is back
+#   7. an unreachable Keycloak is 'unresolved', and the sweep converges once it is back
 #
 # SECRETS: read from the environment.
 #   IDENTITY_CALLER_SECRET, IDENTITY_CALLER_PASSWORD   a provider-scope token, as dev-smoke.ps1
 #   KC_BOOTSTRAP_ADMIN_USERNAME, KC_BOOTSTRAP_ADMIN_PASSWORD   the console administrator
 #
 # KC_BASE_URL is where the login form is served, KC_ADMIN_URL the kernel's private address where
-# /admin is reachable, and KERNEL_KEYCLOAK_CONTAINER the container scenario 6 stops. It is for a
-# kernel that exists for the length of a CI job. Scenario 6 stops Keycloak: never run it against a
+# /admin is reachable, and KERNEL_KEYCLOAK_CONTAINER the container scenario 7 stops. It is for a
+# kernel that exists for the length of a CI job. Scenario 7 stops Keycloak: never run it against a
 # shared server.
 #
 # Usage: pwsh ./scripts/dev-proof-b.ps1
@@ -237,7 +239,24 @@ $afterExpiry = Seconds $expires $f.converged_at
 Record "Lifespan change under an exception" "sanctioned, then repaired at expiry" "converged $afterExpiry s after the exception expired"
 
 Write-Host ""
-Write-Host "5. portability: a Principal outlives its Keycloak user"
+Write-Host "5. a client deleted in the console is held, not recreated"
+$at = [datetimeoffset]::UtcNow
+Expect "the console administrator deletes the client" (Kc "DELETE" "/clients/$clientUuid" $null).code 204
+$f = Wait-Finding $registration { param($f) $f.finding_class -eq "missing" -and (Since $f $at) }
+Expect "attributed to the console administrator" (Get-Prop $f "actor") $actor
+[void](Sweep)
+Expect "a later sweep leaves it deleted" @((Kc "GET" "/clients?clientId=proofb-web&search=false" $null).json).Count 0
+$r = Api "POST" "/v1/registrations:reconcile" "{`"findings`":[`"$($f.finding_id)`"]}" @{ "X-Administrative-Reason" = "proof-b: the deletion was reviewed; restore the client" }
+Expect "operator's reconcile accepted" $r.code 200
+$restored = @((Kc "GET" "/clients?clientId=proofb-web&search=false" $null).json)
+Expect "recreated by the operator's reconcile" $restored.Count 1
+Expect "as a new client" ($restored[0].id -ne $clientUuid) $true
+$closed = @((Api "GET" "/v1/registrations/$registration/findings" $null $null).json.findings | Where-Object { $_.finding_id -eq $f.finding_id })
+Expect "the finding closed as recreated" $closed[0].finding_class "recreated"
+Record "Client deleted in the console" "held; recreated only by an operator" "no sweep recreated it"
+$clientUuid = $restored[0].id
+
+Write-Host "6. portability: a Principal outlives its Keycloak user"
 $r = Api "POST" "/v1/principals" '{"username":"proofb.portable","email":"portable@scnehaux.local","subject_type":"human"}' @{ "Idempotency-Key" = "proofb-portable" }
 Expect "Principal created" $r.code 201
 $principal = $r.json.principal_id
@@ -261,7 +280,7 @@ Expect "no longer dangling" $listed.Count 0
 Expect "a relink while the user exists is refused" (Api "POST" "/v1/principals/${principal}:relink" $null @{ "X-Administrative-Reason" = "again" }).code 409
 Record "User deleted in the console" "reported, then relinked by an operator" "same principal_id, new user $($carriers[0].id)"
 
-Write-Host "6. Keycloak unreachable: unresolved, then converged"
+Write-Host "7. Keycloak unreachable: unresolved, then converged"
 # A fresh token first: none can be issued while the kernel is down, and the service verifies this
 # one against the key set it already holds.
 $script:apiTokenAt = [datetime]::MinValue
