@@ -314,7 +314,7 @@ asserted by test.
 
 ## Proof B · Keycloak drift
 
-In progress: decided 2026-09-28, steps 1 and 2 done. `organization-control` backlog item 10.
+In progress: decided 2026-09-28, steps 1 to 3 done. `organization-control` backlog item 10.
 It was labelled P2 in RESPONSE-7 to RESPONSE-10 and listed with the P1 backlog in RESPONSE-23.
 
 **The claim to prove** (RESPONSE-4 §4): drift between reviewed desired state and live Keycloak can
@@ -389,8 +389,11 @@ Acceptance criteria, also from RESPONSE-4 §4:
 
 1. ✅ Enable admin events in `identity-kernel`'s realm definition (identity-kernel #16).
 2. ✅ Edit TDD-003 and TDD-001 with the decisions above.
-3. Add the registration, run, finding and exception tables, and the registration credential with
-   its one-time development script.
+3. ✅ Add the registration, run, finding and exception tables, and the registration credential with
+   its one-time development script. The runtime role deletes no row of the four tables and
+   updates no exception. `deploy-dev` creates the client with the script the server's operator
+   runs, refuses a second run, and asserts the credential split against a live kernel. The
+   service does not use the credential until step 4.
 4. Build the reconciler: interval, last run, findings, lifespan repair, redirect-URI block,
    exception through admin events, `unresolved`.
 5. Add a Proof B end-to-end job in `deploy-dev.yml` against a real Keycloak: both scenarios, the
@@ -461,9 +464,11 @@ Two decisions are recorded here:
 
 - **Client registration uses its own credential. Decided on 2026-09-26.** `TDD-identity-control-003`
   registers protocol clients through the Admin API, which needs `manage-clients`. It gets a separate
-  Keycloak client, `identity-control-registration`, holding `manage-clients` and `view-clients`
-  only, so the Principal path keeps its narrow set and TDD-001 and TDD-002 stay true. Recorded in
-  TDD-003's Security Notes. The client is created when TDD-003 is built, not before.
+  Keycloak client, `identity-control-registration`, holding `manage-clients`, `view-clients` and
+  `view-events` only, so the Principal path keeps its narrow set and TDD-001 and TDD-002 stay true.
+  Recorded in TDD-003's Security Notes. `deploy/dev/create-registration-client.sh` creates it, and
+  `scripts/dev-credential-split.ps1` asserts in `deploy-dev` that neither credential can do the
+  other's work.
 - **Container images have no enterprise standard.** SAD-004 says only "compiled as an OCI image".
   The images here follow the kernel's precedent: pinned digests, distroless, non-root. Scanning the
   built image for vulnerabilities, which SAD-001 §7.6 requires, is not yet in CI. Both are

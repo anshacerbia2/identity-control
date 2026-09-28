@@ -17,7 +17,9 @@ package controldb_test
 
 import (
 	"context"
+	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -376,3 +378,82 @@ func TestWeek1SchemaShape(t *testing.T) {
 		t.Error("identity.principal_mapping_realm_user is not a partial unique index")
 	}
 }
+
+// TestRegistrationRecordsAreNeverDeleted is the privilege half of TDD-identity-control-003's
+// retention rule. A retired registration stays auditable, a converged finding is the evidence that
+// a console change happened, and a run is how the reconciler is observed, so the runtime deletes
+// none of them. A drift exception is also immutable: one the runtime could update could be
+// extended by whoever wanted the console change kept.
+func TestRegistrationRecordsAreNeverDeleted(t *testing.T) {
+	pool, ctx := openPool(t)
+
+	for _, want := range []struct {
+		table    string
+		held     []string
+		withheld []string
+	}{
+		{"identity.client_registration", []string{"SELECT", "INSERT", "UPDATE"}, []string{"DELETE", "TRUNCATE"}},
+		{"identity.reconcile_run", []string{"SELECT", "INSERT", "UPDATE"}, []string{"DELETE", "TRUNCATE"}},
+		{"identity.registration_finding", []string{"SELECT", "INSERT", "UPDATE"}, []string{"DELETE", "TRUNCATE"}},
+		{"identity.drift_exception", []string{"SELECT", "INSERT"}, []string{"UPDATE", "DELETE", "TRUNCATE"}},
+	} {
+		for _, privilege := range want.held {
+			if !queryBool(t, pool, ctx,
+				`SELECT has_table_privilege($1, $2, $3)`, runtimeRole, want.table, privilege) {
+				t.Errorf("%s lacks %s on %s; the registration path cannot work without it", runtimeRole, privilege, want.table)
+			}
+		}
+		for _, privilege := range want.withheld {
+			if queryBool(t, pool, ctx,
+				`SELECT has_table_privilege($1, $2, $3)`, runtimeRole, want.table, privilege) {
+				t.Errorf("%s holds %s on %s; the record must outlive the runtime's intent", runtimeRole, privilege, want.table)
+			}
+		}
+	}
+}
+
+// TestRegistrationConstraintsHold asserts the rules TDD-identity-control-003 puts in the database
+// rather than in Go, by making the database refuse each one. Every insert runs as the runtime role
+// and is rolled back.
+func TestRegistrationConstraintsHold(t *testing.T) {
+	pool, ctx := openPool(t)
+
+	const registration = `INSERT INTO identity.client_registration
+	    (registration_id, realm, client_key, profile, application_authority, application_ref,
+	     registered_by, audience_class, lifetime_class, state)
+	    VALUES ('01a0e7a0-0000-7000-8000-000000000001', 'scnehaux', 'constraint-probe', $1,
+	            'manual', 'probe', '01a0e7a0-0000-7000-8000-000000000002', 'internal', $2, 'active')`
+
+	// Each refusal must come from the named constraint. Any error would otherwise pass, a missing
+	// grant included, and the test would assert a constraint that is not there.
+	refused := func(constraint, statement string, args ...any) {
+		t.Helper()
+		err := pool.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+			if _, err := tx.Exec(ctx, `SET LOCAL ROLE `+runtimeRole); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, statement, args...); err != nil {
+				return err
+			}
+			return errRollback
+		})
+		if err == errRollback || err == nil || !strings.Contains(err.Error(), constraint) {
+			t.Errorf("want a refusal by %s, got %v", constraint, err)
+		}
+	}
+
+	refused("client_lifetime_class_required", registration, "resource", nil)
+	refused("client_lifetime_class_check", registration, "confidential", "L9")
+	refused("drift_exception_window_check", `
+	    WITH r AS (`+registration+` RETURNING registration_id)
+	    INSERT INTO identity.drift_exception
+	        (exception_id, registration_id, field_class, actor, reason, granted_by, expires_at)
+	    SELECT '01a0e7a0-0000-7000-8000-000000000003', registration_id, 'token_lifespan', 'admin-user',
+	           'emergency', '01a0e7a0-0000-7000-8000-000000000002', now() + interval '25 hours' FROM r`,
+		"confidential", "L1")
+	refused("reconcile_run_finished_check", `
+	    INSERT INTO identity.reconcile_run (run_id, sweep, finished_at)
+	    VALUES ('01a0e7a0-0000-7000-8000-000000000004', 'registration', now())`)
+}
+
+var errRollback = errors.New("rolled back by the test")
