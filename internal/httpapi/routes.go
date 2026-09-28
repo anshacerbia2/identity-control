@@ -21,9 +21,10 @@ type Prober interface {
 
 // RoutesConfig supplies what the mux needs.
 type RoutesConfig struct {
-	Principals *Principals
-	Database   Prober
-	Telemetry  *observability.Telemetry
+	Principals    *Principals
+	Registrations *Registrations
+	Database      Prober
+	Telemetry     *observability.Telemetry
 
 	// ReadinessTimeout bounds the dependency check. It is well below any orchestrator probe
 	// interval so a slow database produces a failed probe rather than a hung one.
@@ -57,6 +58,9 @@ type Surface struct {
 func Routes(cfg RoutesConfig) (Surface, error) {
 	if cfg.Principals == nil {
 		return Surface{}, errors.New("httpapi: the Principal handler is required")
+	}
+	if cfg.Registrations == nil {
+		return Surface{}, errors.New("httpapi: the registration drift handler is required")
 	}
 	if cfg.Database == nil {
 		return Surface{}, errors.New("httpapi: a database prober is required")
@@ -95,6 +99,9 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 
 	api := http.NewServeMux()
 	api.HandleFunc("POST /v1/principals", cfg.Principals.CreatePrincipal)
+	api.HandleFunc("GET /v1/registrations:drift", cfg.Registrations.Drift)
+	api.HandleFunc("POST /v1/registrations:reconcile", cfg.Registrations.Reconcile)
+	api.HandleFunc("POST /v1/registrations/{registration_id}/drift-exceptions", cfg.Registrations.GrantException)
 
 	return Surface{Probes: probes, API: api}, nil
 }

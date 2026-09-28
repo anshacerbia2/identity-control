@@ -19,7 +19,8 @@
       "internal/config",
       "internal/httpapi",
       "internal/identity/provisioning",
-      "internal/keycloak"
+      "internal/keycloak",
+      "internal/reconcile"
     ],
     "cmd/identity-migrate": ["internal/controldb"],
 
@@ -46,9 +47,15 @@
       "internal/keycloak/keycloakfake"
     ],
 
+    "internal/reconcile": [
+      "internal/keycloak",
+      "internal/keycloak/keycloakfake"
+    ],
+
     "internal/httpapi": [
       "internal/identity/provisioning",
-      "internal/keycloak"
+      "internal/keycloak",
+      "internal/reconcile"
     ]
   },
 

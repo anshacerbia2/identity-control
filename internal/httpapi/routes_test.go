@@ -31,7 +31,11 @@ func surface(t *testing.T, prober httpapi.Prober) httpapi.Surface {
 	if err != nil {
 		t.Fatalf("NewPrincipals: %v", err)
 	}
-	built, err := httpapi.Routes(httpapi.RoutesConfig{Principals: handler, Database: prober})
+	registrations, err := httpapi.NewRegistrations(&stubReconciler{})
+	if err != nil {
+		t.Fatalf("NewRegistrations: %v", err)
+	}
+	built, err := httpapi.Routes(httpapi.RoutesConfig{Principals: handler, Registrations: registrations, Database: prober})
 	if err != nil {
 		t.Fatalf("Routes: %v", err)
 	}
@@ -189,7 +193,14 @@ func TestRoutesRejectsMissingDependencies(t *testing.T) {
 	if _, err := httpapi.Routes(httpapi.RoutesConfig{Database: &stubProber{}}); err == nil {
 		t.Error("Routes accepted a nil Principal handler")
 	}
-	if _, err := httpapi.Routes(httpapi.RoutesConfig{Principals: handler}); err == nil {
+	registrations, err := httpapi.NewRegistrations(&stubReconciler{})
+	if err != nil {
+		t.Fatalf("NewRegistrations: %v", err)
+	}
+	if _, err := httpapi.Routes(httpapi.RoutesConfig{Principals: handler, Registrations: registrations}); err == nil {
 		t.Error("Routes accepted a nil database prober")
+	}
+	if _, err := httpapi.Routes(httpapi.RoutesConfig{Principals: handler, Database: &stubProber{}}); err == nil {
+		t.Error("Routes accepted a nil registration drift handler")
 	}
 }

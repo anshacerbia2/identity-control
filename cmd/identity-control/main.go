@@ -20,6 +20,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/anshacerbia2/foundation-platform/db"
 	fhttp "github.com/anshacerbia2/foundation-platform/httpapi"
@@ -30,6 +31,7 @@ import (
 	"github.com/anshacerbia2/identity-control/internal/httpapi"
 	"github.com/anshacerbia2/identity-control/internal/identity/provisioning"
 	"github.com/anshacerbia2/identity-control/internal/keycloak"
+	"github.com/anshacerbia2/identity-control/internal/reconcile"
 )
 
 func main() {
@@ -111,15 +113,44 @@ func run() error {
 		return fmt.Errorf("principal provisioner: %w", err)
 	}
 
+	// The registration path's own credential, and a second client built from it. The reconciler
+	// receives only the ClientRegistry this one serves, so the Principal path's credential never
+	// reaches a client call, and this one never reaches a user call (TDD-identity-control-003).
+	registry, err := keycloak.NewAdmin(keycloak.AdminConfig{
+		BaseURL:      cfg.KeycloakBaseURL,
+		Realm:        keycloak.Realm(cfg.KeycloakRealm),
+		ClientID:     cfg.RegistrationClientID,
+		ClientSecret: cfg.RegistrationClientSecret,
+		Timeout:      cfg.ProvisionTimeout,
+	}, nil)
+	if err != nil {
+		return fmt.Errorf("registration kernel client: %w", err)
+	}
+
+	reconciler, err := reconcile.New(pool, registry, reconcile.Config{
+		Realm:       keycloak.Realm(cfg.KeycloakRealm),
+		Interval:    cfg.RegistrationReconcileInterval,
+		CallTimeout: cfg.ProvisionTimeout,
+	}, logger)
+	if err != nil {
+		return fmt.Errorf("registration reconciler: %w", err)
+	}
+
+	registrations, err := httpapi.NewRegistrations(reconciler)
+	if err != nil {
+		return fmt.Errorf("registration drift handler: %w", err)
+	}
+
 	principals, err := httpapi.NewPrincipals(provisioner, keycloak.Realm(cfg.KeycloakRealm))
 	if err != nil {
 		return fmt.Errorf("principal handler: %w", err)
 	}
 
 	surface, err := httpapi.Routes(httpapi.RoutesConfig{
-		Principals: principals,
-		Database:   pool,
-		Telemetry:  telemetry,
+		Principals:    principals,
+		Registrations: registrations,
+		Database:      pool,
+		Telemetry:     telemetry,
 	})
 	if err != nil {
 		return fmt.Errorf("routes: %w", err)
@@ -195,6 +226,11 @@ func run() error {
 		serveErr <- nil
 	}()
 
+	// The registration sweep runs on a schedule from here, the one package allowed to start a
+	// goroutine. Every replica schedules it; the reconciler's run claim lets one sweep at a time
+	// through, so the others' ticks are skipped rather than duplicated.
+	go scheduleSweeps(ctx, reconciler, cfg.RegistrationReconcileInterval, logger)
+
 	select {
 	case err := <-serveErr:
 		if err != nil {
@@ -214,6 +250,33 @@ func run() error {
 	}
 	logger.Info("stopped")
 	return nil
+}
+
+// scheduleSweeps runs a registration sweep at start and then every interval, until ctx ends. A
+// sweep cut off by shutdown leaves its run unfinished, which is how a stopped replica's run is
+// meant to look, and it stops blocking the next one after two intervals.
+func scheduleSweeps(ctx context.Context, reconciler *reconcile.Reconciler, interval time.Duration, logger *slog.Logger) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		run, err := reconciler.Sweep(ctx)
+		switch {
+		case errors.Is(err, reconcile.ErrSweepInProgress):
+			logger.Debug("registration sweep skipped; another replica is sweeping")
+		case err != nil:
+			logger.Error("registration sweep failed", slog.String("error", err.Error()))
+		default:
+			logger.Info("registration sweep finished",
+				slog.String("run_id", run.ID.String()),
+				slog.String("outcome", string(run.Outcome)),
+				slog.Int("findings", run.Findings))
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 func newLogger(level string) *slog.Logger {

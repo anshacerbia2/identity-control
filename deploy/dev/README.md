@@ -122,6 +122,8 @@ $env:IDENTITY_KEYCLOAK_REALM         = 'scnehaux'
 $env:IDENTITY_KEYCLOAK_BASE_URL      = 'http://localhost:8081'
 $env:IDENTITY_KEYCLOAK_CLIENT_ID     = 'identity-control'
 $env:IDENTITY_KEYCLOAK_CLIENT_SECRET = '<IDENTITY_KEYCLOAK_CLIENT_SECRET>'
+$env:IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID     = 'identity-control-registration'
+$env:IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_SECRET = '<IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_SECRET>'
 $env:IDENTITY_TOKEN_ISSUER           = '<KEYCLOAK_ISSUER>'
 $env:IDENTITY_TOKEN_AUDIENCE         = 'identity-control'
 $env:IDENTITY_JWKS_URL               = 'http://localhost:8081/realms/scnehaux/protocol/openid-connect/certs'
@@ -149,7 +151,8 @@ go run ./cmd/identity-control
 - **It does not register other applications' clients yet.** The Admin API client holds
   `manage-users` and `view-users` only, as TDD-identity-control-001 states. Client registration
   (TDD-identity-control-003) has its tables and its own credential, `identity-control-registration`,
-  holding `manage-clients`, `view-clients` and `view-events`. The service does not use it yet.
+  holding `manage-clients`, `view-clients` and `view-events`. The registration drift sweep uses it,
+  and the service refuses to start without it.
   `scripts/dev-credential-split.ps1` asserts that neither credential can do the other's work.
 
 ## Adding the registration client to a running server

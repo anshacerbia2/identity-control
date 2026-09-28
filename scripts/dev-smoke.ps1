@@ -1,4 +1,4 @@
-﻿# Exercises a running identity-control end to end.
+# Exercises a running identity-control end to end.
 #
 # Each case is a property from the governance documents rather than a happy-path call, so a
 # regression shows up as a named failure:
@@ -11,6 +11,7 @@
 #   6. a workload with an owner is created
 #   7. an unknown field is refused                         no client-supplied keycloak_user_id
 #   8. a missing Idempotency-Key is refused
+#   9. the registration sweep runs and reports    TDD-identity-control-003, Proof B step 4
 #
 # SECRETS: read from the environment.
 #   $env:IDENTITY_CALLER_SECRET   = '...'
@@ -139,6 +140,30 @@ Write-Host "8. missing Idempotency-Key"
 $r = Send-Json "POST" "/v1/principals" '{"username":"carol","subject_type":"human"}' $token $null
 Expect "refused" $r.code 400
 
+Write-Host ""
+Write-Host "9. the registration sweep is observable"
+$r = Send-Json "GET" "/v1/registrations:drift" $null $null $null
+Expect "refused without a token" $r.code 401
+$r = Send-Json "POST" "/v1/registrations:reconcile" $null $token $null
+Expect "a sweep runs on request" $r.code 200
+if ($r.code -eq 200) {
+    $sweep = $r.body | ConvertFrom-Json
+    # deferred is omitted unless true, and the script runs under strict mode, so it is looked up.
+    $deferred = $sweep.PSObject.Properties.Name -contains 'deferred'
+    $outcome = if ($deferred) { "deferred" } else { $sweep.run.outcome }
+    Write-Host "        outcome=$outcome attribution=$($sweep.run.attribution)"
+    # Converged: nothing is registered yet, so nothing can diverge. Attribution true: the
+    # registration credential read the kernel's admin events. Anything else is a wiring fault.
+    if (-not $deferred) {
+        Expect "the run converged" $sweep.run.outcome "converged"
+        Expect "admin events were readable" $sweep.run.attribution $true
+    }
+}
+$r = Send-Json "GET" "/v1/registrations:drift" $null $token $null
+Expect "the last run is reported" $r.code 200
+if ($r.code -eq 200) {
+    Expect "a last run exists" ([bool](($r.body | ConvertFrom-Json).last_run)) $true
+}
 Write-Host ""
 if ($failures -gt 0) {
     Write-Host "$failures case(s) failed."

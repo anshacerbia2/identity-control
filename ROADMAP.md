@@ -314,7 +314,7 @@ asserted by test.
 
 ## Proof B · Keycloak drift
 
-In progress: decided 2026-09-28, steps 1 to 3 done. `organization-control` backlog item 10.
+In progress: decided 2026-09-28, steps 1 to 4 done. `organization-control` backlog item 10.
 It was labelled P2 in RESPONSE-7 to RESPONSE-10 and listed with the P1 backlog in RESPONSE-23.
 
 **The claim to prove** (RESPONSE-4 §4): drift between reviewed desired state and live Keycloak can
@@ -357,8 +357,10 @@ Acceptance criteria, also from RESPONSE-4 §4:
   which imperative scripts create (`deploy/dev/create-kernel-clients.sh`,
   `scripts/dev-keycloak.ps1`): redirect URI `http://127.0.0.1:8099/callback`,
   `access.token.lifespan` 240.
-- This service has no scheduler, no reconciler, and no last-run record.
-  `identity.projection_cursor.last_reconciled_at` exists and nothing writes it.
+- ✅ This service had no scheduler, no reconciler, and no last-run record. The registration sweep
+  now runs on a schedule and records each run in `identity.reconcile_run` (step 4).
+  `identity.projection_cursor.last_reconciled_at` is the Membership projection's and is still
+  unwritten.
 - Its Keycloak credential holds `manage-users` and `view-users` only. It cannot read or change
   clients, and cannot read admin events, which need `view-events`.
 - ✅ Admin events were not enabled in `identity-kernel`'s realm definition. They now are, with
@@ -392,13 +394,23 @@ Acceptance criteria, also from RESPONSE-4 §4:
 3. ✅ Add the registration, run, finding and exception tables, and the registration credential with
    its one-time development script. The runtime role deletes no row of the four tables and
    updates no exception. `deploy-dev` creates the client with the script the server's operator
-   runs, refuses a second run, and asserts the credential split against a live kernel. The
-   service does not use the credential until step 4.
-4. Build the reconciler: interval, last run, findings, lifespan repair, redirect-URI block,
-   exception through admin events, `unresolved`.
-5. Add a Proof B end-to-end job in `deploy-dev.yml` against a real Keycloak: both scenarios, the
+   runs, refuses a second run, and asserts the credential split against a live kernel.
+4. ✅ Build the reconciler: interval, last run, findings, lifespan repair, redirect-URI block,
+   exception through admin events, `unresolved`. `internal/reconcile` sweeps on
+   `IDENTITY_REGISTRATION_RECONCILE_INTERVAL` (1h) with the registration credential. One replica
+   sweeps at a time. `GET /v1/registrations:drift` reports the last run and the open findings.
+   `POST /v1/registrations:reconcile` sweeps now, and with a reason applies desired state to named
+   blocked or unattributed findings. `POST /v1/registrations/{id}/drift-exceptions` grants up to 24
+   hours. Two field classes are compared: `token_lifespan` and `redirect_uris`. An absent client
+   is reported, not recreated, and no client is treated as unmanaged until step 5 registers them
+   (TDD-003 §Drift Reconciliation).
+5. Build the registration API: `POST /v1/registrations` and `GET /v1/registrations/{id}`,
+   creating the client from desired state, with pending-state recovery. Then recreate an absent
+   client, and disable an unmanaged one, except the clients Keycloak creates in every realm.
+   Found while building step 4: the drift proof needs a registered client, and nothing writes one.
+6. Add a Proof B end-to-end job in `deploy-dev.yml` against a real Keycloak: both scenarios, the
    exception, Keycloak down, and convergence time.
-6. Add `:relink`, the dangling-mapping finding, and the portability test.
+7. Add `:relink`, the dangling-mapping finding, and the portability test.
 
 ## Waiting on the Keycloak proof-of-concept
 

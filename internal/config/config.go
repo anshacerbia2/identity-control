@@ -50,6 +50,17 @@ type Config struct {
 	KeycloakClientID     string
 	KeycloakClientSecret string
 
+	// RegistrationClientID and RegistrationClientSecret are the registration path's own Admin API
+	// credential, identity-control-registration (TDD-identity-control-003 §Security Notes): clients
+	// and admin events, no users. A second credential rather than more roles on the first, so one
+	// leaked secret cannot both mint a Principal and register a client that redirects its tokens.
+	RegistrationClientID     string
+	RegistrationClientSecret string
+
+	// RegistrationReconcileInterval is the registration drift sweep cadence. identity-kernel keeps
+	// admin events for 7 days, and a change must still carry its event when a sweep reads it.
+	RegistrationReconcileInterval time.Duration
+
 	// TokenIssuer and TokenAudience are the verifier's contract. The issuer is compared for
 	// exact equality, so a value with a stray trailing slash rejects every token rather than
 	// accepting a wrong one.
@@ -108,6 +119,9 @@ func Load() (Config, error) {
 		"IDENTITY_KEYCLOAK_CLIENT_ID":     &cfg.KeycloakClientID,
 		"IDENTITY_KEYCLOAK_CLIENT_SECRET": &cfg.KeycloakClientSecret,
 
+		"IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID":     &cfg.RegistrationClientID,
+		"IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_SECRET": &cfg.RegistrationClientSecret,
+
 		// Each of these is a term in an authentication decision. A default would be a
 		// default answer to "who may call this service", which is not a question a
 		// fallback value gets to answer.
@@ -126,6 +140,10 @@ func Load() (Config, error) {
 	cfg.ProvisionTimeout = durationOr("IDENTITY_PROVISION_TIMEOUT", 10*time.Second, &problems)
 	cfg.PendingRecoveryAfter = durationOr("IDENTITY_PENDING_RECOVERY_AFTER", 60*time.Second, &problems)
 	cfg.ReconcilePageSize = intOr("IDENTITY_RECONCILE_PAGE_SIZE", 200, &problems)
+	cfg.RegistrationReconcileInterval = durationOr("IDENTITY_REGISTRATION_RECONCILE_INTERVAL", time.Hour, &problems)
+	if cfg.RegistrationReconcileInterval >= 7*24*time.Hour {
+		problems = append(problems, errors.New("IDENTITY_REGISTRATION_RECONCILE_INTERVAL must be shorter than the kernel's 7-day admin-event retention, or a change loses its attribution before a sweep reads it"))
+	}
 
 	cfg.DBMaxConns = int32(intOr("DB_MAX_CONNS", 20, &problems))
 	cfg.DBMaxConnLifetime = durationOr("DB_MAX_CONN_LIFETIME", 30*time.Minute, &problems)

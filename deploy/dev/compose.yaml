@@ -71,6 +71,10 @@ services:
       IDENTITY_KEYCLOAK_BASE_URL: http://keycloak:8080
       IDENTITY_KEYCLOAK_CLIENT_ID: identity-control
       IDENTITY_KEYCLOAK_CLIENT_SECRET: ${IDENTITY_KEYCLOAK_CLIENT_SECRET:?run create-kernel-clients.sh and set it in .env}
+      # The registration path's own credential: clients and admin events, no users.
+      IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID: identity-control-registration
+      IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_SECRET: ${IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_SECRET:?run create-registration-client.sh and set it in .env}
+      IDENTITY_REGISTRATION_RECONCILE_INTERVAL: ${IDENTITY_REGISTRATION_RECONCILE_INTERVAL:-1h}
       # The issuer is the kernel's public one, whatever address Keycloak is reached on: Keycloak's
       # hostname fixes iss. The key set is fetched over the private network. It is configuration and
       # never read from a token, because a token that could name its own key source would choose the

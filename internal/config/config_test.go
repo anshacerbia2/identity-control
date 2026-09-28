@@ -20,6 +20,8 @@ func TestLoadRequiresDatabaseURL(t *testing.T) {
 	t.Setenv("IDENTITY_TOKEN_ISSUER", "https://identity.example.com/realms/scnehaux")
 	t.Setenv("IDENTITY_TOKEN_AUDIENCE", "identity-control")
 	t.Setenv("IDENTITY_JWKS_URL", "https://identity.example.com/realms/scnehaux/protocol/openid-connect/certs")
+	t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID", "identity-control-registration")
+	t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_SECRET", "registration-secret")
 
 	if _, err := config.Load(); err == nil {
 		t.Fatal("Load succeeded without IDENTITY_DATABASE_URL")
@@ -55,6 +57,8 @@ func TestLoadAppliesDefaults(t *testing.T) {
 	t.Setenv("IDENTITY_TOKEN_ISSUER", "https://identity.example.com/realms/scnehaux")
 	t.Setenv("IDENTITY_TOKEN_AUDIENCE", "identity-control")
 	t.Setenv("IDENTITY_JWKS_URL", "https://identity.example.com/realms/scnehaux/protocol/openid-connect/certs")
+	t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID", "identity-control-registration")
+	t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_SECRET", "registration-secret")
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -90,6 +94,8 @@ func TestLoadOverridesFromEnvironment(t *testing.T) {
 	t.Setenv("IDENTITY_TOKEN_ISSUER", "https://identity.example.com/realms/scnehaux")
 	t.Setenv("IDENTITY_TOKEN_AUDIENCE", "identity-control")
 	t.Setenv("IDENTITY_JWKS_URL", "https://identity.example.com/realms/scnehaux/protocol/openid-connect/certs")
+	t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID", "identity-control-registration")
+	t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_SECRET", "registration-secret")
 	t.Setenv("IDENTITY_LISTEN_ADDRESS", "127.0.0.1:9090")
 	t.Setenv("DB_MAX_CONNS", "8")
 	t.Setenv("HTTP_REQUEST_TIMEOUT", "250ms")
@@ -136,6 +142,8 @@ func TestLoadRejectsMalformedValues(t *testing.T) {
 			t.Setenv("IDENTITY_TOKEN_ISSUER", "https://identity.example.com/realms/scnehaux")
 			t.Setenv("IDENTITY_TOKEN_AUDIENCE", "identity-control")
 			t.Setenv("IDENTITY_JWKS_URL", "https://identity.example.com/realms/scnehaux/protocol/openid-connect/certs")
+			t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID", "identity-control-registration")
+			t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_SECRET", "registration-secret")
 			t.Setenv(tc.key, tc.value)
 
 			if _, err := config.Load(); err == nil {
@@ -162,6 +170,63 @@ func TestLoadReportsEveryProblemAtOnce(t *testing.T) {
 	for _, want := range []string{"IDENTITY_DATABASE_URL", "DB_MAX_CONNS", "HTTP_READ_TIMEOUT"} {
 		if !strings.Contains(message, want) {
 			t.Errorf("error does not mention %s; got: %s", want, message)
+		}
+	}
+}
+
+// The registration path has its own credential (TDD-identity-control-003 §Security Notes), so a
+// deployable missing it must not start with the Principal path's credential standing in.
+func TestLoadRequiresTheRegistrationCredential(t *testing.T) {
+	for _, missing := range []string{"IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID", "IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_SECRET"} {
+		t.Run(missing, func(t *testing.T) {
+			t.Setenv("IDENTITY_DATABASE_URL", "postgres://runtime@localhost:5432/identity")
+			t.Setenv("IDENTITY_KEYCLOAK_REALM", "scnehaux")
+			t.Setenv("IDENTITY_KEYCLOAK_BASE_URL", "https://identity.example.com")
+			t.Setenv("IDENTITY_KEYCLOAK_CLIENT_ID", "identity-control")
+			t.Setenv("IDENTITY_KEYCLOAK_CLIENT_SECRET", "secret")
+			t.Setenv("IDENTITY_TOKEN_ISSUER", "https://identity.example.com/realms/scnehaux")
+			t.Setenv("IDENTITY_TOKEN_AUDIENCE", "identity-control")
+			t.Setenv("IDENTITY_JWKS_URL", "https://identity.example.com/realms/scnehaux/protocol/openid-connect/certs")
+			t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID", "identity-control-registration")
+			t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_SECRET", "registration-secret")
+			t.Setenv(missing, "")
+
+			_, err := config.Load()
+			if err == nil || !strings.Contains(err.Error(), missing) {
+				t.Errorf("Load answered %v, want a problem naming %s", err, missing)
+			}
+		})
+	}
+}
+
+func TestTheRegistrationSweepIntervalDefaultsAndIsBoundedByEventRetention(t *testing.T) {
+	for _, c := range []struct {
+		value string
+		want  time.Duration
+		ok    bool
+	}{
+		{"", time.Hour, true},
+		{"30s", 30 * time.Second, true},
+		{"168h", 0, false},
+	} {
+		t.Setenv("IDENTITY_DATABASE_URL", "postgres://runtime@localhost:5432/identity")
+		t.Setenv("IDENTITY_KEYCLOAK_REALM", "scnehaux")
+		t.Setenv("IDENTITY_KEYCLOAK_BASE_URL", "https://identity.example.com")
+		t.Setenv("IDENTITY_KEYCLOAK_CLIENT_ID", "identity-control")
+		t.Setenv("IDENTITY_KEYCLOAK_CLIENT_SECRET", "secret")
+		t.Setenv("IDENTITY_TOKEN_ISSUER", "https://identity.example.com/realms/scnehaux")
+		t.Setenv("IDENTITY_TOKEN_AUDIENCE", "identity-control")
+		t.Setenv("IDENTITY_JWKS_URL", "https://identity.example.com/realms/scnehaux/protocol/openid-connect/certs")
+		t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID", "identity-control-registration")
+		t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_SECRET", "registration-secret")
+		t.Setenv("IDENTITY_REGISTRATION_RECONCILE_INTERVAL", c.value)
+
+		cfg, err := config.Load()
+		if c.ok && (err != nil || cfg.RegistrationReconcileInterval != c.want) {
+			t.Errorf("%q: interval %s, err %v; want %s", c.value, cfg.RegistrationReconcileInterval, err, c.want)
+		}
+		if !c.ok && err == nil {
+			t.Errorf("%q: an interval as long as the admin-event retention was accepted", c.value)
 		}
 	}
 }
