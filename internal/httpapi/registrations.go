@@ -11,8 +11,10 @@ import (
 
 	"github.com/anshacerbia2/foundation-platform/httpapi"
 	"github.com/anshacerbia2/foundation-platform/id"
+	"github.com/anshacerbia2/foundation-platform/idempotency"
 
 	"github.com/anshacerbia2/identity-control/internal/reconcile"
+	"github.com/anshacerbia2/identity-control/internal/registration"
 )
 
 // AdministrativeReasonHeader carries why an operator is overriding what the reconciler decided.
@@ -27,17 +29,115 @@ type Reconciler interface {
 	GrantException(ctx context.Context, exception reconcile.Exception, lasting time.Duration) (reconcile.Exception, error)
 }
 
-// Registrations serves the drift routes.
+// Registrar is the registration path (TDD-identity-control-003 §Registration Path).
+type Registrar interface {
+	Register(ctx context.Context, req registration.Request) (registration.Registration, error)
+	Get(ctx context.Context, registrationID id.UUID) (registration.Registration, error)
+}
+
+// Registrations serves the registration and drift routes.
 type Registrations struct {
+	registrar  Registrar
 	reconciler Reconciler
 }
 
 // NewRegistrations constructs the handler.
-func NewRegistrations(reconciler Reconciler) (*Registrations, error) {
+func NewRegistrations(registrar Registrar, reconciler Reconciler) (*Registrations, error) {
+	if registrar == nil {
+		return nil, errors.New("httpapi: a registrar is required")
+	}
 	if reconciler == nil {
 		return nil, errors.New("httpapi: a reconciler is required")
 	}
-	return &Registrations{reconciler: reconciler}, nil
+	return &Registrations{registrar: registrar, reconciler: reconciler}, nil
+}
+
+// registerRequest is the wire shape. The realm, the Application authority, the signing algorithm
+// and the registering Principal are absent on purpose: configuration, the interim manual
+// authority, the PS256 baseline, and the authenticated caller decide them.
+type registerRequest struct {
+	ClientKey      string   `json:"client_key"`
+	Profile        string   `json:"profile"`
+	AudienceClass  string   `json:"audience_class"`
+	ApplicationRef string   `json:"application_ref"`
+	LifetimeClass  string   `json:"lifetime_class"`
+	Audience       []string `json:"audience"`
+	RedirectURIs   []string `json:"redirect_uris"`
+}
+
+// Register handles POST /v1/registrations.
+func (h *Registrations) Register(w http.ResponseWriter, r *http.Request) {
+	principal, ok := callerPrincipal(r)
+	if !ok {
+		httpapi.Problem(w, r, httpapi.AuthenticationRequired, "The request carries no authenticated caller")
+		return
+	}
+	key, ok := idempotencyKey(r)
+	if !ok {
+		httpapi.Problem(w, r, httpapi.ValidationFailed,
+			"A non-empty Idempotency-Key header of at most 255 characters is required")
+		return
+	}
+	var body registerRequest
+	decoder := json.NewDecoder(io.LimitReader(r.Body, maxBodyBytes))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&body); err != nil {
+		httpapi.Problem(w, r, httpapi.ValidationFailed, "The request body is not a valid registration document")
+		return
+	}
+	scope, _ := CallerScope(r.Context())
+	created, err := h.registrar.Register(r.Context(), registration.Request{
+		CallerScope: scope, IdempotencyKey: key, RegisteredBy: principal,
+		ClientKey: body.ClientKey, Profile: body.Profile, AudienceClass: body.AudienceClass,
+		ApplicationRef: body.ApplicationRef, LifetimeClass: body.LifetimeClass,
+		Audience: body.Audience, RedirectURIs: body.RedirectURIs,
+	})
+	if err != nil {
+		writeRegistrationError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, created)
+}
+
+// GetRegistration handles GET /v1/registrations/{registration_id}.
+func (h *Registrations) GetRegistration(w http.ResponseWriter, r *http.Request) {
+	if _, ok := callerPrincipal(r); !ok {
+		httpapi.Problem(w, r, httpapi.AuthenticationRequired, "The request carries no authenticated caller")
+		return
+	}
+	registrationID, err := id.Parse(r.PathValue("registration_id"))
+	if err != nil {
+		httpapi.Problem(w, r, httpapi.ValidationFailed, "registration_id is not a valid identifier")
+		return
+	}
+	found, err := h.registrar.Get(r.Context(), registrationID)
+	if err != nil {
+		writeRegistrationError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, found)
+}
+
+func writeRegistrationError(w http.ResponseWriter, r *http.Request, err error) {
+	switch {
+	case errors.Is(err, registration.ErrInvalid), errors.Is(err, registration.ErrProfileNotBuilt),
+		errors.Is(err, registration.ErrScopeUndeclared):
+		// Each message names a rule, never a stored value.
+		httpapi.Problem(w, r, httpapi.ValidationFailed, err.Error())
+	case errors.Is(err, registration.ErrKeyTaken):
+		httpapi.Problem(w, r, httpapi.StateTransitionRefused,
+			"The client_key is registered, or held by a Keycloak client no registration describes")
+	case errors.Is(err, registration.ErrNotFound):
+		httpapi.Problem(w, r, httpapi.NotFound, "No such registration")
+	case errors.Is(err, idempotency.ErrConflict):
+		httpapi.Problem(w, r, httpapi.IdempotencyKeyConflict, "The key was first used with a different request")
+	case errors.Is(err, idempotency.ErrInProgress):
+		httpapi.Problem(w, r, httpapi.RequestInProgress,
+			"An identical request is already in progress; retry after it completes")
+	default:
+		httpapi.Problem(w, r, httpapi.DependencyUnavailable,
+			"The identity kernel did not confirm the registration; retry with the same Idempotency-Key")
+	}
 }
 
 // callerPrincipal is the authenticated Principal, which a resolution and an exception record.

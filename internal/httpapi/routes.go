@@ -99,6 +99,8 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 
 	api := http.NewServeMux()
 	api.HandleFunc("POST /v1/principals", cfg.Principals.CreatePrincipal)
+	api.HandleFunc("POST /v1/registrations", cfg.Registrations.Register)
+	api.HandleFunc("GET /v1/registrations/{registration_id}", cfg.Registrations.GetRegistration)
 	api.HandleFunc("GET /v1/registrations:drift", cfg.Registrations.Drift)
 	api.HandleFunc("POST /v1/registrations:reconcile", cfg.Registrations.Reconcile)
 	api.HandleFunc("POST /v1/registrations/{registration_id}/drift-exceptions", cfg.Registrations.GrantException)

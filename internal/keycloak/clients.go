@@ -90,6 +90,100 @@ type ClientRegistry interface {
 	// ServiceAccountUserID is the Keycloak user this credential acts as. An admin event it caused
 	// is the reconciler's own repair, never a change to attribute to someone.
 	ServiceAccountUserID(ctx context.Context) (string, error)
+
+	// CreateClient creates a client from its specification and returns its identifier. On
+	// ErrAmbiguous the client may exist: the caller reads it back by clientId before acting, as
+	// Principal creation does, because a blind retry is refused by the kernel as a conflict.
+	CreateClient(ctx context.Context, realm Realm, spec ClientSpec) (ClientUUID, error)
+
+	// FindClients returns every client whose clientId equals the one given, exactly.
+	FindClients(ctx context.Context, realm Realm, clientID string) ([]Client, error)
+
+	// ClientScopeID returns the identifier of the named client scope, or ErrNotFound when the
+	// realm declares none by that name.
+	ClientScopeID(ctx context.Context, realm Realm, name string) (string, error)
+
+	// AddDefaultClientScope attaches a client scope to a client as a default scope.
+	AddDefaultClientScope(ctx context.Context, realm Realm, client ClientUUID, scopeID string) error
+}
+
+// ClientSpec is a client built from desired state (TDD-identity-control-003 §Profiles).
+type ClientSpec struct {
+	ClientID string
+
+	// Public is a client that holds no secret. It authenticates with PKCE S256 and is issued no
+	// refresh token.
+	Public bool
+
+	// Resource is a protected resource: an audience only, through which no one logs in.
+	Resource bool
+
+	RedirectURIs        []string
+	AccessTokenLifespan int
+
+	// Audience names the resources a token issued to this client is for, each through an audience
+	// mapper. Which API a token is for belongs to the client relationship, not to the claim profile.
+	Audience []string
+}
+
+// Validate refuses a specification the kernel would accept and the profiles would not.
+func (s ClientSpec) Validate() error {
+	switch {
+	case strings.TrimSpace(s.ClientID) == "":
+		return errors.New("keycloak: a clientId is required")
+	case s.Public == s.Resource:
+		return errors.New("keycloak: a client is either public or a resource")
+	case s.Public && (len(s.RedirectURIs) == 0 || s.AccessTokenLifespan <= 0):
+		return errors.New("keycloak: a public client needs redirect URIs and an access token lifespan")
+	case s.Resource && (len(s.RedirectURIs) > 0 || len(s.Audience) > 0):
+		return errors.New("keycloak: a resource has no redirect URIs and no audience")
+	}
+	return nil
+}
+
+func (s ClientSpec) representation() map[string]any {
+	representation := map[string]any{
+		"clientId":                  s.ClientID,
+		"enabled":                   true,
+		"protocol":                  "openid-connect",
+		"implicitFlowEnabled":       false,
+		"directAccessGrantsEnabled": false,
+		"serviceAccountsEnabled":    false,
+	}
+	if s.Resource {
+		representation["publicClient"] = false
+		representation["bearerOnly"] = true
+		representation["standardFlowEnabled"] = false
+		return representation
+	}
+	representation["publicClient"] = true
+	representation["standardFlowEnabled"] = true
+	representation["redirectUris"] = append([]string{}, s.RedirectURIs...)
+	representation["attributes"] = map[string]any{
+		"pkce.code.challenge.method":       "S256",
+		"access.token.signed.response.alg": "PS256",
+		AttrAccessTokenLifespan:            strconv.Itoa(s.AccessTokenLifespan),
+		// STD-IAM-001 §3.2: a public client holds no refresh token.
+		"use.refresh.tokens": "false",
+	}
+	var mappers []map[string]any
+	for _, resource := range s.Audience {
+		mappers = append(mappers, map[string]any{
+			"name":           "audience-" + resource,
+			"protocol":       "openid-connect",
+			"protocolMapper": "oidc-audience-mapper",
+			"config": map[string]any{
+				"included.client.audience":  resource,
+				"access.token.claim":        "true",
+				"id.token.claim":            "false",
+				"introspection.token.claim": "true",
+			},
+		})
+	}
+	if len(mappers) > 0 {
+		representation["protocolMappers"] = mappers
+	}
+	return representation
 }
 
 var _ ClientRegistry = (*Admin)(nil)
@@ -285,4 +379,91 @@ func (a *Admin) ServiceAccountUserID(ctx context.Context) (string, error) {
 		return "", errors.New("keycloak: the access token names no subject")
 	}
 	return claims.Subject, nil
+}
+
+// CreateClient creates the client. Marked mutating: a create whose response is lost may have
+// happened, and the caller must read it back rather than retry.
+func (a *Admin) CreateClient(ctx context.Context, realm Realm, spec ClientSpec) (ClientUUID, error) {
+	if err := spec.Validate(); err != nil {
+		return "", err
+	}
+	response, err := a.do(ctx, http.MethodPost,
+		fmt.Sprintf("/admin/realms/%s/clients", url.PathEscape(string(realm))), nil, spec.representation(), true)
+	if err != nil {
+		return "", err
+	}
+	defer response.Close()
+	if client := ClientUUID(userIDFromLocation(response.location)); client != "" {
+		return client, nil
+	}
+	return "", fmt.Errorf("keycloak: created a client but the Location header carried no identifier: %w", ErrAmbiguous)
+}
+
+// FindClients reads clients by clientId. The kernel's clientId query is exact unless search is
+// asked for, and the result is filtered to equality here as well, as user search is.
+func (a *Admin) FindClients(ctx context.Context, realm Realm, clientID string) ([]Client, error) {
+	if strings.TrimSpace(clientID) == "" {
+		return nil, errors.New("keycloak: a clientId is required")
+	}
+	query := url.Values{}
+	query.Set("clientId", clientID)
+	query.Set("search", "false")
+	response, err := a.do(ctx, http.MethodGet,
+		fmt.Sprintf("/admin/realms/%s/clients", url.PathEscape(string(realm))), query, nil, false)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Close()
+	var representations []map[string]any
+	if err := json.Unmarshal(response.body, &representations); err != nil {
+		return nil, fmt.Errorf("keycloak: decode clients: %w", err)
+	}
+	var out []Client
+	for _, representation := range representations {
+		client, err := clientFrom(representation)
+		if err != nil {
+			return nil, err
+		}
+		if client.ClientID == clientID {
+			out = append(out, client)
+		}
+	}
+	return out, nil
+}
+
+// ClientScopeID finds a client scope by name.
+func (a *Admin) ClientScopeID(ctx context.Context, realm Realm, name string) (string, error) {
+	response, err := a.do(ctx, http.MethodGet,
+		fmt.Sprintf("/admin/realms/%s/client-scopes", url.PathEscape(string(realm))), nil, nil, false)
+	if err != nil {
+		return "", err
+	}
+	defer response.Close()
+	var scopes []struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(response.body, &scopes); err != nil {
+		return "", fmt.Errorf("keycloak: decode client scopes: %w", err)
+	}
+	for _, scope := range scopes {
+		if scope.Name == name {
+			return scope.ID, nil
+		}
+	}
+	return "", fmt.Errorf("keycloak: the realm declares no client scope %q: %w", name, ErrNotFound)
+}
+
+// AddDefaultClientScope attaches the scope. Idempotent: attaching one already attached succeeds.
+func (a *Admin) AddDefaultClientScope(ctx context.Context, realm Realm, client ClientUUID, scopeID string) error {
+	if client == "" || scopeID == "" {
+		return errors.New("keycloak: a client and a scope are required")
+	}
+	response, err := a.do(ctx, http.MethodPut,
+		a.clientPath(realm, client)+"/default-client-scopes/"+url.PathEscape(scopeID), nil, nil, false)
+	if err != nil {
+		return err
+	}
+	response.Close()
+	return nil
 }

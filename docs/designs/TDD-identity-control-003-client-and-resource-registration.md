@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-003
   title: Protocol Client and Protected-Resource Registration
   owner: Core Platform Team
-  version: 1.4.0
+  version: 1.5.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -186,8 +186,18 @@ registered. Leaving that to application validation alone would let a migration o
 repair script create the one resource whose token lifetime nobody chose.
 
 `audience_class` selects exactly one claim surface and therefore exactly one managed
-client scope: `scnehaux-internal`, `scnehaux-privileged`, `scnehaux-workload`, or
-`scnehaux-external`. `signing_algorithm` is desired state, not an observation copied
+client scope, by `identity-kernel`'s names (`realm/client-scopes.json`):
+
+| Audience class | Managed scope |
+| :-- | :-- |
+| `internal` | `scnehaux-internal` |
+| `privileged` | `scnehaux-provider`, the provider-scope form |
+| `external` | `scnehaux-external` |
+| `workload` | `scnehaux-workload`, not yet declared by the kernel |
+
+The kernel declares no tenant-scope privileged scope and no workload scope. A
+registration whose class has no declared scope is refused, never created without its
+claim surface. `signing_algorithm` is desired state, not an observation copied
 from Keycloak. PS256 is the baseline. RS256 is representable only for an external
 compatibility exception with a named owner, reason, and expiry; the database rejects
 every other combination. This is the persistence boundary for STD-IAM-002 section
@@ -376,11 +386,31 @@ register(request):
     reject if profile = 'public' and a credential is requested
     reject if profile = 'resource' and lifetime_class is absent
     for each redirect URI:
-        reject a wildcard, a path traversal, a non-https scheme outside local
+        reject a wildcard, a path traversal, a fragment, or credentials
+        reject a non-https scheme, except http on a loopback host
         reject a URI whose host is not in the registered host set
     reject an audience naming a resource that is not itself registered
     reject a client_key already active in this realm
+    reject a client_key a Keycloak client already holds
+    reject an audience class whose managed scope the realm does not declare
 ```
+
+**Built so far.** Two profiles: `public` and `resource`. `confidential` and `workload`
+need a client credential issued, rotated and revoked (§Credential Rotation), which is not
+built, so they are refused rather than created with a secret nobody tracks. The RS256
+exception is not offered: every registration is PS256. The registered host set is not
+modelled, so that rule is not enforced yet. A `client_key` is 1 to 128 lowercase
+letters, digits, `.`, `_` or `-`.
+
+**A key an unregistered client holds is refused, not adopted.** Adopting would take over
+a client someone else configured and put it under the reconciler. The kernel is checked
+before the create, and a conflict from the create itself is treated the same way. The
+pending row is retired, which keeps the record and releases the key, and the key's
+response is stored, so a retry is refused the same way.
+
+Pending registrations are recovered before each scheduled sweep. One whose create
+never landed is created. One whose response was lost is adopted by `client_key`, which
+the kernel keeps unique.
 
 Redirect URI validation is exact match. STD-IAM-001 §3.2 prohibits open redirect
 patterns, and a wildcard in a redirect URI is an open redirect with extra steps: it
@@ -494,18 +524,21 @@ wrong actor.
 
 **Built so far.** Two field classes are compared: `token_lifespan` and
 `redirect_uris`, the two the drift proof exercises. `audience_scope`,
-`signing_algorithm` and `profile` are designed above and not compared yet. Two branches
-wait for the registration API:
+`signing_algorithm` and `profile` are designed above and not compared yet.
 
-- **An absent client is reported, not recreated.** The run is `drift`, and no finding
-  is written. Recreating a client is registering it again from desired state.
-- **No client is treated as unmanaged yet.** Until every client in the realm is
-  registered, "no registration" describes all of them, this service's credentials
-  included. When the branch is built, it must also exempt the clients Keycloak itself
-  creates in every realm (`account`, `account-console`, `admin-cli`, `broker`,
-  `realm-management`, `security-admin-console`). Disabling `realm-management` or
-  `admin-cli` would lock administration out of the realm, a worse incident than any
-  drift.
+- **An absent client is recreated** from desired state, and recorded as a converged
+  `recreated` finding naming whoever the deletion's admin event names. Unlike a field
+  divergence, this needs no attribution. A client is removed by retiring its
+  registration, and a console deletion breaks every login through the client, which no
+  emergency fix intends.
+- **No client is treated as unmanaged yet.** This service's own credentials are
+  confidential clients, and confidential registration is not built, so they cannot be
+  registered. Disabling every unregistered client would disable this service. When the
+  branch is built, it must also exempt the clients Keycloak itself creates in every
+  realm (`account`, `account-console`, `admin-cli`, `broker`, `realm-management`,
+  `security-admin-console`). Disabling `realm-management` or `admin-cli` would lock
+  administration out of the realm, a worse incident than any drift.
+
 An unmanaged client is disabled rather than deleted, on the same reasoning as
 `TDD-identity-control-001`: a false positive caused by a reconciler defect is
 recoverable, and deleting a client that some running system depends on is not.

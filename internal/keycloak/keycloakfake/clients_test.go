@@ -81,3 +81,57 @@ func TestTheRegistryFailsAsTold(t *testing.T) {
 		t.Error("a cancelled event read succeeded")
 	}
 }
+
+func TestTheRegistryCreatesFindsAndScopesClients(t *testing.T) {
+	ctx := context.Background()
+	registry := keycloakfake.NewRegistry("sa")
+	spec := keycloak.ClientSpec{ClientID: "web", Public: true, RedirectURIs: []string{"https://a"}, AccessTokenLifespan: 240}
+	client, err := registry.CreateClient(ctx, "r", spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.CreateClient(ctx, "r", spec); !errors.Is(err, keycloak.ErrConflict) {
+		t.Errorf("a second client with one clientId answered %v", err)
+	}
+	if found, _ := registry.FindClients(ctx, "r", "web"); len(found) != 1 || found[0].ID != client {
+		t.Errorf("found %+v", found)
+	}
+	scope, err := registry.ClientScopeID(ctx, "r", "scnehaux-internal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.ClientScopeID(ctx, "r", "scnehaux-workload"); !errors.Is(err, keycloak.ErrNotFound) {
+		t.Errorf("an undeclared scope answered %v", err)
+	}
+	for range 2 {
+		if err := registry.AddDefaultClientScope(ctx, "r", client, scope); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, scopes, ok := registry.Spec(client); !ok || got.ClientID != "web" || len(scopes) != 1 {
+		t.Errorf("spec %+v scopes %v", got, scopes)
+	}
+	if err := registry.AddDefaultClientScope(ctx, "r", "nobody", scope); !errors.Is(err, keycloak.ErrNotFound) {
+		t.Errorf("scoping an absent client answered %v", err)
+	}
+
+	// A lost response after the kernel committed: the client exists and the caller was not told.
+	registry.FailCreate, registry.AmbiguousCreateSucceeds = keycloak.ErrAmbiguous, true
+	lost := keycloak.ClientSpec{ClientID: "lost", Resource: true}
+	if _, err := registry.CreateClient(ctx, "r", lost); !errors.Is(err, keycloak.ErrAmbiguous) {
+		t.Errorf("an ambiguous create answered %v", err)
+	}
+	if found, _ := registry.FindClients(ctx, "r", "lost"); len(found) != 1 {
+		t.Error("an ambiguous create that succeeded left no client")
+	}
+	registry.AmbiguousCreateSucceeds = false
+	if _, err := registry.CreateClient(ctx, "r", keycloak.ClientSpec{ClientID: "failed", Resource: true}); !errors.Is(err, keycloak.ErrAmbiguous) {
+		t.Errorf("a failed create answered %v", err)
+	}
+	if found, _ := registry.FindClients(ctx, "r", "failed"); len(found) != 0 {
+		t.Error("a failed create left a client")
+	}
+	if _, err := registry.CreateClient(ctx, "r", keycloak.ClientSpec{}); err == nil {
+		t.Error("an invalid spec was created")
+	}
+}

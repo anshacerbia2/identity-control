@@ -31,7 +31,7 @@ func surface(t *testing.T, prober httpapi.Prober) httpapi.Surface {
 	if err != nil {
 		t.Fatalf("NewPrincipals: %v", err)
 	}
-	registrations, err := httpapi.NewRegistrations(&stubReconciler{})
+	registrations, err := httpapi.NewRegistrations(&stubRegistrar{}, &stubReconciler{})
 	if err != nil {
 		t.Fatalf("NewRegistrations: %v", err)
 	}
@@ -193,7 +193,7 @@ func TestRoutesRejectsMissingDependencies(t *testing.T) {
 	if _, err := httpapi.Routes(httpapi.RoutesConfig{Database: &stubProber{}}); err == nil {
 		t.Error("Routes accepted a nil Principal handler")
 	}
-	registrations, err := httpapi.NewRegistrations(&stubReconciler{})
+	registrations, err := httpapi.NewRegistrations(&stubRegistrar{}, &stubReconciler{})
 	if err != nil {
 		t.Fatalf("NewRegistrations: %v", err)
 	}

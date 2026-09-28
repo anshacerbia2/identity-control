@@ -1,7 +1,8 @@
 // Package reconcile compares registered desired state against the live Keycloak clients, and
 // repairs or blocks what drifted (TDD-identity-control-003 §Drift Reconciliation).
 //
-// Two field classes are compared, the two the drift proof exercises: a client's access token
+// An absent client is recreated from desired state. Two field classes are compared, the two
+// the drift proof exercises: a client's access token
 // lifespan, which is repaired, and its redirect URIs, which are blocked. Each divergence is
 // attributed through Keycloak's admin events before anything is done about it. A change an
 // unexpired drift exception covers is left in place, and a change nobody can be named for is
@@ -10,11 +11,9 @@
 //
 // What this package does not do yet, and why:
 //
-//   - An absent client is reported, not recreated. Recreating one is registering it again, and
-//     the registration API that builds a client from desired state is not built.
-//   - A client no registration describes is not disabled. Every client in the realm is
-//     unregistered until the registration API exists, Keycloak's own and this service's
-//     credentials among them, so disabling them would disable the realm.
+//   - A client no registration describes is not disabled. The service's own credentials are
+//     confidential clients, which cannot be registered until credential issuance is built, so
+//     disabling unregistered clients would disable this service.
 //   - Audience scope, signing algorithm and profile are not compared yet.
 package reconcile
 
@@ -47,6 +46,7 @@ const (
 	Blocked      FindingClass = "blocked"
 	Sanctioned   FindingClass = "sanctioned"
 	Unattributed FindingClass = "unattributed"
+	Recreated    FindingClass = "recreated"
 )
 
 // Outcome is how a run ended.
@@ -90,6 +90,11 @@ type Config struct {
 
 	// CallTimeout bounds one Admin API call.
 	CallTimeout time.Duration
+
+	// Recreate builds a registration's client again from desired state and returns the new
+	// client's identifier. The registration service supplies it. Nil leaves an absent client
+	// reported and not recreated.
+	Recreate func(ctx context.Context, registration id.UUID) (keycloak.ClientUUID, error)
 }
 
 // Reconciler runs registration sweeps.
@@ -216,16 +221,14 @@ func (r *Reconciler) Sweep(ctx context.Context) (Run, error) {
 	}
 
 	live := make(map[keycloak.ClientUUID]keycloak.Client, len(desired))
-	absent := 0
+	var absent []registration
 	for _, reg := range desired {
 		client, err := call(ctx, r.cfg.CallTimeout, func(ctx context.Context) (keycloak.Client, error) {
 			return r.kernel.GetClient(ctx, r.cfg.Realm, reg.client)
 		})
 		switch {
 		case errors.Is(err, keycloak.ErrNotFound):
-			absent++
-			r.logger.ErrorContext(ctx, "a registered client is absent from the kernel; recreating it needs the registration API",
-				slog.String("client_key", reg.clientKey))
+			absent = append(absent, reg)
 		case err != nil:
 			// Unreachable, or the client read refused: nothing is known about the live state.
 			r.logger.WarnContext(ctx, "registration sweep unresolved: a client could not be read",
@@ -236,7 +239,16 @@ func (r *Reconciler) Sweep(ctx context.Context) (Run, error) {
 		}
 	}
 
-	written, diverged := 0, absent > 0
+	written, diverged := 0, len(absent) > 0
+	for _, reg := range absent {
+		wrote, err := r.recreate(ctx, run.ID, reg, latest)
+		if err != nil {
+			return Run{}, err
+		}
+		if wrote {
+			written++
+		}
+	}
 	for _, reg := range desired {
 		client, ok := live[reg.client]
 		if !ok {
@@ -439,4 +451,32 @@ func call[T any](ctx context.Context, timeout time.Duration, fn func(context.Con
 	callCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	return fn(callCtx)
+}
+
+// recreate builds an absent client again. Unlike a field divergence it needs no attribution: a
+// client is removed by retiring its registration, and a console deletion breaks every login
+// through the client, which no emergency fix intends. Whoever the deletion's admin event names is
+// recorded. Without a Recreate function the client is only reported.
+func (r *Reconciler) recreate(ctx context.Context, run id.UUID, reg registration,
+	latest map[keycloak.ClientUUID]keycloak.AdminEvent) (bool, error) {
+	if r.cfg.Recreate == nil {
+		r.logger.ErrorContext(ctx, "a registered client is absent from the kernel and nothing can recreate it",
+			slog.String("client_key", reg.clientKey))
+		return false, nil
+	}
+	client, err := r.cfg.Recreate(ctx, reg.id)
+	if err != nil {
+		return false, fmt.Errorf("reconcile: recreate %s: %w", reg.clientKey, err)
+	}
+	r.logger.ErrorContext(ctx, "a registered client was absent from the kernel; recreated from desired state",
+		slog.String("client_key", reg.clientKey))
+	now := r.now()
+	write := findingWrite{run: run, registration: reg.id, client: reg.client, class: Recreated,
+		desired: map[string]string{"client": string(client)}, observed: nil, detectedAt: now, convergedAt: &now,
+		newID: r.newID}
+	if event, ok := latest[reg.client]; ok {
+		at := event.Time
+		write.actor, write.changedAt = event.UserID, &at
+	}
+	return true, r.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error { return writeFinding(ctx, tx, write) })
 }

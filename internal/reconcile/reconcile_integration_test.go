@@ -6,7 +6,7 @@ package reconcile
 // derived from the audience's lifetime classes.
 //
 // Skips without TEST_DATABASE_URL, and fails on a skip when REQUIRE_INTEGRATION is set. Each test
-// empties the four registration tables first: they are this package's alone.
+// empties this realm's rows first.
 
 import (
 	"context"
@@ -23,6 +23,7 @@ import (
 
 	"github.com/anshacerbia2/identity-control/internal/keycloak"
 	"github.com/anshacerbia2/identity-control/internal/keycloak/keycloakfake"
+	clientregistration "github.com/anshacerbia2/identity-control/internal/registration"
 )
 
 const (
@@ -61,13 +62,17 @@ func newHarness(t *testing.T) *harness {
 	}
 	t.Cleanup(pool.Close)
 	if err := pool.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		// This realm's rows only: the registration package's tests use the same tables beside
+		// these in CI, in a realm of their own. Runs carry no realm and are this package's alone.
 		for _, statement := range []string{
-			`DELETE FROM identity.registration_finding`,
-			`DELETE FROM identity.drift_exception`,
-			`DELETE FROM identity.reconcile_run`,
-			`DELETE FROM identity.client_registration`,
+			`DELETE FROM identity.registration_finding WHERE registration_id IN
+			   (SELECT registration_id FROM identity.client_registration WHERE realm = $1)`,
+			`DELETE FROM identity.drift_exception WHERE registration_id IN
+			   (SELECT registration_id FROM identity.client_registration WHERE realm = $1)`,
+			`DELETE FROM identity.reconcile_run WHERE $1 <> ''`,
+			`DELETE FROM identity.client_registration WHERE realm = $1`,
 		} {
-			if _, err := tx.Exec(ctx, statement); err != nil {
+			if _, err := tx.Exec(ctx, statement, string(realm)); err != nil {
 				return err
 			}
 		}
@@ -151,7 +156,7 @@ func (h *harness) findings(client keycloak.ClientUUID) []findingRow {
 	h.t.Helper()
 	var out []findingRow
 	if err := h.pool.InTx(context.Background(), func(ctx context.Context, tx db.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT finding_id::text, finding_class, field_class, coalesce(actor, ''),
+		rows, err := tx.Query(ctx, `SELECT finding_id::text, finding_class, coalesce(field_class, ''), coalesce(actor, ''),
 		    coalesce(resolved_by::text, ''), changed_at, converged_at, detected_at
 		    FROM identity.registration_finding WHERE kc_client_id = $1 ORDER BY detected_at, finding_id`, string(client))
 		if err != nil {
@@ -540,5 +545,48 @@ func TestStatusReportsTheOpenFindings(t *testing.T) {
 	if f.ClientKey != "identity-control-caller" || f.Class != Blocked || f.Actor != admin ||
 		string(f.Observed) != `["`+takeoverURI+`"]` || string(f.Desired) != `["`+callbackURI+`"]` {
 		t.Errorf("finding = %+v desired %s observed %s", f, f.Desired, f.Observed)
+	}
+}
+
+// With the registration service wired in, a client deleted in the console is recreated from desired
+// state, and the deletion's actor is recorded on a converged 'recreated' finding.
+func TestADeletedClientIsRecreated(t *testing.T) {
+	h := newHarness(t)
+	service, err := clientregistration.New(h.pool, h.kernel, clientregistration.Config{Realm: realm,
+		CallTimeout: time.Second, PendingRecoveryAfter: time.Minute}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.reconciler.cfg.Recreate = service.Recreate
+	caller, _ := id.NewV7()
+	key, _ := id.NewV7()
+	registered, err := service.Register(context.Background(), clientregistration.Request{
+		CallerScope: "principal:" + caller.String(), IdempotencyKey: key.String(), RegisteredBy: caller,
+		ClientKey: "proof-b-client", Profile: clientregistration.ProfilePublic, AudienceClass: "internal",
+		ApplicationRef: "proof-b", RedirectURIs: []string{callbackURI}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.sweep()
+	found, _ := h.kernel.FindClients(context.Background(), realm, "proof-b-client")
+	original := found[0].ID
+
+	h.tick(time.Second)
+	h.kernel.Remove(admin, original)
+	h.tick(time.Second)
+	run := h.sweep()
+
+	found, _ = h.kernel.FindClients(context.Background(), realm, "proof-b-client")
+	if len(found) != 1 || found[0].ID == original || run.Outcome != Drift || run.Findings != 1 {
+		t.Fatalf("after the sweep: %d client(s), run %+v", len(found), run)
+	}
+	f := h.findings(original)
+	if len(f) != 1 || f[0].class != string(Recreated) || f[0].actor != admin || f[0].convergedAt == nil {
+		t.Errorf("findings = %+v, want one converged recreated finding naming %s", f, admin)
+	}
+	current, _ := service.Get(context.Background(), registered.ID)
+	h.tick(time.Minute)
+	if again := h.sweep(); again.Outcome != Converged || current.State != "active" {
+		t.Errorf("the sweep after recreation reported %+v", again)
 	}
 }
