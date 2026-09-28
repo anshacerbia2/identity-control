@@ -314,7 +314,7 @@ asserted by test.
 
 ## Proof B · Keycloak drift
 
-In progress: decided 2026-09-28, steps 1 to 6 done; step 7, portability, remains. `organization-control` backlog item 10.
+✅ Done 2026-09-28: all seven steps, proven on every `deploy-dev` run. `organization-control` backlog item 10.
 It was labelled P2 in RESPONSE-7 to RESPONSE-10 and listed with the P1 backlog in RESPONSE-23.
 
 **The claim to prove** (RESPONSE-4 §4): drift between reviewed desired state and live Keycloak can
@@ -429,6 +429,7 @@ Acceptance criteria, also from RESPONSE-4 §4:
    | Takeover redirect URI in the console | client disabled, URI kept, lifted only by an operator's reconcile | blocked 0.04 s after the change |
    | Lifespan change under a 40 s exception | left in place, then repaired | converged 2.19 s after the exception expired |
    | Keycloak stopped | `unresolved` while down | converged 0.57 s after it answered again |
+   | User deleted in the console (step 7) | reported, then relinked by an operator | same `principal_id`, one new user |
 
    These times are for a sweep the script requests right after each change. Left to the
    schedule, a divergence waits up to one `IDENTITY_REGISTRATION_RECONCILE_INTERVAL`, 1 hour by
@@ -438,12 +439,27 @@ Acceptance criteria, also from RESPONSE-4 §4:
    - A repair converges inside the sweep that made it, so no route showed it. The drift route
      now reports the last run's findings, and `GET /v1/registrations/{id}/findings` a client's
      history.
-7. Add `:relink`, the dangling-mapping finding, and the portability test.
-
+7. ✅ Add `:relink`, the dangling-mapping finding, and the portability test.
+   - `POST /v1/principals/{id}:relink` takes an `X-Administrative-Reason`. It asks the kernel to
+     confirm the user is gone: an unknown answer is refused, and an existing user answers `409`.
+     It then returns the mapping to pending, records who and why in the insert-only
+     `identity.principal_relink`, and recovery recreates a user with the same `principal_id`.
+     The database now refuses an active mapping without a user.
+   - The scheduled sweep records a dangling mapping in `identity.principal_finding` and never
+     relinks it. It also runs pending Principal recovery, which nothing had scheduled before.
+   - Proof B scenario 5, first passing run: the console administrator deletes the user, the
+     sweep reports the mapping and recreates nothing, a relink without a reason is refused, the
+     relink with one leaves the Principal active with exactly one new user carrying the same
+     `principal_id`, and a second relink is refused.
+   - The Memberships half of the criterion holds by construction, not by this job:
+     `organization-control` holds Memberships by `principal_id`, and a relink writes identity
+     tables only. The job does not run `organization-control`, so no cross-service test observes
+     it.
 **Found while building, and not part of Proof B:**
 
 - **Credential issuance:** confidential and workload registration, with `identity.client_credential`, rotation and revocation (TDD-003 §Credential Records, §Credential Rotation).
 - **Disabling unmanaged clients:** it needs this service's own clients registered first, and it must exempt the clients Keycloak creates in every realm.
+- **The rest of the Principal sweep:** its unmapped, orphan and duplicate branches (TDD-001 §Reconciliation Sweep) are not built. Only the dangling branch and pending recovery run.
 - **Kernel scopes:** `identity-kernel` must declare `scnehaux-workload` and a tenant-scope privileged scope before registrations of those classes can exist.
 
 ## Waiting on the Keycloak proof-of-concept
