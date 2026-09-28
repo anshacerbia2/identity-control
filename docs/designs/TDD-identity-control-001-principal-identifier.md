@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-001
   title: Canonical Principal Identifier and Creation Path
   owner: Core Platform Team
-  version: 1.3.0
+  version: 1.4.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-10
-  last_reviewed: 2026-09-26
+  last_reviewed: 2026-09-28
   parent_sad: SAD-001
 ---
 
@@ -200,7 +200,9 @@ CREATE TABLE identity.principal_mapping (
         CHECK (subject_type IN ('human', 'workload')),
     CONSTRAINT principal_mapping_owner_check
         CHECK ((subject_type = 'human' AND workload_owner IS NULL)
-            OR (subject_type = 'workload' AND workload_owner IS NOT NULL))
+            OR (subject_type = 'workload' AND workload_owner IS NOT NULL)),
+    CONSTRAINT principal_mapping_active_linked_check
+        CHECK (state <> 'active' OR keycloak_user_id IS NOT NULL)
 );
 
 CREATE UNIQUE INDEX principal_mapping_realm_user
@@ -239,14 +241,28 @@ implementation commit.
 
 `principal_id` is the primary key and the enterprise-wide reference. `keycloak_user_id`
 is nullable while the mapping is `pending`, and is never exposed outside this module.
+`principal_mapping_active_linked_check` makes that the only state where it can be
+absent: an active mapping with no Keycloak user would be served by nothing, and
+recovered by nothing, because recovery reads only `pending` rows.
 
 State transitions:
 
 ```text
+      relink
+   ┌──────────┐
+   ↓          │
 pending ──→ active ──→ retired
-   │           │
-   └───────────┴────→ quarantined
+   │          │
+   └──────────┴────→ quarantined
 ```
+
+**`relink` is the one way back from `active`.** A Principal outlives its Keycloak user.
+The user can be deleted in the console, or lost with a realm rebuilt from nothing, and
+the `principal_id` that every domain keys on, with every Membership held under it, must
+survive that. `relink` clears `keycloak_user_id` and returns the mapping to `pending`.
+The recovery below then does what it does for any pending mapping: it adopts a user
+carrying the identifier, or creates one with the same `principal_id`. Nothing outside
+this table changes, since `organization-control` holds Memberships by `principal_id`.
 
 ### Keycloak
 
@@ -328,7 +344,7 @@ through its `scnehaux-provider` client scope, and this service accepts nothing e
 
 | Provider scope | Authority | Granted by |
 | :-- | :-- | :-- |
-| `provider:identity-control` | Mint, read, quarantine, and retire Principals through this service | The bootstrap ceremony, to the first Principal; nothing else writes `scnehaux_provider_scope` |
+| `provider:identity-control` | Mint, read, quarantine, relink, and retire Principals through this service | The bootstrap ceremony, to the first Principal; nothing else writes `scnehaux_provider_scope` |
 
 A token carrying `tenant_id`, lacking `provider_scope`, or naming any other scope is refused. The
 access token lifetime is class `L0`, 240 seconds, and is set on the calling client's
@@ -342,10 +358,19 @@ registration.
 POST   /v1/principals
 GET    /v1/principals/{principal_id}
 POST   /v1/principals/{principal_id}:quarantine
+POST   /v1/principals/{principal_id}:relink
 POST   /v1/principals/{principal_id}:retire
 GET    /v1/principals:unmapped
 POST   /v1/principals:reconcile
 ```
+
+`:relink` requires `X-Administrative-Reason`. It refuses a mapping that is not
+`active`, and it refuses with `409` while the mapped Keycloak user still exists:
+relinking a live user would only find that same user again, and it would hide
+whatever made someone think it was gone. If Keycloak cannot be reached it answers
+`503` and changes nothing, because an unknown answer is not an absent user. The
+caller, the reason and the previous `keycloak_user_id` are recorded with the
+transition.
 
 `POST /v1/principals` requires an `Idempotency-Key` header. The response carries
 `principal_id`. The request must declare `subject_type`; a workload also requires an
@@ -432,7 +457,17 @@ For each Keycloak user:
         disable both users
         transition the mapping to quarantined
         emit identity.principal.duplicate_detected
+
+For each active mapping whose keycloak_user_id no Keycloak user holds:
+    record a dangling-mapping finding
+    raise an alert
 ```
+
+A dangling mapping is reported, never relinked by the sweep. A Keycloak user can be
+deleted on purpose, by an administrator removing someone's access. A sweep that
+recreated every missing user would restore that access within one interval, with
+nobody having decided it. Relinking is an operator's decision, made through `:relink`
+with a reason.
 
 Disabling rather than deleting is deliberate: a false positive caused by a
 reconciler defect is recoverable, while deletion of a Principal is not.
@@ -533,6 +568,18 @@ Executed against a Keycloak instance pinned to the release under evaluation:
   produces an `unmapped` finding.
 - Two Keycloak users carrying the same attribute value are both disabled and the
   mapping is quarantined.
+
+### Portability
+
+- An active mapping cannot be stored without a `keycloak_user_id`: the database
+  refuses it.
+- Deleting a Principal's Keycloak user produces a dangling-mapping finding on the next
+  sweep, and the sweep changes nothing else.
+- `:relink` on that mapping returns it to `pending`, and recovery creates a Keycloak
+  user carrying the same `principal_id`. The mapping is `active` again under the new
+  user, and the Principal's Memberships in `organization-control` are unchanged.
+- `:relink` is refused while the mapped user exists, without a reason, and on a
+  mapping that is not `active`.
 
 ### Negative
 

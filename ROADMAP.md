@@ -314,8 +314,8 @@ asserted by test.
 
 ## Proof B · Keycloak drift
 
-Not started. `organization-control` backlog item 10. It was labelled P2 in RESPONSE-7 to RESPONSE-10
-and listed with the P1 backlog in RESPONSE-23.
+In progress: decided 2026-09-28, steps 1 and 2 done. `organization-control` backlog item 10.
+It was labelled P2 in RESPONSE-7 to RESPONSE-10 and listed with the P1 backlog in RESPONSE-23.
 
 **The claim to prove** (RESPONSE-4 §4): drift between reviewed desired state and live Keycloak can
 be detected, classified, reconciled, and shown to converge. This service is not merely a
@@ -334,7 +334,9 @@ Acceptance criteria, also from RESPONSE-4 §4:
 - An unreachable Keycloak yields `unresolved`, neither a failure nor a success.
 - Convergence time is recorded as evidence.
 - The principal portability test rides along: blank a mapping's `keycloak_user_id`, provision
-  again, and require `principal_id` and its Memberships to be intact.
+  again, and require `principal_id` and its Memberships to be intact. The blanking is done by
+  `:relink` (decision 4), because TDD-001 has the database refuse an active mapping without a
+  user.
 
 **What exists** (surveyed 2026-09-27):
 
@@ -359,35 +361,41 @@ Acceptance criteria, also from RESPONSE-4 §4:
   `identity.projection_cursor.last_reconciled_at` exists and nothing writes it.
 - Its Keycloak credential holds `manage-users` and `view-users` only. It cannot read or change
   clients, and cannot read admin events, which need `view-events`.
-- Admin events are not enabled in `identity-kernel`'s realm definition, although
-  TDD-identity-kernel-003 specifies them, with details and a retention floor.
+- ✅ Admin events were not enabled in `identity-kernel`'s realm definition. They now are, with
+  representation and 7-day retention (identity-kernel #16).
 - The mapping state machine has no way back from `active`. A blanked `keycloak_user_id` on an
   active row is picked up by nothing, so the portability test needs a designed transition.
+  Designed as `:relink` (decision 4), not built.
 
-**Decisions it needs before building:**
+**Decided 2026-09-28:**
 
-1. **Where desired state lives.** RESPONSE-4 proposed a reviewed file in git. TDD-003, which is
-   later and approved, puts it in the Control Database, written through the registration API.
-   Recommended: TDD-003.
-2. **Redirect URI policy.** RESPONSE-4 says detect and block. TDD-003 says apply desired state
-   and record a repair finding. Recommended: detect and block, because silently restoring a
-   redirect URI hides a possible takeover. TDD-003 would be edited to match.
-3. **The registration credential on the development server.** `create-kernel-clients.sh` must
-   not be run there again. So it needs a separate one-time script, refusing when the client
-   exists, run once by whoever operates the server.
-4. **Portability.** Which transition takes an active mapping with a blank `keycloak_user_id`
-   back through provisioning, and what the reconciler does when it meets one.
+1. **Desired state lives in the Control Database**, written through the registration API, not in
+   a reviewed file in git. The reasoning is in TDD-003 §Technical Context. A client's access
+   token lifespan is derived from the lifetime classes of its audience, not stored.
+2. **A redirect URI changed in the console is blocked, not restored.** The client is disabled,
+   the changed value kept, and only an operator's reconcile lifts it, because silently restoring
+   a redirect URI hides a possible takeover (TDD-003 §Drift Reconciliation).
+3. **The registration credential on the development server comes from a new one-time script.**
+   The script creates `identity-control-registration` only, refuses when it exists, and whoever
+   operates the server runs it once. `create-kernel-clients.sh` and `dev-keycloak.ps1` are not
+   run there again.
+4. **Portability goes through `POST /v1/principals/{principal_id}:relink`.** It takes a reason,
+   and returns an active mapping whose Keycloak user is gone to `pending`, for recovery to
+   provision again. The sweep only reports a dangling mapping and never relinks it, since a
+   user deleted on purpose must not come back by itself. The database refuses an active mapping
+   without a Keycloak user (TDD-001 §Data Model).
 
-**Proposed order, one PR each:**
+**Order, one PR each:**
 
-1. Enable admin events in `identity-kernel`'s realm definition.
-2. Edit TDD-003 and TDD-001 with the decisions above.
-3. Add the registration table and credential.
+1. ✅ Enable admin events in `identity-kernel`'s realm definition (identity-kernel #16).
+2. ✅ Edit TDD-003 and TDD-001 with the decisions above.
+3. Add the registration, run, finding and exception tables, and the registration credential with
+   its one-time development script.
 4. Build the reconciler: interval, last run, findings, lifespan repair, redirect-URI block,
    exception through admin events, `unresolved`.
 5. Add a Proof B end-to-end job in `deploy-dev.yml` against a real Keycloak: both scenarios, the
    exception, Keycloak down, and convergence time.
-6. Add the portability test.
+6. Add `:relink`, the dangling-mapping finding, and the portability test.
 
 ## Waiting on the Keycloak proof-of-concept
 
