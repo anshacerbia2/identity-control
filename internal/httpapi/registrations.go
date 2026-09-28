@@ -1,0 +1,203 @@
+package httpapi
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/anshacerbia2/foundation-platform/httpapi"
+	"github.com/anshacerbia2/foundation-platform/id"
+
+	"github.com/anshacerbia2/identity-control/internal/reconcile"
+)
+
+// AdministrativeReasonHeader carries why an operator is overriding what the reconciler decided.
+// It is recorded on the finding it resolves.
+const AdministrativeReasonHeader = "X-Administrative-Reason"
+
+// Reconciler is the registration drift surface (TDD-identity-control-003 §API / Interface).
+type Reconciler interface {
+	Status(ctx context.Context) (reconcile.Status, error)
+	Sweep(ctx context.Context) (reconcile.Run, error)
+	Resolve(ctx context.Context, resolution reconcile.Resolution) error
+	GrantException(ctx context.Context, exception reconcile.Exception, lasting time.Duration) (reconcile.Exception, error)
+}
+
+// Registrations serves the drift routes.
+type Registrations struct {
+	reconciler Reconciler
+}
+
+// NewRegistrations constructs the handler.
+func NewRegistrations(reconciler Reconciler) (*Registrations, error) {
+	if reconciler == nil {
+		return nil, errors.New("httpapi: a reconciler is required")
+	}
+	return &Registrations{reconciler: reconciler}, nil
+}
+
+// callerPrincipal is the authenticated Principal, which a resolution and an exception record.
+func callerPrincipal(r *http.Request) (id.UUID, bool) {
+	scope, ok := CallerScope(r.Context())
+	if !ok {
+		return id.UUID{}, false
+	}
+	raw, ok := strings.CutPrefix(scope, "principal:")
+	if !ok {
+		return id.UUID{}, false
+	}
+	principal, err := id.Parse(raw)
+	if err != nil {
+		return id.UUID{}, false
+	}
+	return principal, true
+}
+
+// Drift handles GET /v1/registrations:drift: the last run first, then every open finding.
+func (h *Registrations) Drift(w http.ResponseWriter, r *http.Request) {
+	if _, ok := callerPrincipal(r); !ok {
+		httpapi.Problem(w, r, httpapi.AuthenticationRequired, "The request carries no authenticated caller")
+		return
+	}
+	status, err := h.reconciler.Status(r.Context())
+	if err != nil {
+		httpapi.Problem(w, r, httpapi.Internal, "The drift status could not be read")
+		return
+	}
+	writeJSON(w, http.StatusOK, status)
+}
+
+type reconcileRequest struct {
+	Findings []string `json:"findings"`
+}
+
+type reconcileResponse struct {
+	Run      *reconcile.Run   `json:"run"`
+	Status   reconcile.Status `json:"status"`
+	Deferred bool             `json:"deferred,omitempty"`
+}
+
+// Reconcile handles POST /v1/registrations:reconcile. It runs a sweep now. Naming findings, with
+// X-Administrative-Reason, also applies desired state to those blocked or unattributed findings
+// first, which a scheduled sweep never does on its own.
+func (h *Registrations) Reconcile(w http.ResponseWriter, r *http.Request) {
+	principal, ok := callerPrincipal(r)
+	if !ok {
+		httpapi.Problem(w, r, httpapi.AuthenticationRequired, "The request carries no authenticated caller")
+		return
+	}
+	var body reconcileRequest
+	if r.ContentLength != 0 {
+		decoder := json.NewDecoder(io.LimitReader(r.Body, maxBodyBytes))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+			httpapi.Problem(w, r, httpapi.ValidationFailed, "The request body is not a valid reconcile document")
+			return
+		}
+	}
+
+	if len(body.Findings) > 0 {
+		reason := strings.TrimSpace(r.Header.Get(AdministrativeReasonHeader))
+		if reason == "" {
+			httpapi.Problem(w, r, httpapi.ValidationFailed,
+				"Applying desired state to findings requires an X-Administrative-Reason header")
+			return
+		}
+		findings := make([]id.UUID, 0, len(body.Findings))
+		for _, raw := range body.Findings {
+			finding, err := id.Parse(raw)
+			if err != nil {
+				httpapi.Problem(w, r, httpapi.ValidationFailed, "A named finding is not a valid identifier")
+				return
+			}
+			findings = append(findings, finding)
+		}
+		if err := h.reconciler.Resolve(r.Context(), reconcile.Resolution{
+			Findings: findings, ResolvedBy: principal, Reason: reason}); err != nil {
+			writeReconcileError(w, r, err)
+			return
+		}
+	}
+
+	response := reconcileResponse{}
+	run, err := h.reconciler.Sweep(r.Context())
+	switch {
+	case errors.Is(err, reconcile.ErrSweepInProgress):
+		// Another replica is sweeping. The resolution above is recorded either way, and that
+		// sweep, or the next, reports the rest.
+		response.Deferred = true
+	case err != nil:
+		writeReconcileError(w, r, err)
+		return
+	default:
+		response.Run = &run
+	}
+	if response.Status, err = h.reconciler.Status(r.Context()); err != nil {
+		httpapi.Problem(w, r, httpapi.Internal, "The drift status could not be read")
+		return
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+type exceptionRequest struct {
+	FieldClass      string `json:"field_class"`
+	Actor           string `json:"actor"`
+	Reason          string `json:"reason"`
+	DurationSeconds int    `json:"duration_seconds"`
+}
+
+// GrantException handles POST /v1/registrations/{registration_id}/drift-exceptions.
+func (h *Registrations) GrantException(w http.ResponseWriter, r *http.Request) {
+	principal, ok := callerPrincipal(r)
+	if !ok {
+		httpapi.Problem(w, r, httpapi.AuthenticationRequired, "The request carries no authenticated caller")
+		return
+	}
+	registration, err := id.Parse(r.PathValue("registration_id"))
+	if err != nil {
+		httpapi.Problem(w, r, httpapi.ValidationFailed, "registration_id is not a valid identifier")
+		return
+	}
+	var body exceptionRequest
+	decoder := json.NewDecoder(io.LimitReader(r.Body, maxBodyBytes))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&body); err != nil {
+		httpapi.Problem(w, r, httpapi.ValidationFailed, "The request body is not a valid drift exception document")
+		return
+	}
+	exception, err := h.reconciler.GrantException(r.Context(), reconcile.Exception{
+		Registration: registration,
+		FieldClass:   reconcile.FieldClass(body.FieldClass),
+		Actor:        body.Actor,
+		Reason:       body.Reason,
+		GrantedBy:    principal,
+	}, time.Duration(body.DurationSeconds)*time.Second)
+	if err != nil {
+		writeReconcileError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, exception)
+}
+
+func writeReconcileError(w http.ResponseWriter, r *http.Request, err error) {
+	switch {
+	case errors.Is(err, reconcile.ErrInvalid), errors.Is(err, reconcile.ErrNotResolvable):
+		// Both messages name a rule or an identifier the caller sent, never stored state.
+		httpapi.Problem(w, r, httpapi.ValidationFailed, err.Error())
+	case errors.Is(err, reconcile.ErrNoSuchRegistration):
+		httpapi.Problem(w, r, httpapi.NotFound, "No active registration by that identifier")
+	default:
+		httpapi.Problem(w, r, httpapi.DependencyUnavailable,
+			"The identity kernel or the control database did not complete the operation; retry")
+	}
+}
+
+func writeJSON(w http.ResponseWriter, status int, body any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(body)
+}

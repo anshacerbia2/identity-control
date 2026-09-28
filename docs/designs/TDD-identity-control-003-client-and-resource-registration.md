@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-003
   title: Protocol Client and Protected-Resource Registration
   owner: Core Platform Team
-  version: 1.3.0
+  version: 1.4.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -477,6 +477,35 @@ attribution, because disabling a client removes access and never grants it.
 is known about the live state. So no finding is opened, closed or converged, and the
 run says so rather than reporting the last known result as current.
 
+**One sweep at a time, across replicas.** Every replica schedules the sweep. A run is
+claimed under a transaction-scoped advisory lock: a replica that finds another's run
+unfinished and younger than two intervals skips its tick. An older unfinished run
+belonged to a replica that stopped. It stays visible as unfinished and no longer
+blocks.
+
+**Which admin events a sweep reads.** It reads every client admin event since the
+previous run's start, so a change made while no replica was sweeping is still
+attributed. The window never reaches past `identity-kernel`'s 7-day retention, and the
+interval must be shorter than that retention. An event caused by the registration
+credential's own service account is the reconciler's own repair, so it is never taken
+as the actor of a change. More than 10,000 client events in one window is read as
+attribution unavailable, because attributing from part of the record could name the
+wrong actor.
+
+**Built so far.** Two field classes are compared: `token_lifespan` and
+`redirect_uris`, the two the drift proof exercises. `audience_scope`,
+`signing_algorithm` and `profile` are designed above and not compared yet. Two branches
+wait for the registration API:
+
+- **An absent client is reported, not recreated.** The run is `drift`, and no finding
+  is written. Recreating a client is registering it again from desired state.
+- **No client is treated as unmanaged yet.** Until every client in the realm is
+  registered, "no registration" describes all of them, this service's credentials
+  included. When the branch is built, it must also exempt the clients Keycloak itself
+  creates in every realm (`account`, `account-console`, `admin-cli`, `broker`,
+  `realm-management`, `security-admin-console`). Disabling `realm-management` or
+  `admin-cli` would lock administration out of the realm, a worse incident than any
+  drift.
 An unmanaged client is disabled rather than deleted, on the same reasoning as
 `TDD-identity-control-001`: a false positive caused by a reconciler defect is
 recoverable, and deleting a client that some running system depends on is not.
