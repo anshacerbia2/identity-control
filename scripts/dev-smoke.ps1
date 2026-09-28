@@ -148,11 +148,13 @@ $r = Send-Json "POST" "/v1/registrations:reconcile" $null $token $null
 Expect "a sweep runs on request" $r.code 200
 if ($r.code -eq 200) {
     $sweep = $r.body | ConvertFrom-Json
-    $outcome = if ($sweep.deferred) { "deferred" } else { $sweep.run.outcome }
+    # deferred is omitted unless true, and the script runs under strict mode, so it is looked up.
+    $deferred = $sweep.PSObject.Properties.Name -contains 'deferred'
+    $outcome = if ($deferred) { "deferred" } else { $sweep.run.outcome }
     Write-Host "        outcome=$outcome attribution=$($sweep.run.attribution)"
     # Converged: nothing is registered yet, so nothing can diverge. Attribution true: the
     # registration credential read the kernel's admin events. Anything else is a wiring fault.
-    if (-not $sweep.deferred) {
+    if (-not $deferred) {
         Expect "the run converged" $sweep.run.outcome "converged"
         Expect "admin events were readable" $sweep.run.attribution $true
     }
