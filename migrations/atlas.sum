@@ -1,4 +1,5 @@
-h1:1MBeiKwA4jGvRL4FtwayGD4rOjHNs2qjMLD9loZHvyQ=
+h1:cGnTLc9buf+u0E695SbduhiK/Sukcmga2hRUMC28Up4=
 20260817151332_baseline_identity_schema.sql h1:GysIRGAJncY8eQTmFIhc3g8FTeFq8dGu9wmdY4kefVQ=
 20260817201931_add_creation_payload.sql h1:ejgDHTQ30FK0/adjz26CYPnLsAJyodOxBHvTI/GOd8M=
 20260820185807_add_bootstrap_ceremony.sql h1:0tiQsqClxrSDiz1Jl+vd6VDStnO/nObLoeKIHBWsX3M=
+20260928093643_add_client_registration.sql h1:XGzeFE0sxqdc7LpSLwc86kuJb2P1XvQtsbbwby79ffk=

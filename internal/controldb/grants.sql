@@ -30,6 +30,10 @@ BEGIN
               ('identity.principal_mapping'),
               ('identity.projection_cursor'),
               ('identity.bootstrap_ceremony'),
+              ('identity.client_registration'),
+              ('identity.reconcile_run'),
+              ('identity.registration_finding'),
+              ('identity.drift_exception'),
               ('platform.outbox'),
               ('platform.processed_event'),
               ('platform.dead_letter'),
@@ -77,6 +81,19 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA platform TO identit
 --
 -- SELECT and INSERT remain: the ceremony claims the row, and a resumed ceremony reads it back.
 REVOKE UPDATE, DELETE, TRUNCATE ON identity.bootstrap_ceremony FROM identity_runtime;
+
+-- The registration records are evidence, and TDD-identity-control-003 keeps each of them after it
+-- stops mattering operationally: a retired registration stays auditable, a converged finding is
+-- the record that a console change happened, and a finished run is how the reconciler is
+-- observed. So none of them is deletable by the runtime. The findings and runs keep UPDATE,
+-- because a sweep finishes its run and converges its findings.
+--
+-- A drift exception is insert-only as well. It permits one console change for a bounded time,
+-- and one the runtime could edit could be extended by whoever wanted the change kept.
+REVOKE DELETE, TRUNCATE ON identity.client_registration FROM identity_runtime;
+REVOKE DELETE, TRUNCATE ON identity.reconcile_run FROM identity_runtime;
+REVOKE DELETE, TRUNCATE ON identity.registration_finding FROM identity_runtime;
+REVOKE UPDATE, DELETE, TRUNCATE ON identity.drift_exception FROM identity_runtime;
 
 -- platform.outbox_sequence is read by every append. Without USAGE the outbox write fails
 -- inside the caller's domain transaction, so a membership mutation would roll back.

@@ -72,6 +72,28 @@ jobs:
         working-directory: deploy/dev
         run: bash ./create-kernel-clients.sh >> .env
 
+      # The development server runs this once, by hand. CI runs it on every change, against a kernel
+      # that lives for this job, so the script the server's operator runs is the one that was tested.
+      - name: register the registration path's client
+        working-directory: deploy/dev
+        run: bash ./create-registration-client.sh >> .env
+
+      - name: a second registration-client run is refused
+        working-directory: deploy/dev
+        run: |
+          if bash ./create-registration-client.sh; then
+            echo "::error::create-registration-client.sh ran twice; it must refuse an existing client"
+            exit 1
+          fi
+
+      # TDD-identity-control-003 §Testing Strategy: the registration credential cannot touch a user,
+      # and the Principal path's cannot touch a client. Asserted against this live kernel.
+      - name: the two Admin API credentials are split
+        run: |
+          set -a; . deploy/dev/.env; set +a
+          export KC_ADMIN_URL=http://localhost:8080
+          pwsh -NoProfile -File scripts/dev-credential-split.ps1
+
       - name: build, migrate, and start the service
         working-directory: deploy/dev
         run: |

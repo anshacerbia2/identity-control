@@ -222,6 +222,8 @@ CREATE TABLE identity.reconcile_run (
     CONSTRAINT reconcile_run_finished_check CHECK ((finished_at IS NULL) = (outcome IS NULL))
 );
 
+CREATE INDEX reconcile_run_latest ON identity.reconcile_run (sweep, started_at);
+
 CREATE TABLE identity.registration_finding (
     finding_id       UUID        PRIMARY KEY,
     run_id           UUID        NOT NULL REFERENCES identity.reconcile_run(run_id),
@@ -235,13 +237,22 @@ CREATE TABLE identity.registration_finding (
     changed_at       TIMESTAMPTZ,
     detected_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     converged_at     TIMESTAMPTZ,
+    resolved_by      UUID,
+    resolution_reason TEXT,
     CONSTRAINT registration_finding_field_check
         CHECK (field_class IS NULL OR field_class IN
             ('redirect_uris', 'token_lifespan', 'audience_scope', 'signing_algorithm', 'profile')),
     CONSTRAINT registration_finding_class_check
         CHECK (finding_class IN
-            ('repaired', 'blocked', 'sanctioned', 'unattributed', 'recreated', 'unmanaged'))
+            ('repaired', 'blocked', 'sanctioned', 'unattributed', 'recreated', 'unmanaged')),
+    CONSTRAINT registration_finding_resolution_check
+        CHECK ((resolved_by IS NULL) = (resolution_reason IS NULL)
+            AND (resolution_reason IS NULL OR btrim(resolution_reason) <> ''))
 );
+
+CREATE UNIQUE INDEX registration_finding_open
+    ON identity.registration_finding (kc_client_id, field_class) NULLS NOT DISTINCT
+    WHERE converged_at IS NULL;
 
 CREATE TABLE identity.drift_exception (
     exception_id     UUID        PRIMARY KEY,
@@ -252,6 +263,10 @@ CREATE TABLE identity.drift_exception (
     granted_by       UUID        NOT NULL,
     granted_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     expires_at       TIMESTAMPTZ NOT NULL,
+    CONSTRAINT drift_exception_field_check
+        CHECK (field_class IN
+            ('redirect_uris', 'token_lifespan', 'audience_scope', 'signing_algorithm', 'profile')),
+    CONSTRAINT drift_exception_named_check CHECK (btrim(actor) <> '' AND btrim(reason) <> ''),
     CONSTRAINT drift_exception_window_check
         CHECK (expires_at > granted_at AND expires_at <= granted_at + interval '24 hours')
 );
@@ -261,11 +276,13 @@ A run that never finished is visible as one: `outcome` is null while it runs, an
 last run's start, finish and outcome are what `GET /v1/registrations:drift` reports
 first. `actor` is the Keycloak user an admin event names, and `changed_at` is that
 event's time, so `converged_at − changed_at` is the convergence time the drift proof
-records as evidence. One divergence has one finding. A later sweep that still sees it
+records as evidence. One divergence has one finding, which `registration_finding_open`
+enforces. A later sweep that still sees it
 updates that finding's class, `sanctioned` becoming `repaired` when its exception
 expires, rather than opening another. A finding is retained after it converges, for the same reason
 `TDD-identity-control-002` keeps `extra` findings: the record of a console change is
-the evidence it happened.
+the evidence it happened. The runtime role therefore deletes none of these four tables' rows,
+and cannot update a drift exception either (`grants.sql`).
 
 A drift exception is how an operator makes a console change on purpose: an emergency
 fix, in the one place it can be made quickly. It names the registration, the field

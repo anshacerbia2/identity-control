@@ -37,6 +37,7 @@ cp .env.example .env
 #   KC_BOOTSTRAP_ADMIN_PASSWORD, copied from the kernel's deploy/dev/.env
 
 ./create-kernel-clients.sh                   # prints two secrets; put both into .env
+./create-registration-client.sh              # prints one secret; put it into .env
 docker compose up -d --build
 curl -fsS http://127.0.0.1:8082/readyz       # ready once the migration job has succeeded
 
@@ -145,7 +146,21 @@ go run ./cmd/identity-control
 - **It writes nothing into the realm.** Scopes, attributes, and keys are `identity-kernel`'s
   `realm/`, applied by its `realm-apply`. `create-kernel-clients.sh` only registers this service's
   two clients.
-- **It does not register other applications' clients.** The Admin API client holds
+- **It does not register other applications' clients yet.** The Admin API client holds
   `manage-users` and `view-users` only, as TDD-identity-control-001 states. Client registration
-  (TDD-identity-control-003) is not built, and it will need a decision on its credential first;
-  see ROADMAP.md.
+  (TDD-identity-control-003) has its tables and its own credential, `identity-control-registration`,
+  holding `manage-clients`, `view-clients` and `view-events`. The service does not use it yet.
+  `scripts/dev-credential-split.ps1` asserts that neither credential can do the other's work.
+
+## Adding the registration client to a running server
+
+A server stood up before the registration client existed has the two kernel clients and not this
+one. Add it once, without rerunning `create-kernel-clients.sh`:
+
+```sh
+cd identity-control/deploy/dev
+./create-registration-client.sh >> .env      # refuses if the client already exists
+```n
+It creates `identity-control-registration` and changes nothing else in the realm. Run it again
+and it refuses, because the secret cannot be read back and replacing it would cut off whatever
+holds it.

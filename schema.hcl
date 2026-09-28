@@ -247,3 +247,444 @@ table "projection_cursor" {
     columns = [column.stream]
   }
 }
+
+// Desired state for one protocol client or protected resource. TDD-identity-control-003.
+//
+// The reconciler applies whatever this row says, so it is a security control in its own right:
+// written only through the registration API, every write carrying an accountable registered_by and
+// a new version. A retired row is kept, which is why the runtime role holds no DELETE on it
+// (grants.sql), and client_registration_key releases its client_key for reuse instead.
+table "client_registration" {
+  schema  = schema.identity
+  comment = "Desired state for a protocol client or protected resource. TDD-identity-control-003."
+
+  column "registration_id" {
+    null = false
+    type = uuid
+  }
+
+  column "kc_client_id" {
+    null    = true
+    type    = text
+    comment = "Keycloak's internal client id. Null while pending."
+  }
+
+  column "realm" {
+    null = false
+    type = text
+  }
+
+  column "client_key" {
+    null    = false
+    type    = text
+    comment = "The clientId as Keycloak and every caller name it."
+  }
+
+  column "profile" {
+    null = false
+    type = text
+  }
+
+  column "application_authority" {
+    null = false
+    type = text
+  }
+
+  column "application_ref" {
+    null = false
+    type = text
+  }
+
+  column "registered_by" {
+    null    = false
+    type    = uuid
+    comment = "The accountable Principal. While application_authority is manual, accountability rests here."
+  }
+
+  column "audience_class" {
+    null = false
+    type = text
+  }
+
+  column "signing_algorithm" {
+    null    = false
+    type    = text
+    default = "PS256"
+  }
+
+  column "algorithm_exception_owner" {
+    null = true
+    type = uuid
+  }
+
+  column "algorithm_exception_reason" {
+    null = true
+    type = text
+  }
+
+  column "algorithm_exception_expires_at" {
+    null = true
+    type = timestamptz
+  }
+
+  column "lifetime_class" {
+    null = true
+    type = text
+  }
+
+  column "audience" {
+    null = true
+    type = sql("text[]")
+  }
+
+  column "redirect_uris" {
+    null = true
+    type = sql("text[]")
+  }
+
+  column "state" {
+    null = false
+    type = text
+  }
+
+  column "version" {
+    null    = false
+    type    = bigint
+    default = 1
+  }
+
+  column "created_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+
+  column "activated_at" {
+    null = true
+    type = timestamptz
+  }
+
+  column "suspended_at" {
+    null = true
+    type = timestamptz
+  }
+
+  column "retired_at" {
+    null = true
+    type = timestamptz
+  }
+
+  primary_key {
+    columns = [column.registration_id]
+  }
+
+  index "client_registration_kc_client_id_key" {
+    unique  = true
+    columns = [column.kc_client_id]
+  }
+
+  // A retired registration keeps its record and releases its key.
+  index "client_registration_key" {
+    unique  = true
+    columns = [column.realm, column.client_key]
+    where   = "state <> 'retired'"
+  }
+
+  check "client_profile_check" {
+    expr = "profile IN ('confidential', 'public', 'workload', 'resource')"
+  }
+
+  check "client_audience_class_check" {
+    expr = "audience_class IN ('internal', 'privileged', 'workload', 'external')"
+  }
+
+  check "client_signing_algorithm_check" {
+    expr = "signing_algorithm IN ('PS256', 'RS256')"
+  }
+
+  // STD-IAM-002 §3.2.2: PS256 is the baseline, and RS256 exists only as an external
+  // compatibility exception with a named owner, a reason, and an expiry.
+  check "client_algorithm_profile_check" {
+    expr = "(signing_algorithm = 'PS256' AND algorithm_exception_owner IS NULL AND algorithm_exception_reason IS NULL AND algorithm_exception_expires_at IS NULL) OR (signing_algorithm = 'RS256' AND audience_class = 'external' AND algorithm_exception_owner IS NOT NULL AND algorithm_exception_reason IS NOT NULL AND algorithm_exception_expires_at > created_at)"
+  }
+
+  check "client_workload_audience_check" {
+    expr = "profile <> 'workload' OR audience_class = 'workload'"
+  }
+
+  check "client_state_check" {
+    expr = "state IN ('pending', 'active', 'suspended', 'retired')"
+  }
+
+  // STD-IAM-002 §3.3 in the database: a protected resource without a lifetime class cannot be
+  // stored, so no migration or repair script can create the one resource whose token lifetime
+  // nobody chose.
+  check "client_lifetime_class_required" {
+    expr = "profile <> 'resource' OR lifetime_class IS NOT NULL"
+  }
+
+  check "client_lifetime_class_check" {
+    expr = "lifetime_class IS NULL OR lifetime_class IN ('L0', 'L1', 'L2', 'L3')"
+  }
+}
+
+// One reconciliation sweep. The last run is how the reconciler is observed: a run that never
+// finished has a null outcome, and 'unresolved' is an outcome, not a missing one.
+table "reconcile_run" {
+  schema  = schema.identity
+  comment = "One reconciliation sweep and its outcome. TDD-identity-control-003."
+
+  column "run_id" {
+    null = false
+    type = uuid
+  }
+
+  column "sweep" {
+    null = false
+    type = text
+  }
+
+  column "started_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+
+  column "finished_at" {
+    null = true
+    type = timestamptz
+  }
+
+  column "outcome" {
+    null = true
+    type = text
+  }
+
+  column "attribution" {
+    null    = true
+    type    = boolean
+    comment = "Whether the run could read admin events. Without them no divergence is repaired automatically."
+  }
+
+  column "findings" {
+    null    = false
+    type    = integer
+    default = 0
+  }
+
+  primary_key {
+    columns = [column.run_id]
+  }
+
+  index "reconcile_run_latest" {
+    columns = [column.sweep, column.started_at]
+  }
+
+  check "reconcile_run_sweep_check" {
+    expr = "sweep IN ('registration')"
+  }
+
+  check "reconcile_run_outcome_check" {
+    expr = "outcome IS NULL OR outcome IN ('converged', 'drift', 'unresolved')"
+  }
+
+  check "reconcile_run_finished_check" {
+    expr = "(finished_at IS NULL) = (outcome IS NULL)"
+  }
+}
+
+// One divergence between desired state and a Keycloak client, kept after it converges: the record
+// of a console change is the evidence that it happened.
+table "registration_finding" {
+  schema  = schema.identity
+  comment = "One divergence between desired state and Keycloak, retained after convergence. TDD-identity-control-003."
+
+  column "finding_id" {
+    null = false
+    type = uuid
+  }
+
+  column "run_id" {
+    null = false
+    type = uuid
+  }
+
+  column "registration_id" {
+    null    = true
+    type    = uuid
+    comment = "Null for an unmanaged client, which no registration describes."
+  }
+
+  column "kc_client_id" {
+    null = false
+    type = text
+  }
+
+  column "field_class" {
+    null = true
+    type = text
+  }
+
+  column "finding_class" {
+    null = false
+    type = text
+  }
+
+  column "desired" {
+    null = true
+    type = jsonb
+  }
+
+  column "observed" {
+    null = true
+    type = jsonb
+  }
+
+  column "actor" {
+    null    = true
+    type    = text
+    comment = "The Keycloak user the attributing admin event names. Null when the change is unattributed."
+  }
+
+  column "changed_at" {
+    null    = true
+    type    = timestamptz
+    comment = "The attributing admin event's time. converged_at - changed_at is the convergence time."
+  }
+
+  column "detected_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+
+  column "converged_at" {
+    null = true
+    type = timestamptz
+  }
+
+  column "resolved_by" {
+    null    = true
+    type    = uuid
+    comment = "The Principal whose reconcile applied desired state to a blocked or unattributed finding."
+  }
+
+  column "resolution_reason" {
+    null = true
+    type = text
+  }
+
+  primary_key {
+    columns = [column.finding_id]
+  }
+
+  foreign_key "registration_finding_run_id_fkey" {
+    columns     = [column.run_id]
+    ref_columns = [table.reconcile_run.column.run_id]
+    on_update   = NO_ACTION
+    on_delete   = NO_ACTION
+  }
+
+  foreign_key "registration_finding_registration_id_fkey" {
+    columns     = [column.registration_id]
+    ref_columns = [table.client_registration.column.registration_id]
+    on_update   = NO_ACTION
+    on_delete   = NO_ACTION
+  }
+
+  // One divergence has one finding: a later sweep that still sees it updates this row. NULLS NOT
+  // DISTINCT because an unmanaged or recreated client has no field class, and with distinct nulls
+  // every sweep would open another finding for the same client.
+  index "registration_finding_open" {
+    unique         = true
+    columns        = [column.kc_client_id, column.field_class]
+    where          = "converged_at IS NULL"
+    nulls_distinct = false
+  }
+
+  check "registration_finding_field_check" {
+    expr = "field_class IS NULL OR field_class IN ('redirect_uris', 'token_lifespan', 'audience_scope', 'signing_algorithm', 'profile')"
+  }
+
+  check "registration_finding_class_check" {
+    expr = "finding_class IN ('repaired', 'blocked', 'sanctioned', 'unattributed', 'recreated', 'unmanaged')"
+  }
+
+  // An operator's resolution names who and why, or it is not one.
+  check "registration_finding_resolution_check" {
+    expr = "(resolved_by IS NULL) = (resolution_reason IS NULL) AND (resolution_reason IS NULL OR btrim(resolution_reason) <> '')"
+  }
+}
+
+// A time-bound permission for one person to change one field class of one client in the console.
+// Insert-only (grants.sql): an exception that could be extended after the fact is one nobody
+// granted for that long.
+table "drift_exception" {
+  schema  = schema.identity
+  comment = "A time-bound, insert-only permission for a console change. TDD-identity-control-003."
+
+  column "exception_id" {
+    null = false
+    type = uuid
+  }
+
+  column "registration_id" {
+    null = false
+    type = uuid
+  }
+
+  column "field_class" {
+    null = false
+    type = text
+  }
+
+  column "actor" {
+    null    = false
+    type    = text
+    comment = "The Keycloak user the admin event will name."
+  }
+
+  column "reason" {
+    null = false
+    type = text
+  }
+
+  column "granted_by" {
+    null = false
+    type = uuid
+  }
+
+  column "granted_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+
+  column "expires_at" {
+    null = false
+    type = timestamptz
+  }
+
+  primary_key {
+    columns = [column.exception_id]
+  }
+
+  foreign_key "drift_exception_registration_id_fkey" {
+    columns     = [column.registration_id]
+    ref_columns = [table.client_registration.column.registration_id]
+    on_update   = NO_ACTION
+    on_delete   = NO_ACTION
+  }
+
+  check "drift_exception_field_check" {
+    expr = "field_class IN ('redirect_uris', 'token_lifespan', 'audience_scope', 'signing_algorithm', 'profile')"
+  }
+
+  check "drift_exception_named_check" {
+    expr = "btrim(actor) <> '' AND btrim(reason) <> ''"
+  }
+
+  check "drift_exception_window_check" {
+    expr = "expires_at > granted_at AND expires_at <= granted_at + interval '24 hours'"
+  }
+}
