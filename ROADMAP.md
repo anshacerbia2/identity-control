@@ -314,7 +314,7 @@ asserted by test.
 
 ## Proof B · Keycloak drift
 
-In progress: decided 2026-09-28, steps 1 to 5 done. `organization-control` backlog item 10.
+In progress: decided 2026-09-28, steps 1 to 6 done; step 7, portability, remains. `organization-control` backlog item 10.
 It was labelled P2 in RESPONSE-7 to RESPONSE-10 and listed with the P1 backlog in RESPONSE-23.
 
 **The claim to prove** (RESPONSE-4 §4): drift between reviewed desired state and live Keycloak can
@@ -417,8 +417,27 @@ Acceptance criteria, also from RESPONSE-4 §4:
    - A key an unregistered Keycloak client holds is refused, never adopted.
    - Disabling unmanaged clients is still not built. This service's own credentials are
      confidential clients that cannot be registered yet.
-6. Add a Proof B end-to-end job in `deploy-dev.yml` against a real Keycloak: both scenarios, the
-   exception, Keycloak down, and convergence time.
+6. ✅ Add a Proof B end-to-end job in `deploy-dev.yml` against a real Keycloak: both scenarios, the
+   exception, Keycloak down, and convergence time. `scripts/dev-proof-b.ps1` registers a public
+   client, then changes it through the Admin API as the console administrator, so every change
+   carries its admin event. The first passing run, 2026-09-28:
+
+   | Scenario | Outcome | Evidence |
+   | :-- | :-- | :-- |
+   | Schedule | a run started unprompted | interval 20 s in CI |
+   | Lifespan changed in the console | repaired, attributed to the administrator | converged 0.07 s after the change |
+   | Takeover redirect URI in the console | client disabled, URI kept, lifted only by an operator's reconcile | blocked 0.04 s after the change |
+   | Lifespan change under a 40 s exception | left in place, then repaired | converged 2.19 s after the exception expired |
+   | Keycloak stopped | `unresolved` while down | converged 0.57 s after it answered again |
+
+   These times are for a sweep the script requests right after each change. Left to the
+   schedule, a divergence waits up to one `IDENTITY_REGISTRATION_RECONCILE_INTERVAL`, 1 hour by
+   default. The job also found two defects:
+   - A restarted Keycloak refuses the token the Admin client had cached, and the client kept
+     presenting it until it expired. It now drops the token and retries once on a 401.
+   - A repair converges inside the sweep that made it, so no route showed it. The drift route
+     now reports the last run's findings, and `GET /v1/registrations/{id}/findings` a client's
+     history.
 7. Add `:relink`, the dangling-mapping finding, and the portability test.
 
 **Found while building, and not part of Proof B:**
