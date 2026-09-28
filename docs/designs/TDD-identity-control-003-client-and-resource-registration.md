@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-003
   title: Protocol Client and Protected-Resource Registration
   owner: Core Platform Team
-  version: 1.2.0
+  version: 1.3.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-11
-  last_reviewed: 2026-09-26
+  last_reviewed: 2026-09-28
   parent_sad: SAD-001
 ---
 
@@ -76,6 +76,17 @@ What is never permitted is registration with no Application reference at all. Th
 that every client traces to an Application survives the absence of the system that will
 eventually hold them.
 
+**Desired state is the registration record in the Control Database.** A reviewed file in
+git was proposed for the first drift proof (RESPONSE-4 §4.2), because a pull request
+gives review, history and attribution for free. It is not used. Desired state is a
+security control: a reconciler applies whatever desired state says, so whoever can write
+it can switch a control off, with the reconciler doing the work. The record answers
+that concern in its own way. It is written only through this API, by the registration
+role, and every write carries an accountable `registered_by` and a new `version`. It is
+also validated where a file could not be, against registered audiences and lifetime
+classes. And it is what other systems call when they register a client, which a file
+read at deploy time could never serve.
+
 ## Component Design
 
 | Component | Package | Responsibility |
@@ -83,7 +94,7 @@ eventually hold them.
 | `RegistrationService` | `internal/registration` | Desired state, validation, lifecycle |
 | `ApplicationReferenceResolver` | `internal/registration` | Resolves and revalidates the Application reference against its current authority |
 | `CredentialIssuer` | `internal/registration` | Issues, rotates, and revokes client secrets through the Admin API |
-| `RegistrationReconciler` | `internal/reconcile` | Compares desired state against Keycloak and repairs drift |
+| `RegistrationReconciler` | `internal/reconcile` | Compares desired state against Keycloak on a schedule, repairs or blocks drift by field class, and records every run |
 
 ### Registration Path
 
@@ -186,6 +197,83 @@ every other combination. This is the persistence boundary for STD-IAM-002 sectio
 While Software Catalog is unchartered the authority is `manual` and `registered_by`
 carries the accountable operator.
 
+**A client's access token lifespan is derived, not stored.** It is the access token
+lifetime of the shortest lifetime class among the resources in its `audience`, from the
+STD-IAM-002 §3.3 table: `L0` 240 s, `L1` and `L3` 540 s, `L2` 900 s. A client whose
+audience is empty takes `L0`. STD-IAM-002 forbids configuring a longer lifetime per
+client, so a stored number could only ever agree with the classes or break the
+standard. The reconciler compares Keycloak's `access.token.lifespan` client attribute
+against the derived value.
+
+### Reconciliation Records
+
+```sql
+CREATE TABLE identity.reconcile_run (
+    run_id       UUID        PRIMARY KEY,
+    sweep        TEXT        NOT NULL,
+    started_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finished_at  TIMESTAMPTZ,
+    outcome      TEXT,
+    attribution  BOOLEAN,
+    findings     INTEGER     NOT NULL DEFAULT 0,
+    CONSTRAINT reconcile_run_sweep_check CHECK (sweep IN ('registration')),
+    CONSTRAINT reconcile_run_outcome_check
+        CHECK (outcome IS NULL OR outcome IN ('converged', 'drift', 'unresolved')),
+    CONSTRAINT reconcile_run_finished_check CHECK ((finished_at IS NULL) = (outcome IS NULL))
+);
+
+CREATE TABLE identity.registration_finding (
+    finding_id       UUID        PRIMARY KEY,
+    run_id           UUID        NOT NULL REFERENCES identity.reconcile_run(run_id),
+    registration_id  UUID        REFERENCES identity.client_registration(registration_id),
+    kc_client_id     TEXT        NOT NULL,
+    field_class      TEXT,
+    finding_class    TEXT        NOT NULL,
+    desired          JSONB,
+    observed         JSONB,
+    actor            TEXT,
+    changed_at       TIMESTAMPTZ,
+    detected_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    converged_at     TIMESTAMPTZ,
+    CONSTRAINT registration_finding_field_check
+        CHECK (field_class IS NULL OR field_class IN
+            ('redirect_uris', 'token_lifespan', 'audience_scope', 'signing_algorithm', 'profile')),
+    CONSTRAINT registration_finding_class_check
+        CHECK (finding_class IN
+            ('repaired', 'blocked', 'sanctioned', 'unattributed', 'recreated', 'unmanaged'))
+);
+
+CREATE TABLE identity.drift_exception (
+    exception_id     UUID        PRIMARY KEY,
+    registration_id  UUID        NOT NULL REFERENCES identity.client_registration(registration_id),
+    field_class      TEXT        NOT NULL,
+    actor            TEXT        NOT NULL,
+    reason           TEXT        NOT NULL,
+    granted_by       UUID        NOT NULL,
+    granted_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at       TIMESTAMPTZ NOT NULL,
+    CONSTRAINT drift_exception_window_check
+        CHECK (expires_at > granted_at AND expires_at <= granted_at + interval '24 hours')
+);
+```
+
+A run that never finished is visible as one: `outcome` is null while it runs, and the
+last run's start, finish and outcome are what `GET /v1/registrations:drift` reports
+first. `actor` is the Keycloak user an admin event names, and `changed_at` is that
+event's time, so `converged_at − changed_at` is the convergence time the drift proof
+records as evidence. One divergence has one finding. A later sweep that still sees it
+updates that finding's class, `sanctioned` becoming `repaired` when its exception
+expires, rather than opening another. A finding is retained after it converges, for the same reason
+`TDD-identity-control-002` keeps `extra` findings: the record of a console change is
+the evidence it happened.
+
+A drift exception is how an operator makes a console change on purpose: an emergency
+fix, in the one place it can be made quickly. It names the registration, the field
+class, and the Keycloak user who will make the change, and it lasts at most 24 hours.
+A change it covers is left in place and recorded `sanctioned`. When it expires, the
+change is drift like any other. Keeping the change means changing desired state
+through this API.
+
 ### Credential Records
 
 ```sql
@@ -218,9 +306,16 @@ POST   /v1/registrations/{registration_id}:restore
 POST   /v1/registrations/{registration_id}:retire
 POST   /v1/registrations/{registration_id}/credentials:rotate
 POST   /v1/registrations/{registration_id}/credentials/{credential_id}:revoke
+POST   /v1/registrations/{registration_id}/drift-exceptions
 GET    /v1/registrations:drift
 POST   /v1/registrations:reconcile
 ```
+
+`GET /v1/registrations:drift` returns the last run and every finding that has not
+converged. `POST /v1/registrations:reconcile` runs a sweep now. With
+`X-Administrative-Reason` and the ids of open `blocked` or `unattributed` findings, it
+also applies desired state to those, which a scheduled sweep never does on its own.
+The reason and the caller are recorded on the finding.
 
 `POST /v1/registrations` and `:rotate` are the only responses that ever carry a secret
 value, and each carries it exactly once. A subsequent `GET` returns the registration
@@ -246,8 +341,8 @@ credential rather than continuing a session.
 Every registration attaches exactly one managed audience scope. Internal, privileged,
 and workload registrations issue PS256 only. External registrations also default to
 PS256; RS256 is permitted only while the recorded compatibility exception remains
-unexpired. No request can select another algorithm, and the reconciler removes any
-additional enterprise claim scope or algorithm that appears through console drift.
+unexpired. No request can select another algorithm, and the reconciler restores the
+managed scope and algorithm when console drift changes them (§Drift Reconciliation).
 
 ## Algorithms / Logic
 
@@ -297,19 +392,73 @@ someone remembers.
 
 ### Drift Reconciliation
 
+A sweep runs every `IDENTITY_REGISTRATION_RECONCILE_INTERVAL`, and on request.
+
 ```text
-for each active registration:
-    read the client from Keycloak
+sweep():
+    open a run
+    read the realm's client admin events since the previous run's start
+        attribution := the read succeeded
+    read every client
+        if Keycloak is unreachable, or refuses the client read:
+            finish the run 'unresolved', change no finding, stop
 
-    if absent:
-        recreate from desired state, record a repair finding
+    for each active registration:
+        if its client is absent:
+            recreate it from desired state, record 'recreated'
+            continue
+        for each field class whose live value differs from desired state:
+            event := the latest admin event on this client since the previous run,
+                     or else the one already recorded on this divergence's open finding
+            if an unexpired exception names this registration, this field class, and event's user:
+                record 'sanctioned', leave the value
+            else if the field class is redirect_uris:
+                disable the client, record 'blocked', raise an alert
+            else if attribution is false, or there is no event:
+                record 'unattributed', leave the value, raise an alert
+            else:
+                apply desired state, record 'repaired'
+        read the client back; set converged_at on every finding it now satisfies
 
-    if present with divergent redirect URIs, audience, audience scope, algorithm, or profile:
-        apply desired state, record a repair finding
+    for each Keycloak client with no registration:
+        disable it, record 'unmanaged', raise an alert
 
-for each Keycloak client with no registration:
-    disable it, record an unmanaged-client finding, raise an alert
+    finish the run 'converged' when nothing differs, 'drift' otherwise
 ```
+
+Each field class has one policy, and the first two are what the drift proof exercises:
+
+| Field class | Live value | Policy |
+| :-- | :-- | :-- |
+| `token_lifespan` | `access.token.lifespan` client attribute | repair |
+| `redirect_uris` | `redirectUris` | block |
+| `audience_scope` | default and optional client scopes | repair |
+| `signing_algorithm` | `access.token.signed.response.alg` | repair |
+| `profile` | `publicClient`, `serviceAccountsEnabled`, `standardFlowEnabled` | repair |
+
+**A redirect URI is blocked, not restored.** A redirect URI changed in the console is
+the shape an attempt to take over a login takes: tokens redirected to a host the
+registration never named. Restoring desired state in silence would close the hole and
+also hide that anyone tried. So the client is disabled, which stops every new login
+through it, and the changed value is kept for whoever investigates. Only an operator
+lifts the block, with `POST /v1/registrations:reconcile` naming the finding and a
+reason. That restores the desired URIs and re-enables the client. Changing a
+registration's redirect URIs through this API is not designed yet, so until it is,
+restoring desired state is the only way to lift a block.
+
+**No attribution, no automatic repair.** An automatic repair can undo an operator's
+emergency fix minutes after they made it, which is a worse incident than the drift
+(RESPONSE-4 §4.4). So a repair happens only when an admin event names who made the
+change, and no exception covers it. The attribution stays on the finding, so a change
+left in place under an exception is still attributed when the exception expires, long
+after its admin event left the sweep's window. A divergence no admin event explains was made by
+a path that records none. So was one found while the admin events could not be read.
+Both are reported `unattributed` and left for an operator. Blocking needs no
+attribution, because disabling a client removes access and never grants it.
+
+**An unreachable Keycloak is `unresolved`, not a failure and not a success.** Nothing
+is known about the live state. So no finding is opened, closed or converged, and the
+run says so rather than reporting the last known result as current.
 
 An unmanaged client is disabled rather than deleted, on the same reasoning as
 `TDD-identity-control-001`: a false positive caused by a reconciler defect is
@@ -342,7 +491,7 @@ becomes available.
 | :-- | :-- | :-- |
 | `IDENTITY_CREDENTIAL_LIFETIME` | `90d` | Client credential validity |
 | `IDENTITY_CREDENTIAL_ROTATION_OVERLAP` | `7d` | Window during which both credentials are valid |
-| `IDENTITY_REGISTRATION_RECONCILE_INTERVAL` | `1h` | Drift sweep cadence |
+| `IDENTITY_REGISTRATION_RECONCILE_INTERVAL` | `1h` | Drift sweep cadence. Admin-event retention in `identity-kernel` (7 days) must exceed it, or a change would lose its attribution before a sweep reads it |
 | `IDENTITY_APPLICATION_AUTHORITY` | `manual` | Becomes the Software Catalog authority name once chartered |
 | `IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID` | none, required | The registration path's own Admin API client, `identity-control-registration` |
 | `IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_SECRET` | none, required | Its secret, from the secret manager; never the Principal path's |
@@ -378,7 +527,19 @@ becomes available.
 ### Drift
 
 - A client deleted directly in Keycloak is recreated from desired state.
-- A client whose redirect URIs were changed in the Admin Console is repaired.
+- A client whose redirect URIs were changed in the Admin Console is disabled and
+  recorded `blocked`, with the changed value kept. A reconcile naming the finding
+  restores desired state and re-enables it.
+- A client whose access token lifespan was changed in the Admin Console is restored,
+  recorded `repaired` with the admin who changed it, and its convergence time is
+  recorded.
+- The same change covered by an unexpired exception naming that admin is recorded
+  `sanctioned` and left. After the exception expires, the next sweep repairs it.
+- A divergence found while admin events cannot be read is recorded `unattributed` and
+  not repaired.
+- A sweep against an unreachable Keycloak finishes `unresolved` and changes no
+  finding.
+- The last run's start, finish and outcome are readable through the API.
 - A client whose managed audience scope or signing algorithm drifted is restored to
   desired state.
 - A Keycloak client with no registration is disabled and alerted, not deleted.
@@ -396,8 +557,13 @@ becomes available.
 
 **The registration path has its own Admin API credential.** It is a separate Keycloak client,
 `identity-control-registration`, whose service account holds the realm-management roles
-`manage-clients` and `view-clients`. It holds nothing else: no user management, no realm
-administration, no credential read. The Principal path keeps its own credential, with user roles
+`manage-clients`, `view-clients`, and `view-events`, the last so the reconciler can read
+the admin events that attribute a change. It holds nothing else: no user management, no
+realm administration, no credential read.
+
+On the development server this client is created once, by a script that creates this
+one client and refuses to run when it exists, and whoever operates the server runs it.
+The scripts that created the kernel's clients there are not rerun for it. The Principal path keeps its own credential, with user roles
 only (`TDD-identity-control-001`), and so does the projector (`TDD-identity-control-002`).
 All three designs therefore stay true: none of those credentials holds client management.
 
@@ -439,6 +605,9 @@ authentication.
 | Credential expiring within 14 days | any occurrence | within 3 days |
 | Registrations in `pending` past the recovery threshold | any occurrence | — |
 | Drift repairs per sweep | above baseline | — |
+| Client blocked for a redirect URI change | — | any occurrence |
+| Unattributed divergence | any occurrence | — |
+| Last registration sweep finished | older than 2 intervals | older than 4 intervals, or `unresolved` twice in a row |
 | Registration with `application_authority = manual` | tracked as debt | — |
 
 Runbooks required before production: unmanaged client triage, credential rotation,
