@@ -52,36 +52,36 @@ func (a *Admin) do(
 	payload any,
 	mutating bool,
 ) (*response, error) {
-	token, err := a.accessToken(ctx)
-	if err != nil {
-		return nil, err
-	}
-
 	endpoint := strings.TrimRight(a.cfg.BaseURL, "/") + path
 	if len(query) > 0 {
 		endpoint += "?" + query.Encode()
 	}
 
-	var bodyReader io.Reader
+	var encoded []byte
 	if payload != nil {
-		encoded, marshalErr := json.Marshal(payload)
-		if marshalErr != nil {
+		var marshalErr error
+		if encoded, marshalErr = json.Marshal(payload); marshalErr != nil {
 			return nil, fmt.Errorf("keycloak: encode request: %w", marshalErr)
 		}
-		bodyReader = bytes.NewReader(encoded)
 	}
 
-	request, err := http.NewRequestWithContext(ctx, method, endpoint, bodyReader)
+	token, err := a.accessToken(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("keycloak: build request: %w", err)
+		return nil, err
 	}
-	request.Header.Set("Authorization", "Bearer "+token)
-	request.Header.Set("Accept", "application/json")
-	if payload != nil {
-		request.Header.Set("Content-Type", "application/json")
+	raw, err := a.send(ctx, method, endpoint, encoded, token)
+	if err == nil && raw.StatusCode == http.StatusUnauthorized {
+		// A 401 is the token, not the role: a restarted kernel can refuse a token it issued before,
+		// and the cache would keep presenting it until it expired, minutes of refusals a restart
+		// should not cost. The request was refused before it was processed, so sending it once more
+		// with a fresh token cannot duplicate an effect. A 403 is the role and is never retried.
+		raw.Body.Close()
+		a.invalidateToken()
+		if token, err = a.accessToken(ctx); err != nil {
+			return nil, err
+		}
+		raw, err = a.send(ctx, method, endpoint, encoded, token)
 	}
-
-	raw, err := a.client.Do(request)
 	if err != nil {
 		// No status was received. The request may or may not have been processed.
 		if mutating {
@@ -113,6 +113,33 @@ func (a *Admin) do(
 		return nil, statusErr
 	}
 	return result, nil
+}
+
+// send performs one round trip with the given token. Its error is a transport failure only: the
+// token is acquired by the caller, so a refused credential is never mistaken for an unreachable
+// kernel.
+func (a *Admin) send(ctx context.Context, method, endpoint string, encoded []byte, token string) (*http.Response, error) {
+	var bodyReader io.Reader
+	if encoded != nil {
+		bodyReader = bytes.NewReader(encoded)
+	}
+	request, err := http.NewRequestWithContext(ctx, method, endpoint, bodyReader)
+	if err != nil {
+		return nil, fmt.Errorf("keycloak: build request: %w", err)
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Accept", "application/json")
+	if encoded != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	return a.client.Do(request)
+}
+
+// invalidateToken drops the cached token, so the next call acquires a fresh one.
+func (a *Admin) invalidateToken() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.token, a.tokenExpiry = "", time.Time{}
 }
 
 // classify maps an HTTP status onto a sentinel error.

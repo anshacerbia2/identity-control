@@ -24,6 +24,7 @@ const AdministrativeReasonHeader = "X-Administrative-Reason"
 // Reconciler is the registration drift surface (TDD-identity-control-003 §API / Interface).
 type Reconciler interface {
 	Status(ctx context.Context) (reconcile.Status, error)
+	FindingsFor(ctx context.Context, registration id.UUID) ([]reconcile.Finding, error)
 	Sweep(ctx context.Context) (reconcile.Run, error)
 	Resolve(ctx context.Context, resolution reconcile.Resolution) error
 	GrantException(ctx context.Context, exception reconcile.Exception, lasting time.Duration) (reconcile.Exception, error)
@@ -116,6 +117,26 @@ func (h *Registrations) GetRegistration(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusOK, found)
+}
+
+// Findings handles GET /v1/registrations/{registration_id}/findings: that client's divergences,
+// newest first, converged ones included.
+func (h *Registrations) Findings(w http.ResponseWriter, r *http.Request) {
+	if _, ok := callerPrincipal(r); !ok {
+		httpapi.Problem(w, r, httpapi.AuthenticationRequired, "The request carries no authenticated caller")
+		return
+	}
+	registrationID, err := id.Parse(r.PathValue("registration_id"))
+	if err != nil {
+		httpapi.Problem(w, r, httpapi.ValidationFailed, "registration_id is not a valid identifier")
+		return
+	}
+	findings, err := h.reconciler.FindingsFor(r.Context(), registrationID)
+	if err != nil {
+		httpapi.Problem(w, r, httpapi.Internal, "The findings could not be read")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"findings": findings})
 }
 
 func writeRegistrationError(w http.ResponseWriter, r *http.Request, err error) {

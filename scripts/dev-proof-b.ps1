@@ -1,0 +1,281 @@
+# Proof B: drift between registered desired state and live Keycloak is detected, classified,
+# reconciled, and shown to converge (identity-control ROADMAP §Proof B, RESPONSE-4 §4).
+#
+# It runs against a real kernel and the running service, and changes clients the way an
+# administrator in the console does: through the Admin API, as the kernel's bootstrap administrator,
+# so every change carries the admin event that attributes it.
+#
+#   1. the reconciler runs on a schedule, and its last run is observable
+#   2. an access token lifespan changed in the console is repaired, attributed, with its
+#      convergence time recorded
+#   3. a redirect URI changed in the console blocks the client, keeps the changed value, and only
+#      an operator's reconcile lifts it
+#   4. a change covered by a drift exception is left in place until the exception expires, and
+#      is then repaired
+#   5. an unreachable Keycloak is 'unresolved', and the sweep converges once it is back
+#
+# SECRETS: read from the environment.
+#   IDENTITY_CALLER_SECRET, IDENTITY_CALLER_PASSWORD   a provider-scope token, as dev-smoke.ps1
+#   KC_BOOTSTRAP_ADMIN_USERNAME, KC_BOOTSTRAP_ADMIN_PASSWORD   the console administrator
+#
+# KC_BASE_URL is where the login form is served, KC_ADMIN_URL the kernel's private address where
+# /admin is reachable, and KERNEL_KEYCLOAK_CONTAINER the container scenario 5 stops. It is for a
+# kernel that exists for the length of a CI job. Scenario 5 stops Keycloak: never run it against a
+# shared server.
+#
+# Usage: pwsh ./scripts/dev-proof-b.ps1
+
+$ErrorActionPreference = "Stop"
+
+$api       = if ($env:IDENTITY_API_URL) { $env:IDENTITY_API_URL } else { "http://127.0.0.1:8082" }
+$kcAdmin   = if ($env:KC_ADMIN_URL) { $env:KC_ADMIN_URL } else { "http://127.0.0.1:8081" }
+$realm     = if ($env:KC_REALM) { $env:KC_REALM } else { "scnehaux" }
+$container = if ($env:KERNEL_KEYCLOAK_CONTAINER) { $env:KERNEL_KEYCLOAK_CONTAINER } else { "scnehaux-identity-dev-keycloak-1" }
+$adminUser = if ($env:KC_BOOTSTRAP_ADMIN_USERNAME) { $env:KC_BOOTSTRAP_ADMIN_USERNAME } else { "admin" }
+
+foreach ($name in @("IDENTITY_CALLER_SECRET", "IDENTITY_CALLER_PASSWORD", "KC_BOOTSTRAP_ADMIN_PASSWORD")) {
+    if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+        throw "$name is required."
+    }
+}
+
+Add-Type -AssemblyName System.Net.Http
+. "$PSScriptRoot\dev-token.ps1"
+
+$http = New-Object System.Net.Http.HttpClient
+$http.Timeout = [TimeSpan]::FromSeconds(60)
+
+$callback = "http://127.0.0.1:9998/callback"
+$takeover = "https://attacker.example.net/callback"
+
+# Under strict mode an absent property throws, and the service omits empty fields.
+function Get-Prop($object, [string] $name) {
+    if ($null -ne $object -and $object.PSObject.Properties.Name -contains $name) { return $object.$name }
+    return $null
+}
+
+function Send($method, $url, $body, $bearer, $headers) {
+    $request = New-Object System.Net.Http.HttpRequestMessage($method, $url)
+    if ($bearer) {
+        $request.Headers.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", $bearer)
+    }
+    if ($headers) { foreach ($k in $headers.Keys) { $request.Headers.Add($k, $headers[$k]) } }
+    if ($null -ne $body) {
+        $request.Content = New-Object System.Net.Http.StringContent($body, [System.Text.Encoding]::UTF8, "application/json")
+    }
+    $response = $http.SendAsync($request).Result
+    $text = $response.Content.ReadAsStringAsync().Result
+    $json = $null
+    if ($text) { try { $json = $text | ConvertFrom-Json } catch { $json = $null } }
+    return @{ code = [int]$response.StatusCode; json = $json; text = $text }
+}
+
+# A provider-scope token lives 240 seconds (L0), so it is renewed well before that.
+$script:apiToken = $null
+$script:apiTokenAt = [datetime]::MinValue
+function Api($method, $path, $body, $headers) {
+    if (((Get-Date) - $script:apiTokenAt).TotalSeconds -gt 150) {
+        $script:apiToken = Get-ScnehauxToken -Username "bootstrap-operator" `
+            -Password $env:IDENTITY_CALLER_PASSWORD -ClientSecret $env:IDENTITY_CALLER_SECRET
+        $script:apiTokenAt = Get-Date
+    }
+    return Send $method "$api$path" $body $script:apiToken $headers
+}
+
+# The console administrator. Master-realm admin tokens live a minute.
+$script:adminToken = $null
+$script:adminTokenAt = [datetime]::MinValue
+function Admin-Token {
+    if (((Get-Date) - $script:adminTokenAt).TotalSeconds -gt 30) {
+        $form = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+        $form["grant_type"] = "password"
+        $form["client_id"] = "admin-cli"
+        $form["username"] = $adminUser
+        $form["password"] = $env:KC_BOOTSTRAP_ADMIN_PASSWORD
+        $response = $http.PostAsync("$kcAdmin/realms/master/protocol/openid-connect/token",
+            (New-Object System.Net.Http.FormUrlEncodedContent($form))).Result
+        if (-not $response.IsSuccessStatusCode) { throw "the console administrator could not log in: $([int]$response.StatusCode)" }
+        $script:adminToken = ($response.Content.ReadAsStringAsync().Result | ConvertFrom-Json).access_token
+        $script:adminTokenAt = Get-Date
+    }
+    return $script:adminToken
+}
+
+function Kc($method, $path, $body) { return Send $method "$kcAdmin/admin/realms/$realm$path" $body (Admin-Token) $null }
+
+function Subject($jwt) {
+    $segment = $jwt.Split('.')[1].Replace('-', '+').Replace('_', '/')
+    switch ($segment.Length % 4) { 2 { $segment += '==' } 3 { $segment += '=' } }
+    return ([System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($segment)) | ConvertFrom-Json).sub
+}
+
+# A console change: read the client, change it, write it back.
+function Console-Change($clientUuid, [scriptblock] $change) {
+    $client = (Kc "GET" "/clients/$clientUuid" $null).json
+    & $change $client
+    $r = Kc "PUT" "/clients/$clientUuid" ($client | ConvertTo-Json -Depth 20)
+    if ($r.code -ne 204) { throw "the console change was refused: $($r.code) $($r.text)" }
+}
+
+function Live($clientUuid) { return (Kc "GET" "/clients/$clientUuid" $null).json }
+
+function Lifespan($client) { return [int](Get-Prop $client.attributes "access.token.lifespan") }
+
+# A sweep now. Another replica's, or the schedule's, defers it, and it is asked again.
+function Sweep {
+    for ($i = 0; $i -lt 30; $i++) {
+        $r = Api "POST" "/v1/registrations:reconcile" $null $null
+        if ($r.code -eq 200 -and -not (Get-Prop $r.json "deferred")) { return $r.json }
+        Start-Sleep -Seconds 2
+    }
+    throw "no sweep ran within a minute"
+}
+
+# The first of a registration's findings the predicate accepts, sweeping until one appears.
+function Wait-Finding($registrationId, [scriptblock] $accept, [int] $timeout = 90) {
+    $deadline = (Get-Date).AddSeconds($timeout)
+    while ((Get-Date) -lt $deadline) {
+        [void](Sweep)
+        $findings = (Api "GET" "/v1/registrations/$registrationId/findings" $null $null).json.findings
+        foreach ($f in $findings) { if (& $accept $f) { return $f } }
+        Start-Sleep -Seconds 2
+    }
+    throw "no matching finding within ${timeout}s"
+}
+
+function Since($f, [datetimeoffset] $at) {
+    $changed = Get-Prop $f "changed_at"
+    $detected = [datetimeoffset](Get-Prop $f "detected_at")
+    if ($changed) { return ([datetimeoffset]$changed) -ge $at.AddSeconds(-5) }
+    return $detected -ge $at.AddSeconds(-5)
+}
+
+function Seconds($from, $to) { return [math]::Round((([datetimeoffset]$to) - ([datetimeoffset]$from)).TotalSeconds, 2) }
+
+$failures = 0
+$results = New-Object System.Collections.Generic.List[object]
+function Expect($label, $got, $want) {
+    if ($got -eq $want) { Write-Host "  ok    $label ($got)" }
+    else { Write-Host "  FAIL  $label (got $got, want $want)"; $script:failures++ }
+}
+function Record($scenario, $outcome, $evidence) {
+    $results.Add([pscustomobject]@{ Scenario = $scenario; Outcome = $outcome; Evidence = $evidence })
+}
+
+Write-Host "0. register the proof's client"
+$r = Api "POST" "/v1/registrations" '{"client_key":"proofb-orders","profile":"resource","audience_class":"internal","application_ref":"proof-b","lifetime_class":"L1"}' @{ "Idempotency-Key" = "proofb-register-orders" }
+Expect "resource registered" $r.code 201
+$r = Api "POST" "/v1/registrations" "{`"client_key`":`"proofb-web`",`"profile`":`"public`",`"audience_class`":`"internal`",`"application_ref`":`"proof-b`",`"audience`":[`"proofb-orders`"],`"redirect_uris`":[`"$callback`"]}" @{ "Idempotency-Key" = "proofb-register-web" }
+Expect "public client registered" $r.code 201
+$registration = $r.json.registration_id
+$clientUuid = (Kc "GET" "/clients?clientId=proofb-web&search=false" $null).json[0].id
+$actor = Subject (Admin-Token)
+Write-Host "        registration $registration, client $clientUuid, console administrator $actor"
+
+Write-Host ""
+Write-Host "1. the reconciler runs on a schedule"
+$before = Get-Prop ((Api "GET" "/v1/registrations:drift" $null $null).json.last_run) "run_id"
+$deadline = (Get-Date).AddSeconds(90)
+$after = $before
+while ((Get-Date) -lt $deadline -and $after -eq $before) {
+    Start-Sleep -Seconds 3
+    $after = Get-Prop ((Api "GET" "/v1/registrations:drift" $null $null).json.last_run) "run_id"
+}
+Expect "a scheduled run followed without being asked" ($after -ne $before) $true
+Record "Schedule" "a run started unprompted" "last run $before, then $after"
+
+Write-Host ""
+Write-Host "2. access token lifespan changed in the console: repaired"
+$at = [datetimeoffset]::UtcNow
+Console-Change $clientUuid { param($c) $c.attributes."access.token.lifespan" = "3600" }
+$f = Wait-Finding $registration { param($f) (Get-Prop $f "field_class") -eq "token_lifespan" -and $f.finding_class -eq "repaired" -and (Get-Prop $f "converged_at") -and (Since $f $at) }
+Expect "attributed to the console administrator" (Get-Prop $f "actor") $actor
+Expect "lifespan restored" (Lifespan (Live $clientUuid)) 540
+$lifespanConvergence = Seconds $f.changed_at $f.converged_at
+Expect "converged within 60s of the change" ($lifespanConvergence -lt 60) $true
+Record "Lifespan 540 -> 3600 in the console" "repaired, attributed" "converged $lifespanConvergence s after the change"
+
+Write-Host ""
+Write-Host "3. redirect URI changed in the console: blocked"
+$at = [datetimeoffset]::UtcNow
+Console-Change $clientUuid { param($c) $c.redirectUris = @($callback, $takeover) }
+$f = Wait-Finding $registration { param($f) (Get-Prop $f "field_class") -eq "redirect_uris" -and $f.finding_class -eq "blocked" -and (Since $f $at) }
+$live = Live $clientUuid
+Expect "client disabled" $live.enabled $false
+Expect "changed URI kept for investigation" ($live.redirectUris -contains $takeover) $true
+$blockedAfter = Seconds $f.changed_at $f.detected_at
+[void](Sweep)
+Expect "a later sweep leaves it blocked" (Live $clientUuid).enabled $false
+$r = Api "POST" "/v1/registrations:reconcile" "{`"findings`":[`"$($f.finding_id)`"]}" @{ "X-Administrative-Reason" = "proof-b: takeover URI reviewed and removed" }
+Expect "operator's reconcile accepted" $r.code 200
+$live = Live $clientUuid
+Expect "client re-enabled" $live.enabled $true
+Expect "desired URI restored" (($live.redirectUris | Sort-Object) -join ",") $callback
+Record "Takeover redirect URI in the console" "blocked, lifted by an operator" "blocked $blockedAfter s after the change"
+
+Write-Host ""
+Write-Host "4. a drift exception, then its expiry"
+$r = Api "POST" "/v1/registrations/$registration/drift-exceptions" "{`"field_class`":`"token_lifespan`",`"actor`":`"$actor`",`"reason`":`"proof-b: sanctioned change`",`"duration_seconds`":40}" $null
+Expect "exception granted" $r.code 201
+$expires = [datetimeoffset]$r.json.expires_at
+$at = [datetimeoffset]::UtcNow
+Console-Change $clientUuid { param($c) $c.attributes."access.token.lifespan" = "900" }
+$f = Wait-Finding $registration { param($f) (Get-Prop $f "field_class") -eq "token_lifespan" -and $f.finding_class -eq "sanctioned" -and (Since $f $at) }
+[void](Sweep)
+Expect "left in place while sanctioned" (Lifespan (Live $clientUuid)) 900
+$wait = [math]::Ceiling(($expires - [datetimeoffset]::UtcNow).TotalSeconds) + 2
+if ($wait -gt 0) { Start-Sleep -Seconds $wait }
+$sanctioned = $f.finding_id
+$f = Wait-Finding $registration { param($f) $f.finding_id -eq $sanctioned -and $f.finding_class -eq "repaired" -and (Get-Prop $f "converged_at") }
+Expect "repaired once the exception expired" (Lifespan (Live $clientUuid)) 540
+Expect "still attributed after its event left the window" (Get-Prop $f "actor") $actor
+$afterExpiry = Seconds $expires $f.converged_at
+Record "Lifespan change under an exception" "sanctioned, then repaired at expiry" "converged $afterExpiry s after the exception expired"
+
+Write-Host ""
+Write-Host "5. Keycloak unreachable: unresolved, then converged"
+# A fresh token first: none can be issued while the kernel is down, and the service verifies this
+# one against the key set it already holds.
+$script:apiTokenAt = [datetime]::MinValue
+[void](Api "GET" "/v1/registrations:drift" $null $null)
+$at = [datetimeoffset]::UtcNow
+docker stop $container | Out-Null
+$deadline = (Get-Date).AddSeconds(90)
+$unresolved = $null
+while ((Get-Date) -lt $deadline -and -not $unresolved) {
+    [void](Api "POST" "/v1/registrations:reconcile" $null $null)
+    $run = (Api "GET" "/v1/registrations:drift" $null $null).json.last_run
+    if ((Get-Prop $run "outcome") -eq "unresolved" -and ([datetimeoffset]$run.started_at) -ge $at) { $unresolved = $run }
+    else { Start-Sleep -Seconds 2 }
+}
+Expect "a sweep against a stopped kernel is unresolved" ([bool]$unresolved) $true
+docker start $container | Out-Null
+$back = $false
+for ($i = 0; $i -lt 90 -and -not $back; $i++) {
+    try { $back = (Send "GET" "$kcAdmin/realms/$realm/.well-known/openid-configuration" $null $null $null).code -eq 200 } catch { $back = $false }
+    if (-not $back) { Start-Sleep -Seconds 2 }
+}
+Expect "Keycloak is back" $back $true
+$restarted = [datetimeoffset]::UtcNow
+$run = $null
+for ($i = 0; $i -lt 30; $i++) {
+    $run = (Sweep).run
+    if ($run.outcome -eq "converged") { break }
+    Start-Sleep -Seconds 2
+}
+Expect "the first sweeps after it returns converge" $run.outcome "converged"
+Expect "with attribution" $run.attribution $true
+$recovered = Seconds $restarted ([datetimeoffset]$run.finished_at)
+Record "Keycloak stopped" "unresolved while down, converged after" "converged $recovered s after it answered again"
+
+Write-Host ""
+$summary = @("## Proof B · Keycloak drift", "", "| Scenario | Outcome | Evidence |", "| :-- | :-- | :-- |")
+foreach ($row in $results) { $summary += "| $($row.Scenario) | $($row.Outcome) | $($row.Evidence) |" }
+$summary | ForEach-Object { Write-Host $_ }
+if ($env:GITHUB_STEP_SUMMARY) { $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8 }
+
+if ($failures -gt 0) {
+    Write-Host "$failures check(s) failed."
+    exit 1
+}
+Write-Host "Proof B holds."

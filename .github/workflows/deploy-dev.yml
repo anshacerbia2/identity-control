@@ -66,6 +66,8 @@ jobs:
             echo "KERNEL_KEYCLOAK_CONTAINER=scnehaux-identity-dev-keycloak-1"
             echo "KC_BOOTSTRAP_ADMIN_USERNAME=admin"
             echo "KC_BOOTSTRAP_ADMIN_PASSWORD=$kernel_password"
+            # Short enough that Proof B sees the schedule run within the job.
+            echo "IDENTITY_REGISTRATION_RECONCILE_INTERVAL=20s"
           } > .env
 
       - name: register this service's clients in the kernel
@@ -143,6 +145,14 @@ jobs:
           export IDENTITY_API_URL=http://127.0.0.1:8082 KC_BASE_URL=https://localhost
           pwsh -NoProfile -File scripts/dev-smoke.ps1
 
+      # identity-control ROADMAP §Proof B: both drift scenarios, a drift exception and its expiry,
+      # and Keycloak stopped then started, against this live kernel. Each convergence time lands in
+      # the job summary. Last, because it stops the kernel's Keycloak.
+      - name: Proof B against the live kernel
+        run: |
+          set -a; . deploy/dev/.env; set +a
+          export IDENTITY_API_URL=http://127.0.0.1:8082 KC_BASE_URL=https://localhost KC_ADMIN_URL=http://localhost:8080
+          pwsh -NoProfile -File scripts/dev-proof-b.ps1
       - name: stack logs
         if: failure()
         run: |

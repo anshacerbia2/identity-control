@@ -18,23 +18,32 @@ import (
 // What an operator does with the reconciler: read its last run and open findings, lift a block or
 // apply desired state to an unattributed divergence, and grant a drift exception.
 
-// Finding is one open divergence, as the drift route reports it.
+// Finding is one divergence, as the drift route reports it.
 type Finding struct {
 	ID           id.UUID         `json:"finding_id"`
 	Registration id.UUID         `json:"registration_id"`
 	ClientKey    string          `json:"client_key"`
-	FieldClass   FieldClass      `json:"field_class"`
+	FieldClass   FieldClass      `json:"field_class,omitempty"`
 	Class        FindingClass    `json:"finding_class"`
 	Desired      json.RawMessage `json:"desired"`
 	Observed     json.RawMessage `json:"observed"`
 	Actor        string          `json:"actor,omitempty"`
 	ChangedAt    *time.Time      `json:"changed_at"`
 	DetectedAt   time.Time       `json:"detected_at"`
+
+	// ConvergedAt is when the client matched desired state again. ConvergedAt minus ChangedAt is
+	// the convergence time the drift proof records.
+	ConvergedAt *time.Time `json:"converged_at"`
 }
 
-// Status is the last run and every finding that has not converged.
+// Status is the last run, what that run recorded, and every finding that has not converged.
 type Status struct {
-	LastRun  *Run      `json:"last_run"`
+	LastRun *Run `json:"last_run"`
+
+	// LastRunFindings are the findings the last run wrote or converged, converged ones included,
+	// so a repair and its convergence time can be read after the fact.
+	LastRunFindings []Finding `json:"last_run_findings"`
+
 	Findings []Finding `json:"findings"`
 }
 
@@ -42,17 +51,23 @@ const lastRunStatement = `SELECT run_id::text, started_at, finished_at, coalesce
 FROM identity.reconcile_run WHERE sweep = 'registration'
 ORDER BY started_at DESC LIMIT 1`
 
-const openFindingDetailStatement = `SELECT f.finding_id::text, f.registration_id::text, r.client_key, coalesce(f.field_class, ''),
+const findingColumns = `SELECT f.finding_id::text, f.registration_id::text, r.client_key, coalesce(f.field_class, ''),
        f.finding_class, coalesce(f.desired, 'null'::jsonb)::text, coalesce(f.observed, 'null'::jsonb)::text,
-       coalesce(f.actor, ''), f.changed_at, f.detected_at
+       coalesce(f.actor, ''), f.changed_at, f.detected_at, f.converged_at
 FROM identity.registration_finding f
-JOIN identity.client_registration r ON r.registration_id = f.registration_id
+JOIN identity.client_registration r ON r.registration_id = f.registration_id`
+
+const openFindingDetailStatement = findingColumns + `
 WHERE f.converged_at IS NULL
 ORDER BY f.detected_at`
 
-// Status reads the last run and the open findings.
+const runFindingDetailStatement = findingColumns + `
+WHERE f.run_id = $1
+ORDER BY f.detected_at`
+
+// Status reads the last run, its findings, and the open findings.
 func (r *Reconciler) Status(ctx context.Context) (Status, error) {
-	status := Status{Findings: []Finding{}}
+	status := Status{LastRunFindings: []Finding{}, Findings: []Finding{}}
 	err := r.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
 		rows, err := tx.Query(ctx, lastRunStatement)
 		if err != nil {
@@ -80,33 +95,61 @@ func (r *Reconciler) Status(ctx context.Context) (Status, error) {
 			return err
 		}
 
-		rows, err = tx.Query(ctx, openFindingDetailStatement)
-		if err != nil {
-			return fmt.Errorf("reconcile: read open findings: %w", err)
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var (
-				rawFinding, rawRegistration, field, class, desired, observed string
-				finding                                                      Finding
-			)
-			if err := rows.Scan(&rawFinding, &rawRegistration, &finding.ClientKey, &field, &class, &desired, &observed,
-				&finding.Actor, &finding.ChangedAt, &finding.DetectedAt); err != nil {
-				return fmt.Errorf("reconcile: scan open finding: %w", err)
-			}
-			if finding.ID, err = id.Parse(rawFinding); err != nil {
+		if status.LastRun != nil {
+			if status.LastRunFindings, err = readFindings(ctx, tx, runFindingDetailStatement, status.LastRun.ID.String()); err != nil {
 				return err
 			}
-			if finding.Registration, err = id.Parse(rawRegistration); err != nil {
-				return err
-			}
-			finding.FieldClass, finding.Class = FieldClass(field), FindingClass(class)
-			finding.Desired, finding.Observed = json.RawMessage(desired), json.RawMessage(observed)
-			status.Findings = append(status.Findings, finding)
 		}
-		return rows.Err()
+		status.Findings, err = readFindings(ctx, tx, openFindingDetailStatement)
+		return err
 	})
 	return status, err
+}
+
+const registrationFindingsStatement = findingColumns + `
+WHERE f.registration_id = $1
+ORDER BY f.detected_at DESC
+LIMIT 100`
+
+// FindingsFor is one registration's findings, newest first, converged ones included: what happened
+// to that client, and how long each divergence took to converge.
+func (r *Reconciler) FindingsFor(ctx context.Context, registration id.UUID) ([]Finding, error) {
+	var out []Finding
+	err := r.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		var err error
+		out, err = readFindings(ctx, tx, registrationFindingsStatement, registration.String())
+		return err
+	})
+	return out, err
+}
+
+func readFindings(ctx context.Context, tx db.Tx, statement string, args ...any) ([]Finding, error) {
+	rows, err := tx.Query(ctx, statement, args...)
+	if err != nil {
+		return nil, fmt.Errorf("reconcile: read findings: %w", err)
+	}
+	defer rows.Close()
+	out := []Finding{}
+	for rows.Next() {
+		var (
+			rawFinding, rawRegistration, field, class, desired, observed string
+			finding                                                      Finding
+		)
+		if err := rows.Scan(&rawFinding, &rawRegistration, &finding.ClientKey, &field, &class, &desired, &observed,
+			&finding.Actor, &finding.ChangedAt, &finding.DetectedAt, &finding.ConvergedAt); err != nil {
+			return nil, fmt.Errorf("reconcile: scan finding: %w", err)
+		}
+		if finding.ID, err = id.Parse(rawFinding); err != nil {
+			return nil, err
+		}
+		if finding.Registration, err = id.Parse(rawRegistration); err != nil {
+			return nil, err
+		}
+		finding.FieldClass, finding.Class = FieldClass(field), FindingClass(class)
+		finding.Desired, finding.Observed = json.RawMessage(desired), json.RawMessage(observed)
+		out = append(out, finding)
+	}
+	return out, rows.Err()
 }
 
 // Resolution is an operator applying desired state to findings the sweep left alone.

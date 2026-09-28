@@ -590,3 +590,32 @@ func TestADeletedClientIsRecreated(t *testing.T) {
 		t.Errorf("the sweep after recreation reported %+v", again)
 	}
 }
+
+// A repair converges inside the sweep that made it, so the open findings never show it. The last
+// run's findings do, with the times its convergence is measured from.
+func TestStatusReportsTheLastRunsConvergedRepair(t *testing.T) {
+	h := newHarness(t)
+	caller := h.caller()
+	h.sweep()
+	h.tick(time.Second)
+	h.kernel.ConsoleChange(admin, caller.client, func(c *keycloak.Client) { c.AccessTokenLifespan = 3600 })
+	h.tick(3 * time.Second)
+	h.sweep()
+
+	status, err := h.reconciler.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(status.Findings) != 0 || len(status.LastRunFindings) != 1 {
+		t.Fatalf("open %+v, last run %+v; want nothing open and the one repair", status.Findings, status.LastRunFindings)
+	}
+	history, err := h.reconciler.FindingsFor(context.Background(), caller.id)
+	if err != nil || len(history) != 1 || history[0].ID != status.LastRunFindings[0].ID {
+		t.Errorf("the registration's history is %+v (%v), want the one repair", history, err)
+	}
+	f := status.LastRunFindings[0]
+	if f.Class != Repaired || f.Actor != admin || f.ChangedAt == nil || f.ConvergedAt == nil ||
+		f.ConvergedAt.Sub(*f.ChangedAt) != 3*time.Second {
+		t.Errorf("last run finding = %+v", f)
+	}
+}

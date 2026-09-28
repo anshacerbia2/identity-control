@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-003
   title: Protocol Client and Protected-Resource Registration
   owner: Core Platform Team
-  version: 1.5.0
+  version: 1.6.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -334,12 +334,15 @@ POST   /v1/registrations/{registration_id}:retire
 POST   /v1/registrations/{registration_id}/credentials:rotate
 POST   /v1/registrations/{registration_id}/credentials/{credential_id}:revoke
 POST   /v1/registrations/{registration_id}/drift-exceptions
+GET    /v1/registrations/{registration_id}/findings
 GET    /v1/registrations:drift
 POST   /v1/registrations:reconcile
 ```
 
-`GET /v1/registrations:drift` returns the last run and every finding that has not
-converged. `POST /v1/registrations:reconcile` runs a sweep now. With
+`GET /v1/registrations:drift` returns the last run, the findings that run wrote or
+converged, and every finding that has not converged. A repair converges inside the sweep
+that made it, so it is never open: the last run's findings, and one registration's
+findings (`/findings`, newest first), are where its convergence time is read. `POST /v1/registrations:reconcile` runs a sweep now. With
 `X-Administrative-Reason` and the ids of open `blocked` or `unattributed` findings, it
 also applies desired state to those, which a scheduled sweep never does on its own.
 The reason and the caller are recorded on the finding.
