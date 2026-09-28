@@ -36,6 +36,13 @@ func (s *stubReconciler) Status(context.Context) (reconcile.Status, error) {
 	return s.status, s.statusErr
 }
 
+func (s *stubReconciler) FindingsFor(_ context.Context, registration id.UUID) ([]reconcile.Finding, error) {
+	if s.statusErr != nil {
+		return nil, s.statusErr
+	}
+	return []reconcile.Finding{{Registration: registration, Class: reconcile.Repaired}}, nil
+}
+
 func (s *stubReconciler) Sweep(context.Context) (reconcile.Run, error) {
 	s.sweeps++
 	return s.run, s.sweepErr
@@ -370,5 +377,33 @@ func TestARegistrationIsReadByIdentifier(t *testing.T) {
 func TestTheRegistrationHandlerNeedsARegistrar(t *testing.T) {
 	if _, err := httpapi.NewRegistrations(&stubRegistrar{}, nil); err == nil {
 		t.Error("a handler without a reconciler was built")
+	}
+}
+
+func TestARegistrationsFindingsAreReported(t *testing.T) {
+	registrationID := mustUUID(t)
+	path := "/v1/registrations/" + registrationID.String() + "/findings"
+	r, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, path, nil))
+	w := serve(registrationsHandler(t, &stubReconciler{}), r)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"finding_class":"repaired"`) {
+		t.Errorf("status %d: %s", w.Code, w.Body)
+	}
+	for name, c := range map[string]struct {
+		path string
+		stub *stubReconciler
+		auth bool
+		want int
+	}{
+		"no caller":      {path, &stubReconciler{}, false, http.StatusUnauthorized},
+		"a malformed id": {"/v1/registrations/nope/findings", &stubReconciler{}, true, http.StatusBadRequest},
+		"a failed read":  {path, &stubReconciler{statusErr: errors.New("database down")}, true, http.StatusInternalServerError},
+	} {
+		r := httptest.NewRequest(http.MethodGet, c.path, nil)
+		if c.auth {
+			r, _ = asPrincipal(t, r)
+		}
+		if w := serve(registrationsHandler(t, c.stub), r); w.Code != c.want {
+			t.Errorf("%s answered %d, want %d", name, w.Code, c.want)
+		}
 	}
 }
