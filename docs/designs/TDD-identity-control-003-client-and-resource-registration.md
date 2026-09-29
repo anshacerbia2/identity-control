@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-003
   title: Protocol Client and Protected-Resource Registration
   owner: Core Platform Team
-  version: 1.9.0
+  version: 1.10.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-11
-  last_reviewed: 2026-09-29
+  last_reviewed: 2026-09-30
   parent_sad: SAD-001
 ---
 
@@ -18,8 +18,8 @@ doc_meta:
 
 Specify how an Application becomes a protocol client or a protected resource in the
 identity kernel: what must be true before registration, what the registration fixes,
-how client credentials are issued and rotated, and how drift between desired state and
-Keycloak is detected.
+how a confidential or workload client's public keys are registered, rotated and revoked,
+and how drift between desired state and Keycloak is detected.
 
 Registration is where two enterprise rules are enforced or lost. PAD-PLT-001 §7.3
 requires every client and protected resource to reference a Software Catalog
@@ -36,7 +36,7 @@ enforced.
   unchartered.
 - Client profiles and the constraints each carries.
 - Redirect URI, audience class, and signing-algorithm validation.
-- Client credential issue, rotation, and revocation.
+- Client public-key registration, rotation, and revocation (`ADR-IAM-001 §5.12`).
 - Drift detection between desired state and Keycloak runtime state.
 - Deprovisioning.
 
@@ -93,7 +93,7 @@ read at deploy time could never serve.
 | :-- | :-- | :-- |
 | `RegistrationService` | `internal/registration` | Desired state, validation, lifecycle |
 | `ApplicationReferenceResolver` | `internal/registration` | Resolves and revalidates the Application reference against its current authority |
-| `CredentialIssuer` | `internal/registration` | Issues, rotates, and revokes client secrets through the Admin API |
+| `ClientKeyRegistrar` | `internal/registration` | Registers, rotates, and revokes a client's public keys on the kernel client through the Admin API. It never receives a private key |
 | `RegistrationReconciler` | `internal/reconcile` | Compares desired state against Keycloak on a schedule, repairs or blocks drift by field class, and records every run |
 
 ### Registration Path
@@ -106,13 +106,13 @@ sequenceDiagram
     participant K as Keycloak Admin API
 
     C->>R: Register client or resource
-    R->>R: Validate profile, redirect URIs, audience class, algorithm, lifetime class
+    R->>R: Validate profile, redirect URIs, audience class, algorithm, lifetime class, public key
     R->>R: Resolve Application reference
-    R->>D: Persist desired state, state=pending
-    R->>K: Create client through the Admin API
+    R->>D: Persist desired state and the public key, state=pending
+    R->>K: Create client through the Admin API, with its public key for a confidential or workload profile
     K-->>R: Result
     R->>D: Record kc_client_id, state=active
-    R-->>C: Registration, with the secret shown once for confidential profiles
+    R-->>C: Registration. No secret is returned, because none exists
 ```
 
 The desired-state record is written before the remote call, exactly as
@@ -301,27 +301,54 @@ A change it covers is left in place and recorded `sanctioned`. When it expires, 
 change is drift like any other. Keeping the change means changing desired state
 through this API.
 
-### Credential Records
+### Client Key Records
+
+A confidential or workload client authenticates with `private_key_jwt` (`ADR-IAM-001 §5.12`,
+`STD-IAM-001 §3.2`). The client generates its key pair and keeps the private key. This
+table records the public keys registered for it:
 
 ```sql
-CREATE TABLE identity.client_credential (
-    credential_id   UUID        PRIMARY KEY,
+CREATE TABLE identity.client_key (
+    key_id          UUID        PRIMARY KEY,
     registration_id UUID        NOT NULL REFERENCES identity.client_registration(registration_id),
-    kc_secret_ref   TEXT        NOT NULL,
+    kid             TEXT        NOT NULL,
+    thumbprint      TEXT        NOT NULL,
+    public_jwk      JSONB       NOT NULL,
     state           TEXT        NOT NULL,
-    issued_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    registered_by   UUID        NOT NULL,
+    registered_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     expires_at      TIMESTAMPTZ NOT NULL,
     retiring_at     TIMESTAMPTZ,
     revoked_at      TIMESTAMPTZ,
-    CONSTRAINT credential_state_check
-        CHECK (state IN ('active', 'retiring', 'revoked'))
+    revoked_by      UUID,
+    revocation_reason TEXT,
+    CONSTRAINT client_key_state_check
+        CHECK (state IN ('active', 'retiring', 'revoked')),
+    CONSTRAINT client_key_public_only
+        CHECK (NOT (public_jwk ?| ARRAY['d', 'p', 'q', 'dp', 'dq', 'qi', 'oth', 'k']))
 );
+
+CREATE UNIQUE INDEX client_key_kid ON identity.client_key (registration_id, kid);
+CREATE UNIQUE INDEX client_key_thumbprint ON identity.client_key (thumbprint);
+CREATE UNIQUE INDEX client_key_one_active
+    ON identity.client_key (registration_id) WHERE state = 'active';
+CREATE UNIQUE INDEX client_key_one_retiring
+    ON identity.client_key (registration_id) WHERE state = 'retiring';
 ```
 
-**No secret value is stored here.** The row records that a credential exists, when it
-was issued, and when it expires. The value lives in Keycloak and is shown to the caller
-once at issue. A control-plane table holding client secrets would duplicate credential
-material the kernel already owns, which ADR-IAM-001 §5.2 prohibits.
+**No private material is stored here, and the database refuses it.** `public_jwk` is the public
+key only. `client_key_public_only` rejects a JWK carrying any private parameter, so a caller that
+pastes a private key is refused by the database even if validation missed it. A public key is
+public by design (PAD-PLT-001, public verification material), so this table holds nothing that
+authenticates as the client.
+
+- `thumbprint` is the RFC 7638 SHA-256 thumbprint. It is unique across every client, so one key pair
+  never authenticates two clients, and a leaked key compromises one client only.
+- A registration holds at most one `active` and one `retiring` key. That is the overlap the
+  kernel was proven to accept.
+- The kernel client's JWKS is rebuilt from the `active` and `retiring` rows. Desired state for
+  keys is therefore this table, and the reconciler compares the client against it (§Drift
+  Reconciliation).
 
 ## API / Interface
 
@@ -332,8 +359,9 @@ GET    /v1/registrations/{registration_id}
 POST   /v1/registrations/{registration_id}:suspend
 POST   /v1/registrations/{registration_id}:restore
 POST   /v1/registrations/{registration_id}:retire
-POST   /v1/registrations/{registration_id}/credentials:rotate
-POST   /v1/registrations/{registration_id}/credentials/{credential_id}:revoke
+POST   /v1/registrations/{registration_id}/keys
+GET    /v1/registrations/{registration_id}/keys
+POST   /v1/registrations/{registration_id}/keys/{key_id}:revoke
 POST   /v1/registrations/{registration_id}/drift-exceptions
 GET    /v1/registrations/{registration_id}/drift-exceptions
 GET    /v1/registrations/{registration_id}/findings
@@ -369,18 +397,31 @@ finding was left in place, and the table keeps it for that reason. Whether one i
 force is `expires_at` against now, which the caller compares. An unknown registration
 lists nothing rather than answering 404, as `/findings` does.
 
-`POST /v1/registrations` and `:rotate` are the only responses that ever carry a secret
-value, and each carries it exactly once. A subsequent `GET` returns the registration
-without it. A caller that loses a secret rotates; it does not retrieve.
+**No response ever carries a secret, because none exists.**
+
+- `POST /v1/registrations` for a `confidential` or `workload` profile takes the client's first public
+  key as a JWK in `public_key`.
+- `POST /v1/registrations/{registration_id}/keys` takes the next key. That starts a rotation
+  (§Client Key Rotation).
+- `GET .../keys` lists the keys with their states and dates.
+- `:revoke` removes one key at once. It requires an `X-Administrative-Reason`, recorded on the key.
+
+A JWK carrying a private parameter is refused, and its content is never logged. A caller that sent
+one has exposed that key and must generate another. A caller that loses its private key registers a
+new public key and revokes the lost one: there is nothing to retrieve.
 
 ### Profiles
 
-| Profile | Credential | Redirect URIs | PKCE | Refresh tokens |
+| Profile | Client authentication | Redirect URIs | PKCE | Refresh tokens |
 | :-- | :-- | :-- | :-- | :-- |
-| `confidential` | Required | Exact match, no wildcard | Required | Permitted |
-| `public` | Prohibited | Exact match, no wildcard | Required, `S256` | Prohibited |
-| `workload` | Required | Not applicable | Not applicable | Prohibited |
+| `confidential` | `private_key_jwt`, a registered public key | Exact match, no wildcard | Required | Permitted |
+| `public` | None: no secret and no key | Exact match, no wildcard | Required, `S256` | Prohibited |
+| `workload` | `private_key_jwt`, a registered public key | Not applicable | Not applicable | Prohibited |
 | `resource` | Not applicable | Not applicable | Not applicable | Not applicable |
+
+No profile authenticates with a client secret. `STD-IAM-001 §3.2` prohibits one for a registered
+client, because the kernel cannot rotate a secret with an overlap on supported features
+(`ADR-IAM-001 §5.12`).
 
 `public` prohibits refresh tokens because STD-IAM-001 §3.2 prohibits embedding a client
 secret in a browser or mobile application, and a public client holding a refresh token
@@ -408,7 +449,11 @@ register(request):
     reject if profile = 'workload' and audience class != 'workload'
     reject if algorithm != 'PS256' and no valid external RS256 exception exists
     reject if the requested algorithm is absent from the audience-class allowlist
-    reject if profile = 'public' and a credential is requested
+    reject if profile = 'public' and a public key is supplied
+    reject if profile in ('confidential', 'workload') and no public key is supplied
+    reject a key that is not RSA, is shorter than 3072 bits, or names an algorithm other than PS256
+    reject a key that carries a private parameter, without logging it
+    reject a key whose thumbprint is already registered to any client
     reject if profile = 'resource' and lifetime_class is absent
     for each redirect URI:
         reject a wildcard, a path traversal, a fragment, or credentials
@@ -421,8 +466,8 @@ register(request):
 ```
 
 **Built so far.** Two profiles: `public` and `resource`. `confidential` and `workload`
-need a client credential issued, rotated and revoked (§Credential Rotation), which is not
-built, so they are refused rather than created with a secret nobody tracks. The RS256
+need client key registration, rotation and revocation (§Client Key Rotation), which is not
+built. They are refused rather than created with a credential nobody tracks. The RS256
 exception is not offered: every registration is PS256. The registered host set is not
 modelled, so that rule is not enforced yet. A `client_key` is 1 to 128 lowercase
 letters, digits, `.`, `_` or `-`.
@@ -444,23 +489,44 @@ delegates to whoever controls any matching host.
 An audience naming an unregistered resource is refused because a token issued for an
 audience nobody registered has no verifier that would reject it correctly.
 
-### Credential Rotation
+### Client Key Rotation
 
 ```text
-rotate(registration):
-    issue a new credential through the Admin API
-    mark the previous credential 'retiring' with an overlap window
-    return the new secret once
-    at the end of the overlap:
-        revoke the retiring credential
+rotate(registration, new_public_key):
+    validate the key as at registration
+    reject if the registration already holds a 'retiring' key: one overlap at a time
+    add the key to the client's JWKS through the Admin API; record it 'active'
+    mark the previous active key 'retiring', retiring_at := now + IDENTITY_CLIENT_KEY_ROTATION_OVERLAP
+    return the keys, and nothing secret
+
+at retiring_at, and at a key's expires_at:
+    remove the key from the client's JWKS; record it 'revoked'
+
+revoke(registration, key, reason):
+    remove the key from the client's JWKS now; record it 'revoked', with the caller and the reason
 ```
 
-Both credentials are valid during the overlap so a running workload can adopt the new
-one without a restart window. Rotation that invalidates the old secret immediately
-turns every rotation into an outage, which is how rotation stops happening.
+Both keys are valid during the overlap, so a running client can move to the new private key
+without a restart window. A rotation that invalidated the old credential immediately would
+make every rotation an outage, which is how rotation stops happening. That is why client
+secrets are not used (`ADR-IAM-001 §5.12`, Alternative G).
 
-The overlap is bounded and the retiring credential is revoked on schedule, not when
-someone remembers.
+The overlap is bounded, and the retiring key is removed on schedule, not when someone
+remembers. Revocation is the other path: it removes one key at once, for a key that has
+leaked. Revoking a client's last key is permitted, and it stops the client authenticating
+until a new key is registered. For a compromised key that is the containment wanted, and
+the reason records why.
+
+**The mechanism is proven against the pinned kernel.** `identity-kernel`'s
+`compat/client_keys_test.go` tested it against 26.7.4 (compat run 36606481342):
+
+- a client with two keys in its JWKS authenticates with either;
+- a key removed from the JWKS is refused on the next request, with no cache delay;
+- an assertion presented twice is refused.
+
+The keys are client attributes (`clientAuthenticatorType: client-jwt`,
+`token.endpoint.auth.signing.alg: PS256`, `use.jwks.string: true`, `jwks.string`). The
+registration credential already manages client attributes, so no new kernel role is needed.
 
 ### Drift Reconciliation
 
@@ -507,6 +573,13 @@ Each field class has one policy, and the first two are what the drift proof exer
 | `audience_scope` | default and optional client scopes | repair |
 | `signing_algorithm` | `access.token.signed.response.alg` | repair |
 | `profile` | `publicClient`, `serviceAccountsEnabled`, `standardFlowEnabled` | repair |
+| `client_keys` | `clientAuthenticatorType`, `use.jwks.string`, `jwks.string` | block |
+
+**A client key is blocked, not restored, for the same reason as a redirect URI.** A key added in
+the console lets whoever holds its private key authenticate as the client. So does switching the
+client back to a secret. That is a takeover, and repairing it in silence would hide the attempt.
+The client is disabled and the changed value kept. Only an operator's reconcile lifts the block,
+and it restores the JWKS from the `active` and `retiring` rows.
 
 **A redirect URI is blocked, not restored.** A redirect URI changed in the console is
 the shape an attempt to take over a login takes: tokens redirected to a host the
@@ -549,7 +622,9 @@ wrong actor.
 
 **Built so far.** Two field classes are compared: `token_lifespan` and
 `redirect_uris`, the two the drift proof exercises. `audience_scope`,
-`signing_algorithm` and `profile` are designed above and not compared yet.
+`signing_algorithm` and `profile` are designed above and not compared yet. `client_keys`
+is compared once client key registration is built, because until then no registration
+holds a key.
 
 - **An absent client is held, not recreated.** It is recorded as one open `missing`
   finding naming whoever the deletion's admin event names, and every sweep leaves it
@@ -560,8 +635,9 @@ wrong actor.
   built. A sweep that recreated the client would undo that containment within one
   interval. When the lifecycle exists, this can be revisited; until then, holding is the
   conservative reading (RESPONSE-27, D5).
-- **No client is treated as unmanaged yet.** This service's own credentials are
-  confidential clients, and confidential registration is not built, so they cannot be
+- **No client is treated as unmanaged yet.** This service's own clients are confidential
+  clients created by development scripts with client secrets, the bootstrap exemption
+  `STD-IAM-001 §3.2` allows. Client key registration is not built, so they cannot be
   registered. Disabling every unregistered client would disable this service. When the
   branch is built, it must also exempt the clients Keycloak itself creates in every
   realm (`account`, `account-console`, `admin-cli`, `broker`, `realm-management`,
@@ -581,7 +657,7 @@ second.
 ```text
 retire(registration):
     reject if any other active registration names this resource in its audience
-    revoke every credential
+    remove every registered key from the client's JWKS; record each 'revoked'
     disable the client in Keycloak
     set state = 'retired', keep the record
 ```
@@ -597,8 +673,8 @@ becomes available.
 
 | Variable | Default | Purpose |
 | :-- | :-- | :-- |
-| `IDENTITY_CREDENTIAL_LIFETIME` | `90d` | Client credential validity |
-| `IDENTITY_CREDENTIAL_ROTATION_OVERLAP` | `7d` | Window during which both credentials are valid |
+| `IDENTITY_CLIENT_KEY_LIFETIME` | `90d` | How long a registered client key is valid before it is removed |
+| `IDENTITY_CLIENT_KEY_ROTATION_OVERLAP` | `7d` | Window during which the new and the retiring key are both accepted |
 | `IDENTITY_REGISTRATION_RECONCILE_INTERVAL` | `1h` | Drift sweep cadence. Admin-event retention in `identity-kernel` (7 days) must exceed it, or a change would lose its attribution before a sweep reads it |
 | `IDENTITY_APPLICATION_AUTHORITY` | `manual` | Becomes the Software Catalog authority name once chartered |
 | `IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID` | none, required | The registration path's own Admin API client, `identity-control-registration` |
@@ -614,7 +690,8 @@ becomes available.
 - A wildcard redirect URI is refused.
 - A non-https redirect URI outside local development is refused.
 - An audience naming an unregistered resource is refused.
-- A `public` profile requesting a credential is refused.
+- A `public` profile supplying a public key is refused. A `confidential` or `workload`
+  profile without one is refused.
 - Every registration receives exactly one managed audience scope.
 - An internal, privileged, or workload registration requesting RS256 is refused by the
   API and by the database constraint.
@@ -631,12 +708,18 @@ becomes available.
 - `state` narrows the list. A limit outside 1 to 100, or an unknown state, is refused.
 - The list is scoped to the configured realm.
 
-### Credentials
+### Client Keys
 
-- A secret is returned exactly once at issue and once at rotation, and never by `GET`.
-- No secret value is written to `identity.client_credential`, to a log, or to an event.
-- Both credentials authenticate during the overlap window.
-- The retiring credential is revoked at the end of the window without manual action.
+- No response, log, or event ever carries a secret or a private key.
+- A JWK carrying a private parameter is refused by validation, and by the
+  `client_key_public_only` constraint, tested separately. Nothing of it is logged.
+- A key that is not RSA, is shorter than 3072 bits, or is not PS256 is refused.
+- A key already registered to any client is refused.
+- During the overlap, assertions signed with either key authenticate against a live kernel.
+- At the end of the overlap the retiring key is removed without manual action, and an
+  assertion signed with it is refused.
+- A revoked key is refused on the next request. A revocation without a reason is refused.
+- A second rotation while a key is still retiring is refused.
 - The registration credential cannot create, modify, or disable a user, and the Principal path's
   credential cannot create or modify a client. Both are asserted against a live kernel.
 
@@ -648,6 +731,9 @@ becomes available.
 - A client whose redirect URIs were changed in the Admin Console is disabled and
   recorded `blocked`, with the changed value kept. A reconcile naming the finding
   restores desired state and re-enables it.
+- A client whose JWKS or client authenticator was changed in the Admin Console is
+  disabled and recorded `blocked`. A reconcile naming the finding restores the registered
+  keys.
 - A client whose access token lifespan was changed in the Admin Console is restored,
   recorded `repaired` with the admin who changed it, and its convergence time is
   recorded.
@@ -691,9 +777,18 @@ its tokens to them, in one step. Split, each secret opens one of those capabilit
 a second secret to rotate, and a registration component that cannot reach the Principal path's
 credential even by mistake, because it is configured with a different one.
 
-Client secrets are held by Keycloak and never by this service. The control-plane record
-proves a credential exists and when it expires, which is what rotation and audit need,
-and holds nothing an attacker could use.
+**A registered client has no secret, and no private key reaches this service.** The client
+generates its key pair and keeps the private key (`ADR-IAM-001 §5.12`). This service
+records and registers the public key only, and the database refuses private material.
+Neither a Control Database breach nor a kernel breach yields anything that authenticates as a
+registered client. With client secrets, the kernel's database and backups would have held one
+per client, readable by its administrators.
+
+This service's own clients are the exception while the registration path is being built:
+`identity-control` and `identity-control-registration`. Development scripts created them with
+client secrets, under the bootstrap exemption in `STD-IAM-001 §3.2`. They must be re-keyed to
+registered keys before a shared production environment, and that is a production gate item
+(`ROADMAP.md`).
 
 Exact-match redirect URIs and registered audiences are the two controls that keep the
 protocol surface closed. Both are validated at registration because neither is
@@ -720,7 +815,8 @@ authentication.
 | Signal | Warning | Critical |
 | :-- | :-- | :-- |
 | Unmanaged Keycloak client detected | — | any occurrence |
-| Credential expiring within 14 days | any occurrence | within 3 days |
+| Client key expiring within 14 days with no successor registered | any occurrence | within 3 days |
+| Client blocked for a key or authenticator change | — | any occurrence |
 | Registrations in `pending` past the recovery threshold | any occurrence | — |
 | Drift repairs per sweep | above baseline | — |
 | Client blocked for a redirect URI change | — | any occurrence |
@@ -728,8 +824,8 @@ authentication.
 | Last registration sweep finished | older than 2 intervals | older than 4 intervals, or `unresolved` twice in a row |
 | Registration with `application_authority = manual` | tracked as debt | — |
 
-Runbooks required before production: unmanaged client triage, credential rotation,
-expired credential recovery, and registration drift repair.
+Runbooks required before production: unmanaged client triage, client key rotation,
+compromised client key, expired client key recovery, and registration drift repair.
 
 ## Traceability
 
@@ -738,7 +834,9 @@ expired credential recovery, and registration drift repair.
 | Parent system | SAD-001 — Scnehaux Identity Runtime |
 | Realizes capability | PAD-PLT-001 — Identity & Access Platform |
 | Governed by | ADR-IAM-001 §5.2, §5.7 — supported interfaces only; no unmanaged console change |
-| Conforms to | STD-IAM-001 §3.2 — PKCE, exact redirect URIs, no secret in a public client |
+| Governed by | ADR-IAM-001 §5.12 — confidential and workload clients authenticate with registered keys |
+| Conforms to | STD-IAM-001 §3.2 — PKCE, exact redirect URIs, no secret in a public client, `private_key_jwt` for confidential and workload clients |
+| Evidence | `identity-kernel` `compat/client_keys_test.go` — key overlap, immediate removal, replay refusal |
 | Conforms to | STD-IAM-002 §3.3 — every protected resource carries exactly one lifetime class |
 | Enterprise constraint | PAD-PLT-001 §7.3 — every client and protected resource references an Application |
 | Enterprise constraint | EAD-002 §8 — registration continues on cached or manually recorded metadata |

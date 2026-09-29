@@ -6,9 +6,10 @@
 // nobody owns. The pending row is then activated with the kernel's identifier.
 //
 // Two profiles are built: public, a browser or native client holding no secret, and resource, a
-// protected resource that is only an audience. Confidential and workload profiles need a client
-// credential issued and rotated (TDD-identity-control-003 §Credential Rotation), which is not
-// built, so they are refused rather than created with a secret nobody tracks.
+// protected resource that is only an audience. Confidential and workload profiles authenticate
+// with a registered public key (private_key_jwt, ADR-IAM-001 §5.12). Registering, rotating and
+// revoking those keys (TDD-identity-control-003 §Client Key Rotation) is not built, so they are
+// refused rather than created with a credential nobody tracks.
 package registration
 
 import (
@@ -52,9 +53,9 @@ var (
 	// ErrInvalid is a request a validation rule refuses. Its message names the rule.
 	ErrInvalid = errors.New("registration: invalid request")
 
-	// ErrProfileNotBuilt is a confidential or workload registration, which needs credential
-	// issuance.
-	ErrProfileNotBuilt = errors.New("registration: confidential and workload clients need credential issuance, which is not built")
+	// ErrProfileNotBuilt is a confidential or workload registration, which needs client key
+	// registration.
+	ErrProfileNotBuilt = errors.New("registration: confidential and workload clients need client key registration, which is not built")
 
 	// ErrScopeUndeclared is an audience class whose managed scope the realm does not declare.
 	ErrScopeUndeclared = errors.New("registration: the realm declares no managed scope for this audience class")
