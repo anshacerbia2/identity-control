@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-004
   title: Workload and Bounded Agent Identity
   owner: Core Platform Team
-  version: 1.1.0
+  version: 1.2.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-11
-  last_reviewed: 2026-08-14
+  last_reviewed: 2026-09-30
   parent_sad: SAD-001
 ---
 
@@ -64,7 +64,7 @@ What differs is everything about its lifecycle:
 
 | | Human Principal | Workload Principal |
 | :-- | :-- | :-- |
-| Authenticates by | Interactive ceremony, MFA, session | Client credential, no session |
+| Authenticates by | Interactive ceremony, MFA, session | A signed client assertion with its own private key (`private_key_jwt`), no session |
 | Accountable to | Themselves | A named human owner |
 | Ends when | They leave the organization | It is retired, or its owner leaves and nobody claims it |
 | Refresh tokens | Permitted | Prohibited — it re-authenticates instead |
@@ -95,7 +95,7 @@ sequenceDiagram
     participant R as RegistrationService
     participant D as Control Database
 
-    C->>W: Create workload, with owner and purpose
+    C->>W: Create workload, with owner, purpose, and its public key
     W->>W: Validate the owner has an active Membership
     W->>D: Begin control-plane transaction
     W->>P: Reserve principal_id, subject_type=workload, workload_owner=owner
@@ -103,11 +103,15 @@ sequenceDiagram
     W->>D: Commit complete local intent
     W->>P: Realize reserved Principal in Keycloak
     P-->>W: Principal active
-    W->>R: Realize workload-profile client
-    R-->>W: Registration, secret shown once
+    W->>R: Realize workload-profile client, with the public key
+    R-->>W: Registration, its key registered
     W->>D: Persist ownership record
-    W-->>C: principal_id and the secret, once
+    W-->>C: principal_id and the registration, nothing secret
 ```
+
+The workload's deployable generates its key pair and keeps the private key in its own secret
+custody. The caller supplies only the public key, and nothing secret travels in either
+direction (`ADR-IAM-001 §5.12`, `TDD-identity-control-003` §Client Key Records).
 
 The workload Principal is minted through the same path as a human. The request passes
 `subject_type=workload` and the active human `workload_owner` into
@@ -286,8 +290,9 @@ above. `TDD-identity-experience-004` has carried the merged table correctly thro
 reviewer had anything to catch: a reference that resolves to the wrong text fails silently,
 while a dangling one at least fails.
 
-Suspending a workload additionally revokes its client credential, which stops the next
-exchange outright.
+Suspending a workload also disables its client, which stops the next exchange outright.
+A compromised workload key is revoked instead: its public key is removed from the client, and
+the kernel refuses it on the next request (`TDD-identity-control-003` §Client Key Rotation).
 
 ### Unused Workload Detection
 
@@ -360,7 +365,8 @@ event that revokes the human.
 - After context projection removal, a client-credentials exchange cannot assert the
   revoked context.
 - Measured enforcement stays within propagation plus the class `L3` lifetime.
-- Suspending a workload revokes its credential and the next exchange fails.
+- Suspending a workload disables its client, and the next exchange fails.
+- Revoking a workload's key makes the next assertion signed with it fail.
 
 ### Agents
 
