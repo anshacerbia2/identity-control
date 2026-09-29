@@ -14,9 +14,6 @@ services:
     # postgres:17.11-alpine
     image: postgres@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
     restart: unless-stopped
-    # The service signs with private keys in ./keys, mode 0600 and owned by KEYS_OWNER, which is the
-    # image's nonroot user unless a local override says otherwise.
-    user: "${KEYS_OWNER:-65532:65532}"
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
     volumes:
