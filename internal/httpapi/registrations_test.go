@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -257,6 +258,13 @@ type stubRegistrar struct {
 	req     *registration.Request
 	created registration.Registration
 	err     error
+	listed  *registration.ListQuery
+	page    registration.Page
+}
+
+func (s *stubRegistrar) List(_ context.Context, query registration.ListQuery) (registration.Page, error) {
+	s.listed = &query
+	return s.page, s.err
 }
 
 func (s *stubRegistrar) Register(_ context.Context, req registration.Request) (registration.Registration, error) {
@@ -284,6 +292,63 @@ func registrarHandler(t *testing.T, registrar *stubRegistrar) http.Handler {
 	}
 	identity := func(next http.Handler) http.Handler { return next }
 	return built.Mount(identity, identity)
+}
+
+// The list passes its cursor, size and state through, and answers with the page and its next cursor.
+func TestTheRegistrationListPassesItsCursorThrough(t *testing.T) {
+	after, _ := id.NewV7()
+	next := "0192f0e0-0000-7000-8000-000000000001"
+	registrar := &stubRegistrar{page: registration.Page{
+		Registrations: []registration.Registration{{ClientKey: "web", State: "active"}}, Next: &next}}
+	r, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet,
+		"/v1/registrations?after="+after.String()+"&limit=10&state=active", nil))
+	w := serve(registrarHandler(t, registrar), r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", w.Code, w.Body)
+	}
+	if got := registrar.listed; got == nil || got.After != after || got.Limit != 10 || got.State != "active" {
+		t.Errorf("query = %+v", got)
+	}
+	var body struct {
+		Registrations []map[string]any `json:"registrations"`
+		Next          *string          `json:"next"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Registrations) != 1 || body.Next == nil || *body.Next != next {
+		t.Errorf("body = %+v", body)
+	}
+}
+
+func TestTheRegistrationListRefusesWhatItCannotRead(t *testing.T) {
+	for name, target := range map[string]string{
+		"a cursor that is not an identifier": "/v1/registrations?after=page-2",
+		"a limit that is not a number":       "/v1/registrations?limit=ten",
+		"a limit of zero":                    "/v1/registrations?limit=0",
+	} {
+		t.Run(name, func(t *testing.T) {
+			registrar := &stubRegistrar{}
+			r, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, target, nil))
+			w := serve(registrarHandler(t, registrar), r)
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("status %d: %s", w.Code, w.Body)
+			}
+		})
+	}
+	// The service's own refusal (a limit over the maximum, an unknown state) is a 400 as well.
+	registrar := &stubRegistrar{err: fmt.Errorf("%w: limit must be between 1 and 100", registration.ErrInvalid)}
+	r, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, "/v1/registrations?limit=500", nil))
+	if w := serve(registrarHandler(t, registrar), r); w.Code != http.StatusBadRequest {
+		t.Errorf("status %d: %s", w.Code, w.Body)
+	}
+}
+
+func TestTheRegistrationListRequiresACaller(t *testing.T) {
+	w := serve(registrarHandler(t, &stubRegistrar{}), httptest.NewRequest(http.MethodGet, "/v1/registrations", nil))
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("status %d", w.Code)
+	}
 }
 
 const registerBody = `{"client_key":"web","profile":"public","audience_class":"internal","application_ref":"app",

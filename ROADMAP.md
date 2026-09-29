@@ -404,8 +404,9 @@ Acceptance criteria, also from RESPONSE-4 §4:
    hours. Two field classes are compared: `token_lifespan` and `redirect_uris`. An absent client
    is reported, not recreated, and no client is treated as unmanaged until step 5 registers them
    (TDD-003 §Drift Reconciliation).
-5. ✅ Build the registration API: `POST /v1/registrations` (with an Idempotency-Key) and
-   `GET /v1/registrations/{id}`. `internal/registration` records desired state as a pending row,
+5. ✅ Build the registration API: `POST /v1/registrations` (with an Idempotency-Key),
+   `GET /v1/registrations/{id}`, and `GET /v1/registrations`, a cursor-paged list, added for the
+   identity-experience admin console (TDD-003 1.8.0). `internal/registration` records desired state as a pending row,
    creates the client, attaches the audience class's managed scope, and activates it. Pending
    rows are recovered before each sweep. An absent client is held as a `missing` finding and
    recreated only by an operator's reconcile (RESPONSE-27, D5). Found while building

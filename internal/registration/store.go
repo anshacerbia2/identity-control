@@ -59,13 +59,57 @@ func (s *Service) insertPending(ctx context.Context, tx db.Tx, req Request) (Reg
 	return s.read(ctx, tx, registrationID)
 }
 
-// readStatement reads one registration with its derived lifespan.
-var readStatement = `SELECT r.realm, r.client_key, r.profile, r.audience_class, r.application_authority,
+// registrationColumns are one registration with its derived lifespan, in the order scannedRow reads
+// them.
+var registrationColumns = `r.realm, r.client_key, r.profile, r.audience_class, r.application_authority,
        r.application_ref, r.registered_by::text, r.signing_algorithm, coalesce(r.lifetime_class, ''),
        coalesce(r.audience, '{}'::text[]), coalesce(r.redirect_uris, '{}'::text[]), r.state, r.version,
-       r.created_at, ` + LifespanSQL("r.realm", "r.audience") + `
+       r.created_at, ` + LifespanSQL("r.realm", "r.audience")
+
+// readStatement reads one registration.
+var readStatement = `SELECT ` + registrationColumns + `
 FROM identity.client_registration r
 WHERE r.registration_id = $1`
+
+// listStatement reads one page of a realm's registrations in registration_id order. The identifier
+// is a UUIDv7, so that order is creation order, and the cursor is the last identifier returned: a
+// keyset on the primary key, which STD-GLB-001 requires in place of an offset.
+var listStatement = `SELECT r.registration_id::text, ` + registrationColumns + `
+FROM identity.client_registration r
+WHERE r.realm = $1
+  AND ($2::text = '' OR r.state = $2::text)
+  AND ($3::uuid IS NULL OR r.registration_id > $3::uuid)
+ORDER BY r.registration_id
+LIMIT $4`
+
+// scannedRow receives registrationColumns.
+type scannedRow struct {
+	registration Registration
+	registeredBy string
+	createdAt    time.Time
+	lifespan     int
+}
+
+func (s *scannedRow) targets() []any {
+	r := &s.registration
+	return []any{&r.Realm, &r.ClientKey, &r.Profile, &r.AudienceClass, &r.ApplicationAuthority, &r.ApplicationRef,
+		&s.registeredBy, &r.SigningAlgorithm, &r.LifetimeClass, &r.Audience, &r.RedirectURIs, &r.State, &r.Version,
+		&s.createdAt, &s.lifespan}
+}
+
+func (s *scannedRow) finish() (Registration, error) {
+	registration := s.registration
+	registeredBy, err := id.Parse(s.registeredBy)
+	if err != nil {
+		return Registration{}, fmt.Errorf("registration: registered_by: %w", err)
+	}
+	registration.RegisteredBy = registeredBy
+	registration.CreatedAt = s.createdAt.UTC()
+	if registration.Profile != ProfileResource {
+		registration.AccessTokenLifespan = s.lifespan
+	}
+	return registration, nil
+}
 
 // read goes through Query rather than QueryRow, so an absent registration is no row rather than a
 // driver error this package is not allowed to name.
@@ -81,27 +125,53 @@ func (s *Service) read(ctx context.Context, tx db.Tx, registrationID id.UUID) (R
 		}
 		return Registration{}, ErrNotFound
 	}
-	var (
-		registration = Registration{ID: registrationID}
-		registeredBy string
-		createdAt    time.Time
-		lifespan     int
-	)
-	if err := rows.Scan(&registration.Realm, &registration.ClientKey, &registration.Profile,
-		&registration.AudienceClass, &registration.ApplicationAuthority, &registration.ApplicationRef, &registeredBy,
-		&registration.SigningAlgorithm, &registration.LifetimeClass, &registration.Audience,
-		&registration.RedirectURIs, &registration.State, &registration.Version, &createdAt, &lifespan); err != nil {
+	row := scannedRow{registration: Registration{ID: registrationID}}
+	if err := rows.Scan(row.targets()...); err != nil {
 		return Registration{}, fmt.Errorf("registration: scan: %w", err)
 	}
 	rows.Close()
-	if registration.RegisteredBy, err = id.Parse(registeredBy); err != nil {
-		return Registration{}, fmt.Errorf("registration: registered_by: %w", err)
+	return row.finish()
+}
+
+// list reads one page, and one row more than the page holds, so whether a next page exists is known
+// without a second query.
+func (s *Service) list(ctx context.Context, tx db.Tx, query ListQuery) (Page, error) {
+	var after any
+	if !query.After.IsNil() {
+		after = query.After.String()
 	}
-	registration.CreatedAt = createdAt.UTC()
-	if registration.Profile != ProfileResource {
-		registration.AccessTokenLifespan = lifespan
+	rows, err := tx.Query(ctx, listStatement, string(s.cfg.Realm), query.State, after, query.Limit+1)
+	if err != nil {
+		return Page{}, fmt.Errorf("registration: list: %w", err)
 	}
-	return registration, nil
+	defer rows.Close()
+	page := Page{Registrations: []Registration{}}
+	for rows.Next() {
+		var (
+			raw string
+			row scannedRow
+		)
+		if err := rows.Scan(append([]any{&raw}, row.targets()...)...); err != nil {
+			return Page{}, fmt.Errorf("registration: scan: %w", err)
+		}
+		if row.registration.ID, err = id.Parse(raw); err != nil {
+			return Page{}, fmt.Errorf("registration: registration_id: %w", err)
+		}
+		registration, err := row.finish()
+		if err != nil {
+			return Page{}, err
+		}
+		page.Registrations = append(page.Registrations, registration)
+	}
+	if err := rows.Err(); err != nil {
+		return Page{}, fmt.Errorf("registration: list: %w", err)
+	}
+	if len(page.Registrations) > query.Limit {
+		page.Registrations = page.Registrations[:query.Limit]
+		next := page.Registrations[query.Limit-1].ID.String()
+		page.Next = &next
+	}
+	return page, nil
 }
 
 const activateStatement = `UPDATE identity.client_registration
