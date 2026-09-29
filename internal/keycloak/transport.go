@@ -201,10 +201,19 @@ func (a *Admin) accessToken(ctx context.Context) (string, error) {
 		return a.token, nil
 	}
 
+	audience, err := a.tokenRealmIssuer(ctx)
+	if err != nil {
+		return "", err
+	}
+	assertion, err := a.cfg.ClientKey.ClientAssertion(a.cfg.ClientID, audience, time.Now())
+	if err != nil {
+		return "", err
+	}
 	form := url.Values{}
 	form.Set("grant_type", "client_credentials")
 	form.Set("client_id", a.cfg.ClientID)
-	form.Set("client_secret", a.cfg.ClientSecret)
+	form.Set("client_assertion_type", ClientAssertionType)
+	form.Set("client_assertion", assertion)
 
 	endpoint := fmt.Sprintf("%s/realms/%s/protocol/openid-connect/token",
 		strings.TrimRight(a.cfg.BaseURL, "/"), url.PathEscape(string(a.cfg.TokenRealm)))
@@ -258,4 +267,37 @@ func (a *Admin) accessToken(ctx context.Context) (string, error) {
 	a.token = decoded.AccessToken
 	a.tokenExpiry = time.Now().Add(time.Duration(decoded.ExpiresIn) * time.Second)
 	return a.token, nil
+}
+
+// tokenRealmIssuer is the token realm's issuer, which a client assertion names as its audience. The
+// caller holds a.mu.
+//
+// It is read from discovery rather than built from BaseURL. This service reaches the kernel on an
+// internal address (http://keycloak:8080), while the kernel's fixed hostname makes the issuer the
+// public one, and an assertion naming the internal address is refused.
+func (a *Admin) tokenRealmIssuer(ctx context.Context) (string, error) {
+	if a.issuer != "" {
+		return a.issuer, nil
+	}
+	endpoint := fmt.Sprintf("%s/realms/%s/.well-known/openid-configuration",
+		strings.TrimRight(a.cfg.BaseURL, "/"), url.PathEscape(string(a.cfg.TokenRealm)))
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", fmt.Errorf("keycloak: build discovery request: %w", err)
+	}
+	request.Header.Set("Accept", "application/json")
+	raw, err := a.client.Do(request)
+	if err != nil {
+		return "", fmt.Errorf("keycloak: discovery unreachable: %w", ErrUnavailable)
+	}
+	defer raw.Body.Close()
+	var discovery struct {
+		Issuer string `json:"issuer"`
+	}
+	body, err := io.ReadAll(io.LimitReader(raw.Body, 1<<20))
+	if err != nil || raw.StatusCode != http.StatusOK || json.Unmarshal(body, &discovery) != nil || discovery.Issuer == "" {
+		return "", fmt.Errorf("keycloak: discovery answered %d without an issuer: %w", raw.StatusCode, ErrUnavailable)
+	}
+	a.issuer = discovery.Issuer
+	return a.issuer, nil
 }

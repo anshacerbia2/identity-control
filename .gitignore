@@ -1,3 +1,8 @@
+# Client private keys made by create-kernel-clients.sh and create-registration-client.sh. They never
+# leave the host that made them (ADR-IAM-001 §5.12).
+deploy/dev/keys/
+*.pem
+
 # Coverage profiles are build output. CI produces and uploads them as an artifact, so
 # a committed copy is only ever stale.
 *.out

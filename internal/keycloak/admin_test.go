@@ -11,6 +11,11 @@ package keycloak_test
 
 import (
 	"context"
+	"crypto"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +25,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -30,9 +36,34 @@ import (
 )
 
 const (
-	testRealm  = keycloak.Realm("scnehaux")
-	testSecret = "super-secret-client-value"
+	testRealm = keycloak.Realm("scnehaux")
+	// testSecret stands for any sensitive value a kernel might echo: no error may carry it.
+	testSecret   = "super-secret-client-value"
+	publicIssuer = "https://identity.example.com/realms/scnehaux"
 )
+
+var (
+	testKeyOnce sync.Once
+	testKey     *keycloak.ClientKey
+	testRSA     *rsa.PrivateKey
+)
+
+// clientKey is one 3072-bit key for the package. Generating one per test would dominate the run.
+func clientKey(t *testing.T) *keycloak.ClientKey {
+	t.Helper()
+	testKeyOnce.Do(func() {
+		private, err := rsa.GenerateKey(rand.Reader, keycloak.MinClientKeyBits)
+		if err != nil {
+			t.Fatal(err)
+		}
+		testRSA = private
+		testKey, err = keycloak.ClientKeyFromRSA(private)
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+	return testKey
+}
 
 // kernel is a scripted stand-in for the Admin REST surface.
 type kernel struct {
@@ -50,16 +81,26 @@ type kernel struct {
 	lastAuth      string
 	// adminBodyFor, when set, answers per request instead of adminBody -- for a kernel that pages.
 	adminBodyFor func(query url.Values) string
+	// lastTokenForm is what the client sent the token endpoint.
+	lastTokenForm url.Values
 }
 
 func (k *kernel) handler() http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/realms/", func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/.well-known/openid-configuration") {
+			// The public issuer, deliberately not the address the client reached: a kernel behind
+			// a fixed hostname answers the same way.
+			_, _ = io.WriteString(w, `{"issuer":"`+publicIssuer+`"}`)
+			return
+		}
 		if !strings.HasSuffix(r.URL.Path, "/protocol/openid-connect/token") {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
+		_ = r.ParseForm()
+		k.lastTokenForm = r.PostForm
 		k.tokenCalls.Add(1)
 		status := k.tokenStatus
 		if status == 0 {
@@ -104,11 +145,11 @@ func newAdmin(t *testing.T, k *kernel) (*keycloak.Admin, *httptest.Server) {
 	t.Cleanup(server.Close)
 
 	admin, err := keycloak.NewAdmin(keycloak.AdminConfig{
-		BaseURL:      server.URL,
-		Realm:        testRealm,
-		ClientID:     "identity-control",
-		ClientSecret: testSecret,
-		Timeout:      2 * time.Second,
+		BaseURL:   server.URL,
+		Realm:     testRealm,
+		ClientID:  "identity-control",
+		ClientKey: clientKey(t),
+		Timeout:   2 * time.Second,
 	}, server.Client())
 	if err != nil {
 		t.Fatalf("NewAdmin: %v", err)
@@ -559,17 +600,66 @@ func TestNoErrorCarriesTheSecretOrTheToken(t *testing.T) {
 	}
 }
 
+// The service account proves itself with a signed assertion, never a secret, and names the realm's
+// public issuer as the audience even though it reached the kernel on another address.
+func TestTheTokenRequestCarriesASignedAssertion(t *testing.T) {
+	k := &kernel{adminBody: `{"id":"c1","clientId":"web"}`}
+	admin, _ := newAdmin(t, k)
+	if _, err := admin.GetClient(context.Background(), testRealm, "c1"); err != nil {
+		t.Fatal(err)
+	}
+	form := k.lastTokenForm
+	if form.Get("client_secret") != "" || form.Get("client_id") != "identity-control" ||
+		form.Get("grant_type") != "client_credentials" || form.Get("client_assertion_type") != keycloak.ClientAssertionType {
+		t.Fatalf("token request %v", form)
+	}
+	parts := strings.Split(form.Get("client_assertion"), ".")
+	if len(parts) != 3 {
+		t.Fatalf("the assertion is not a compact JWT")
+	}
+	var header map[string]string
+	var claims map[string]any
+	for i, into := range []any{&header, &claims} {
+		raw, _ := base64.RawURLEncoding.DecodeString(parts[i])
+		if err := json.Unmarshal(raw, into); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if header["alg"] != "PS256" || header["kid"] != clientKey(t).ID {
+		t.Errorf("header %v", header)
+	}
+	if claims["aud"] != publicIssuer || claims["iss"] != "identity-control" || claims["sub"] != "identity-control" || claims["jti"] == "" {
+		t.Errorf("claims %v", claims)
+	}
+	signature, _ := base64.RawURLEncoding.DecodeString(parts[2])
+	digest := sha256.Sum256([]byte(parts[0] + "." + parts[1]))
+	if err := rsa.VerifyPSS(&testRSA.PublicKey, crypto.SHA256, digest[:], signature,
+		&rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthEqualsHash}); err != nil {
+		t.Errorf("the assertion does not verify: %v", err)
+	}
+}
+
+func TestAShortClientKeyIsRefused(t *testing.T) {
+	private, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := keycloak.ClientKeyFromRSA(private); err == nil {
+		t.Error("a 2048-bit client key was accepted")
+	}
+}
+
 func TestNewAdminValidatesItsConfiguration(t *testing.T) {
 	base := keycloak.AdminConfig{
 		BaseURL: "https://identity.example.com", Realm: testRealm,
-		ClientID: "identity-control", ClientSecret: testSecret,
+		ClientID: "identity-control", ClientKey: clientKey(t),
 	}
 
 	cases := map[string]func(keycloak.AdminConfig) keycloak.AdminConfig{
-		"no base URL":      func(c keycloak.AdminConfig) keycloak.AdminConfig { c.BaseURL = ""; return c },
-		"no realm":         func(c keycloak.AdminConfig) keycloak.AdminConfig { c.Realm = ""; return c },
-		"no client id":     func(c keycloak.AdminConfig) keycloak.AdminConfig { c.ClientID = ""; return c },
-		"no client secret": func(c keycloak.AdminConfig) keycloak.AdminConfig { c.ClientSecret = ""; return c },
+		"no base URL":   func(c keycloak.AdminConfig) keycloak.AdminConfig { c.BaseURL = ""; return c },
+		"no realm":      func(c keycloak.AdminConfig) keycloak.AdminConfig { c.Realm = ""; return c },
+		"no client id":  func(c keycloak.AdminConfig) keycloak.AdminConfig { c.ClientID = ""; return c },
+		"no client key": func(c keycloak.AdminConfig) keycloak.AdminConfig { c.ClientKey = nil; return c },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {

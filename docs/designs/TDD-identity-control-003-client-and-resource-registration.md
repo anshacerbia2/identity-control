@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-003
   title: Protocol Client and Protected-Resource Registration
   owner: Core Platform Team
-  version: 1.10.0
+  version: 1.10.1
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -636,9 +636,8 @@ holds a key.
   interval. When the lifecycle exists, this can be revisited; until then, holding is the
   conservative reading (RESPONSE-27, D5).
 - **No client is treated as unmanaged yet.** This service's own clients are confidential
-  clients created by development scripts with client secrets, the bootstrap exemption
-  `STD-IAM-001 §3.2` allows. Client key registration is not built, so they cannot be
-  registered. Disabling every unregistered client would disable this service. When the
+  clients that development scripts create, each with its own key. Client key registration is not
+  built, so they cannot be registered. Disabling every unregistered client would disable this service. When the
   branch is built, it must also exempt the clients Keycloak itself creates in every
   realm (`account`, `account-console`, `admin-cli`, `broker`, `realm-management`,
   `security-admin-console`). Disabling `realm-management` or `admin-cli` would lock
@@ -678,7 +677,7 @@ becomes available.
 | `IDENTITY_REGISTRATION_RECONCILE_INTERVAL` | `1h` | Drift sweep cadence. Admin-event retention in `identity-kernel` (7 days) must exceed it, or a change would lose its attribution before a sweep reads it |
 | `IDENTITY_APPLICATION_AUTHORITY` | `manual` | Becomes the Software Catalog authority name once chartered |
 | `IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID` | none, required | The registration path's own Admin API client, `identity-control-registration` |
-| `IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_SECRET` | none, required | Its secret, from the secret manager; never the Principal path's |
+| `IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_KEY_FILE` | none, required | Its PEM private key, from the secret manager as a file; never the Principal path's |
 
 ## Testing Strategy
 
@@ -771,10 +770,10 @@ The scripts that created the kernel's clients there are not rerun for it. The Pr
 only (`TDD-identity-control-001`), and so does the projector (`TDD-identity-control-002`).
 All three designs therefore stay true: none of those credentials holds client management.
 
-The split limits what one leaked secret can do. A credential that could both create users and
+The split limits what one leaked key can do. A credential that could both create users and
 register clients would let whoever holds it mint a Principal, and register a client that redirects
-its tokens to them, in one step. Split, each secret opens one of those capabilities only. The cost is
-a second secret to rotate, and a registration component that cannot reach the Principal path's
+its tokens to them, in one step. Split, each key opens one of those capabilities only. The cost is
+a second key to rotate, and a registration component that cannot reach the Principal path's
 credential even by mistake, because it is configured with a different one.
 
 **A registered client has no secret, and no private key reaches this service.** The client
@@ -784,11 +783,11 @@ Neither a Control Database breach nor a kernel breach yields anything that authe
 registered client. With client secrets, the kernel's database and backups would have held one
 per client, readable by its administrators.
 
-This service's own clients are the exception while the registration path is being built:
-`identity-control` and `identity-control-registration`. Development scripts created them with
-client secrets, under the bootstrap exemption in `STD-IAM-001 §3.2`. They must be re-keyed to
-registered keys before a shared production environment, and that is a production gate item
-(`ROADMAP.md`).
+This service's own clients, `identity-control` and `identity-control-registration`, follow the
+same rule. The registration path cannot register them before it exists, so a bootstrap script
+creates them. Each has its own key, made with identity-kernel's `client-key` tool on the host the
+service runs on. No client secret exists in any shared environment, development included
+(`STD-IAM-001 §3.2`).
 
 Exact-match redirect URIs and registered audiences are the two controls that keep the
 protocol surface closed. Both are validated at registration because neither is

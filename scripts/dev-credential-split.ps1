@@ -5,13 +5,13 @@
 #   identity-control-registration  clients and admin events only (TDD-identity-control-003). It
 #                                  cannot read or create a user.
 #
-# Split, one leaked secret cannot both mint a Principal and register a client that redirects its
+# Split, one leaked key cannot both mint a Principal and register a client that redirects its
 # tokens. A role added to either service account by hand would join the two again, so each
 # refusal is asserted rather than assumed.
 #
 # SECRETS: read from the environment.
-#   $env:IDENTITY_KEYCLOAK_CLIENT_SECRET              = '...'
-#   $env:IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_SECRET = '...'
+#   $env:IDENTITY_KEYCLOAK_CLIENT_KEY_FILE              = '...'   # each client's private key
+#   $env:IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_KEY_FILE = '...'
 #
 # KC_ADMIN_URL is the kernel's private address, where /admin is reachable.
 #
@@ -22,20 +22,23 @@ $ErrorActionPreference = "Stop"
 $kcBase = if ($env:KC_ADMIN_URL) { $env:KC_ADMIN_URL } else { "http://127.0.0.1:8081" }
 $realm  = if ($env:KC_REALM) { $env:KC_REALM } else { "scnehaux" }
 
-foreach ($name in @("IDENTITY_KEYCLOAK_CLIENT_SECRET", "IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_SECRET")) {
+foreach ($name in @("IDENTITY_KEYCLOAK_CLIENT_KEY_FILE", "IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_KEY_FILE")) {
     if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
         throw "$name is required."
     }
 }
 
+. "$PSScriptRoot\client-assertion.ps1"
 Add-Type -AssemblyName System.Net.Http
 $client = New-Object System.Net.Http.HttpClient
+$issuer = Get-RealmIssuer $kcBase $realm
 
-function Get-ServiceToken($clientId, $secret) {
+function Get-ServiceToken($clientId, $keyFile) {
     $form = New-Object 'System.Collections.Generic.Dictionary[string,string]'
     $form["grant_type"] = "client_credentials"
     $form["client_id"] = $clientId
-    $form["client_secret"] = $secret
+    $form["client_assertion_type"] = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+    $form["client_assertion"] = New-ClientAssertion -KeyFile $keyFile -ClientId $clientId -Audience $issuer
     $response = $client.PostAsync("$kcBase/realms/$realm/protocol/openid-connect/token",
         (New-Object System.Net.Http.FormUrlEncodedContent($form))).Result
     if (-not $response.IsSuccessStatusCode) {
@@ -63,8 +66,8 @@ function Expect($name, $want, $got) {
     }
 }
 
-$users = Get-ServiceToken "identity-control" $env:IDENTITY_KEYCLOAK_CLIENT_SECRET
-$registration = Get-ServiceToken "identity-control-registration" $env:IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_SECRET
+$users = Get-ServiceToken "identity-control" $env:IDENTITY_KEYCLOAK_CLIENT_KEY_FILE
+$registration = Get-ServiceToken "identity-control-registration" $env:IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_KEY_FILE
 
 # A probe body that no successful call would leave behind: each is expected to be refused before it
 # is read. A POST that did succeed would be the failure itself, and its object is left for the

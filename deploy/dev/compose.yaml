@@ -14,6 +14,9 @@ services:
     # postgres:17.11-alpine
     image: postgres@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
     restart: unless-stopped
+    # The service signs with private keys in ./keys, mode 0600 and owned by KEYS_OWNER, which is the
+    # image's nonroot user unless a local override says otherwise.
+    user: "${KEYS_OWNER:-65532:65532}"
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
     volumes:
@@ -47,12 +50,17 @@ services:
       target: migrate
     profiles: ["ceremony"]
     entrypoint: ["identity-bootstrap"]
+    # The key file belongs to KEYS_OWNER and is readable by it alone, so the ceremony runs as that
+    # user. See create-kernel-clients.sh.
+    user: "${KEYS_OWNER:-65532:65532}"
     environment:
       IDENTITY_DATABASE_URL: postgres://identity_app:${IDENTITY_APP_PASSWORD:?set IDENTITY_APP_PASSWORD in .env}@postgres:5432/identity_control?sslmode=disable
       IDENTITY_KEYCLOAK_REALM: scnehaux
       IDENTITY_KEYCLOAK_BASE_URL: http://keycloak:8080
       IDENTITY_KEYCLOAK_CLIENT_ID: identity-control
-      IDENTITY_KEYCLOAK_CLIENT_SECRET: ${IDENTITY_KEYCLOAK_CLIENT_SECRET:?run create-kernel-clients.sh and set it in .env}
+      IDENTITY_KEYCLOAK_CLIENT_KEY_FILE: /keys/identity-control.pem
+    volumes:
+      - ./keys:/keys:ro
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -63,17 +71,23 @@ services:
       context: ../..
       target: service
     restart: unless-stopped
+    # The service signs with private keys in ./keys, mode 0600 and owned by KEYS_OWNER, which is the
+    # image's nonroot user unless a local override says otherwise.
+    user: "${KEYS_OWNER:-65532:65532}"
     environment:
       # The runtime login role: DML, no DDL.
       IDENTITY_DATABASE_URL: postgres://identity_app:${IDENTITY_APP_PASSWORD:?set IDENTITY_APP_PASSWORD in .env}@postgres:5432/identity_control?sslmode=disable
       IDENTITY_LISTEN_ADDRESS: ":8090"
       IDENTITY_KEYCLOAK_REALM: scnehaux
       IDENTITY_KEYCLOAK_BASE_URL: http://keycloak:8080
+      # Both Admin API clients authenticate with their own key by signed JWT; no client secret
+      # exists (ADR-IAM-001 §5.12). The keys are made on this host by create-kernel-clients.sh and
+      # create-registration-client.sh, and the kernel holds only their public halves.
       IDENTITY_KEYCLOAK_CLIENT_ID: identity-control
-      IDENTITY_KEYCLOAK_CLIENT_SECRET: ${IDENTITY_KEYCLOAK_CLIENT_SECRET:?run create-kernel-clients.sh and set it in .env}
+      IDENTITY_KEYCLOAK_CLIENT_KEY_FILE: /keys/identity-control.pem
       # The registration path's own credential: clients and admin events, no users.
       IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID: identity-control-registration
-      IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_SECRET: ${IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_SECRET:?run create-registration-client.sh and set it in .env}
+      IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_KEY_FILE: /keys/identity-control-registration.pem
       IDENTITY_REGISTRATION_RECONCILE_INTERVAL: ${IDENTITY_REGISTRATION_RECONCILE_INTERVAL:-1h}
       # The issuer is the kernel's public one, whatever address Keycloak is reached on: Keycloak's
       # hostname fixes iss. The key set is fetched over the private network. It is configuration and
@@ -86,6 +100,8 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+    volumes:
+      - ./keys:/keys:ro
     ports:
       - "127.0.0.1:${IDENTITY_CONTROL_PORT:-8082}:8090"
     networks: [internal, kernel]

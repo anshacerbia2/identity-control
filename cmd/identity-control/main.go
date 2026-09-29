@@ -88,14 +88,23 @@ func run() error {
 		slog.Int("max_conns", int(cfg.DBMaxConns)))
 
 	// The administration credential lives in this process and nowhere else in the estate,
-	// per ADR-IAM-001 §5.10. It is read from configuration once, held by the client, and never
-	// logged: the startup line below names the realm and the base URL and stops there.
+	// per ADR-IAM-001 §5.10. It is a private key, read from its file once, held by the client, and
+	// never logged: the startup line below names the realm and the base URL and stops there. The
+	// kernel holds only its public half (ADR-IAM-001 §5.12).
+	kernelKey, err := keycloak.LoadClientKey(cfg.KeycloakClientKeyFile)
+	if err != nil {
+		return fmt.Errorf("identity kernel client key: %w", err)
+	}
+	registryKey, err := keycloak.LoadClientKey(cfg.RegistrationClientKeyFile)
+	if err != nil {
+		return fmt.Errorf("registration kernel client key: %w", err)
+	}
 	kernel, err := keycloak.NewAdmin(keycloak.AdminConfig{
-		BaseURL:      cfg.KeycloakBaseURL,
-		Realm:        keycloak.Realm(cfg.KeycloakRealm),
-		ClientID:     cfg.KeycloakClientID,
-		ClientSecret: cfg.KeycloakClientSecret,
-		Timeout:      cfg.ProvisionTimeout,
+		BaseURL:   cfg.KeycloakBaseURL,
+		Realm:     keycloak.Realm(cfg.KeycloakRealm),
+		ClientID:  cfg.KeycloakClientID,
+		ClientKey: kernelKey,
+		Timeout:   cfg.ProvisionTimeout,
 	}, nil)
 	if err != nil {
 		return fmt.Errorf("identity kernel client: %w", err)
@@ -119,11 +128,11 @@ func run() error {
 	// receives only the ClientRegistry this one serves, so the Principal path's credential never
 	// reaches a client call, and this one never reaches a user call (TDD-identity-control-003).
 	registry, err := keycloak.NewAdmin(keycloak.AdminConfig{
-		BaseURL:      cfg.KeycloakBaseURL,
-		Realm:        keycloak.Realm(cfg.KeycloakRealm),
-		ClientID:     cfg.RegistrationClientID,
-		ClientSecret: cfg.RegistrationClientSecret,
-		Timeout:      cfg.ProvisionTimeout,
+		BaseURL:   cfg.KeycloakBaseURL,
+		Realm:     keycloak.Realm(cfg.KeycloakRealm),
+		ClientID:  cfg.RegistrationClientID,
+		ClientKey: registryKey,
+		Timeout:   cfg.ProvisionTimeout,
 	}, nil)
 	if err != nil {
 		return fmt.Errorf("registration kernel client: %w", err)

@@ -28,10 +28,12 @@ type AdminConfig struct {
 	// in a dedicated realm.
 	TokenRealm Realm
 
-	// ClientID and ClientSecret are the service account credential. They come from the
-	// approved secret manager and are never present in configuration or in an image.
-	ClientID     string
-	ClientSecret string
+	// ClientID and ClientKey are the service account credential. The client authenticates with
+	// its own private key by signed JWT, never a client secret (ADR-IAM-001 §5.12). The key comes
+	// from the approved secret manager, as a file, and is never present in configuration or in
+	// an image.
+	ClientID  string
+	ClientKey *ClientKey
 
 	// Timeout bounds one HTTP round trip.
 	Timeout time.Duration
@@ -62,8 +64,8 @@ func (c AdminConfig) validate() error {
 		return errors.New("keycloak: realm is required")
 	case c.ClientID == "":
 		return errors.New("keycloak: client id is required")
-	case c.ClientSecret == "":
-		return errors.New("keycloak: client secret is required")
+	case c.ClientKey == nil:
+		return errors.New("keycloak: client key is required")
 	}
 	if _, err := url.Parse(c.BaseURL); err != nil {
 		return fmt.Errorf("keycloak: base URL is unparseable: %w", err)
@@ -83,6 +85,10 @@ type Admin struct {
 	mu          sync.Mutex
 	token       string
 	tokenExpiry time.Time
+
+	// issuer is the token realm's issuer, the audience of every client assertion. It is read
+	// from discovery once, under mu.
+	issuer string
 }
 
 // NewAdmin constructs the client.

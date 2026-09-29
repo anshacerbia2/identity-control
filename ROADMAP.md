@@ -418,7 +418,7 @@ Acceptance criteria, also from RESPONSE-4 §4:
      of those classes are refused, and TDD-003's scope names now follow the kernel's.
    - A key an unregistered Keycloak client holds is refused, never adopted.
    - Disabling unmanaged clients is still not built. This service's own clients are
-     confidential clients, created by scripts with secrets, that cannot be registered yet.
+     confidential clients, created by scripts with their own keys, that cannot be registered yet.
 6. ✅ Add a Proof B end-to-end job in `deploy-dev.yml` against a real Keycloak: both scenarios, the
    exception, Keycloak down, and convergence time. `scripts/dev-proof-b.ps1` registers a public
    client, then changes it through the Admin API as the console administrator, so every change
@@ -464,7 +464,7 @@ Acceptance criteria, also from RESPONSE-4 §4:
   - Client secrets were the first design. On 2026-09-29 they were replaced, because the pinned Keycloak can overlap two secrets only through a preview feature.
   - `identity-kernel`'s compat suite proved the key mechanism against 26.7.4 (identity-kernel#18): two keys overlap, a removed key is refused on the next request, and a replayed assertion is refused.
   - `ADR-IAM-001 §5.12` and `STD-IAM-001 §3.2` record the decision.
-- **Disabling unmanaged clients:** it needs this service's own clients registered first, and it must exempt the clients Keycloak creates in every realm. `identity-experience-bff`, the BFF's confidential client, is in the same position: `identity-experience`'s `deploy/dev/create-bff-client.sh` creates it on the dev server with a secret, because client key registration is not built. It must be registered before this runs, or it is disabled with every open session. Registering it moves the BFF to `private_key_jwt`.
+- **Disabling unmanaged clients:** it needs this service's own clients registered first, and it must exempt the clients Keycloak creates in every realm. `identity-experience-bff`, the BFF's confidential client, is in the same position: `identity-experience`'s `deploy/dev/create-bff-client.sh` creates it on the dev server, because client key registration is not built. It must be registered before this runs, or it is disabled with every open session. Registering it moves the BFF to `private_key_jwt`.
 - **The rest of the Principal sweep:** its unmapped, orphan and duplicate branches (TDD-001 §Reconciliation Sweep) are not built. Only the dangling branch and pending recovery run.
 - **Kernel scopes:** `identity-kernel` must declare `scnehaux-workload` and a tenant-scope privileged scope before registrations of those classes can exist.
 
@@ -562,11 +562,15 @@ removal, Keycloak administration credential rotation rehearsed, and runbooks wri
 for unmapped-Principal triage, duplicate-identifier containment, pending-mapping
 recovery, and projection drift repair.
 
-This service's own Keycloak clients must also be re-keyed. `identity-control` and
-`identity-control-registration` authenticate with client secrets, created by development
-scripts under the bootstrap exemption in `STD-IAM-001 §3.2`. Before a shared production
-environment they must authenticate with registered keys (`private_key_jwt`), and the Admin API
-transport must sign client assertions instead of sending a secret.
+✅ **This service's own Keycloak clients authenticate with keys**, development included. That
+covers `identity-control`, `identity-control-registration`, and the development caller.
+`STD-IAM-001 §3.2` allows no client secret in any shared environment.
+
+- `internal/keycloak` signs an RFC 7523 assertion (PS256, the key's RFC 7638 thumbprint as
+  `kid`) and reads its audience from the realm's discovery. Client-secret support is removed.
+- The scripts make the keys with identity-kernel's `client-key` tool, and the kernel holds only the
+  public halves.
+- `deploy-dev` runs the whole stack on keys: the credential split, the smoke test, and Proof B.
 
 **The first-Principal bootstrap blocker is cleared.** `ADR-IAM-001 §5.11` decided it and
 `cmd/identity-bootstrap` implements it, so standing up a production realm no longer requires the

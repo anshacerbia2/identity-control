@@ -29,7 +29,11 @@ func TestAStaleTokenIsReplacedOnce(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			var tokens, admin atomic.Int32
 			mux := http.NewServeMux()
-			mux.HandleFunc("/realms/", func(w http.ResponseWriter, _ *http.Request) {
+			mux.HandleFunc("/realms/", func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasSuffix(r.URL.Path, "/.well-known/openid-configuration") {
+					_, _ = io.WriteString(w, `{"issuer":"`+publicIssuer+`"}`)
+					return
+				}
 				tokens.Add(1)
 				_, _ = io.WriteString(w, `{"access_token":"t","expires_in":300}`)
 			})
@@ -41,7 +45,7 @@ func TestAStaleTokenIsReplacedOnce(t *testing.T) {
 			server := httptest.NewServer(mux)
 			t.Cleanup(server.Close)
 			client, err := keycloak.NewAdmin(keycloak.AdminConfig{BaseURL: server.URL, Realm: testRealm,
-				ClientID: "identity-control-registration", ClientSecret: testSecret}, nil)
+				ClientID: "identity-control-registration", ClientKey: clientKey(t)}, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
