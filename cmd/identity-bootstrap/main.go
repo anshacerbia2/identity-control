@@ -72,12 +72,16 @@ func run(operator, reason, username, email, resume string, timeout time.Duration
 	}
 	defer pool.Close()
 
+	kernelKey, err := keycloak.LoadClientKey(cfg.KeycloakClientKeyFile)
+	if err != nil {
+		return fmt.Errorf("identity kernel client key: %w", err)
+	}
 	kernel, err := keycloak.NewAdmin(keycloak.AdminConfig{
-		BaseURL:      cfg.KeycloakBaseURL,
-		Realm:        keycloak.Realm(cfg.KeycloakRealm),
-		ClientID:     cfg.KeycloakClientID,
-		ClientSecret: cfg.KeycloakClientSecret,
-		Timeout:      cfg.ProvisionTimeout,
+		BaseURL:   cfg.KeycloakBaseURL,
+		Realm:     keycloak.Realm(cfg.KeycloakRealm),
+		ClientID:  cfg.KeycloakClientID,
+		ClientKey: kernelKey,
+		Timeout:   cfg.ProvisionTimeout,
 	}, nil)
 	if err != nil {
 		return fmt.Errorf("identity kernel client: %w", err)

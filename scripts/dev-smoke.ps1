@@ -15,7 +15,7 @@
 #   9. clients are registered from desired state  TDD-identity-control-003, Proof B step 5
 #
 # SECRETS: read from the environment.
-#   $env:IDENTITY_CALLER_SECRET   = '...'
+#   $env:IDENTITY_CALLER_KEY_FILE = '...'   # the caller's private key, printed by create-kernel-clients.sh
 #   $env:IDENTITY_CALLER_PASSWORD = '...'
 #
 # Usage: pwsh ./scripts/dev-smoke.ps1
@@ -26,7 +26,7 @@ $api    = if ($env:IDENTITY_API_URL) { $env:IDENTITY_API_URL } else { "http://12
 $kcBase = if ($env:KC_BASE_URL) { $env:KC_BASE_URL } else { "http://127.0.0.1:8081" }
 $realm  = if ($env:KC_REALM) { $env:KC_REALM } else { "scnehaux" }
 
-foreach ($name in @("IDENTITY_CALLER_SECRET", "IDENTITY_CALLER_PASSWORD")) {
+foreach ($name in @("IDENTITY_CALLER_KEY_FILE", "IDENTITY_CALLER_PASSWORD")) {
     if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
         throw "$name is required."
     }
@@ -39,7 +39,7 @@ Add-Type -AssemblyName System.Net.Http
 # privileged token: auth_time exists only for an authentication ceremony.
 . "$PSScriptRoot\dev-token.ps1"
 $token = Get-ScnehauxToken -Username "bootstrap-operator" `
-    -Password $env:IDENTITY_CALLER_PASSWORD -ClientSecret $env:IDENTITY_CALLER_SECRET
+    -Password $env:IDENTITY_CALLER_PASSWORD -KeyFile $env:IDENTITY_CALLER_KEY_FILE
 
 function Decode-Segment($segment) {
     $s = $segment.Replace('-', '+').Replace('_', '/')

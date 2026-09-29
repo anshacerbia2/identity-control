@@ -43,19 +43,19 @@ type Config struct {
 	// KeycloakRealm is the single realm this deployable administers.
 	KeycloakRealm string
 
-	// KeycloakBaseURL is the kernel root. KeycloakClientID and KeycloakClientSecret are the
+	// KeycloakBaseURL is the kernel root. KeycloakClientID and KeycloakClientKeyFile are the
 	// administration service account, sourced from the approved secret manager. This process
 	// is the only one in the estate holding them, per ADR-IAM-001 §5.10.
-	KeycloakBaseURL      string
-	KeycloakClientID     string
-	KeycloakClientSecret string
+	KeycloakBaseURL       string
+	KeycloakClientID      string
+	KeycloakClientKeyFile string
 
-	// RegistrationClientID and RegistrationClientSecret are the registration path's own Admin API
+	// RegistrationClientID and RegistrationClientKeyFile are the registration path's own Admin API
 	// credential, identity-control-registration (TDD-identity-control-003 §Security Notes): clients
 	// and admin events, no users. A second credential rather than more roles on the first, so one
 	// leaked secret cannot both mint a Principal and register a client that redirects its tokens.
-	RegistrationClientID     string
-	RegistrationClientSecret string
+	RegistrationClientID      string
+	RegistrationClientKeyFile string
 
 	// RegistrationReconcileInterval is the registration drift sweep cadence. identity-kernel keeps
 	// admin events for 7 days, and a change must still carry its event when a sweep reads it.
@@ -115,12 +115,12 @@ func Load() (Config, error) {
 	// Each is required rather than defaulted. A default base URL would point this process at
 	// a kernel nobody chose, and a default credential does not exist.
 	required := map[string]*string{
-		"IDENTITY_KEYCLOAK_BASE_URL":      &cfg.KeycloakBaseURL,
-		"IDENTITY_KEYCLOAK_CLIENT_ID":     &cfg.KeycloakClientID,
-		"IDENTITY_KEYCLOAK_CLIENT_SECRET": &cfg.KeycloakClientSecret,
+		"IDENTITY_KEYCLOAK_BASE_URL":        &cfg.KeycloakBaseURL,
+		"IDENTITY_KEYCLOAK_CLIENT_ID":       &cfg.KeycloakClientID,
+		"IDENTITY_KEYCLOAK_CLIENT_KEY_FILE": &cfg.KeycloakClientKeyFile,
 
-		"IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID":     &cfg.RegistrationClientID,
-		"IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_SECRET": &cfg.RegistrationClientSecret,
+		"IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID":       &cfg.RegistrationClientID,
+		"IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_KEY_FILE": &cfg.RegistrationClientKeyFile,
 
 		// Each of these is a term in an authentication decision. A default would be a
 		// default answer to "who may call this service", which is not a question a
@@ -176,10 +176,10 @@ type BootstrapConfig struct {
 	// is a command that could remove the constraint making it single-use.
 	RuntimeDSN string
 
-	KeycloakRealm        string
-	KeycloakBaseURL      string
-	KeycloakClientID     string
-	KeycloakClientSecret string
+	KeycloakRealm         string
+	KeycloakBaseURL       string
+	KeycloakClientID      string
+	KeycloakClientKeyFile string
 
 	ProvisionTimeout     time.Duration
 	PendingRecoveryAfter time.Duration
@@ -197,11 +197,11 @@ func LoadBootstrap() (BootstrapConfig, error) {
 	}
 
 	required := map[string]*string{
-		"IDENTITY_DATABASE_URL":           &cfg.RuntimeDSN,
-		"IDENTITY_KEYCLOAK_REALM":         &cfg.KeycloakRealm,
-		"IDENTITY_KEYCLOAK_BASE_URL":      &cfg.KeycloakBaseURL,
-		"IDENTITY_KEYCLOAK_CLIENT_ID":     &cfg.KeycloakClientID,
-		"IDENTITY_KEYCLOAK_CLIENT_SECRET": &cfg.KeycloakClientSecret,
+		"IDENTITY_DATABASE_URL":             &cfg.RuntimeDSN,
+		"IDENTITY_KEYCLOAK_REALM":           &cfg.KeycloakRealm,
+		"IDENTITY_KEYCLOAK_BASE_URL":        &cfg.KeycloakBaseURL,
+		"IDENTITY_KEYCLOAK_CLIENT_ID":       &cfg.KeycloakClientID,
+		"IDENTITY_KEYCLOAK_CLIENT_KEY_FILE": &cfg.KeycloakClientKeyFile,
 	}
 	for name, target := range required {
 		*target = os.Getenv(name)

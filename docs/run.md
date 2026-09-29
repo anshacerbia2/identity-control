@@ -43,15 +43,15 @@ On a network where `proxy.golang.org` is unreachable, set `GOPROXY=direct`.
 
 ## 1. Choose credentials
 
-Every script reads its secrets from the environment and defaults none of them. Nothing below is
-written to a file, which is why the scripts can live in the repository.
+Every script reads its passwords from the environment and defaults none of them. No client has a
+secret: each authenticates with its own key by signed JWT (ADR-IAM-001 §5.12).
+`scripts/dev-keycloak.ps1` makes the keys in `deploy/dev/keys`, which git ignores, with
+identity-kernel's `client-key` tool from the sibling checkout.
 
 ```powershell
 $env:PGPASSWORD               = '<postgres superuser password>'
 $env:IDENTITY_APP_PASSWORD    = '<a password for the identity_app login role>'
 $env:KC_ADMIN_PASSWORD        = '<keycloak bootstrap admin password>'
-$env:IDENTITY_CONTROL_SECRET  = '<the service Admin API client secret>'
-$env:IDENTITY_CALLER_SECRET   = '<harness caller client secret>'
 $env:IDENTITY_CALLER_PASSWORD = '<harness caller user password>'
 ```
 
@@ -186,7 +186,9 @@ $env:IDENTITY_LISTEN_ADDRESS         = ':8090'
 $env:IDENTITY_KEYCLOAK_REALM         = 'scnehaux'
 $env:IDENTITY_KEYCLOAK_BASE_URL      = 'http://127.0.0.1:8081'
 $env:IDENTITY_KEYCLOAK_CLIENT_ID     = 'identity-control'
-$env:IDENTITY_KEYCLOAK_CLIENT_SECRET = $env:IDENTITY_CONTROL_SECRET
+$env:IDENTITY_KEYCLOAK_CLIENT_KEY_FILE = (Resolve-Path deploy/dev/keys/identity-control.pem).Path
+$env:IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID       = 'identity-control-registration'
+$env:IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_KEY_FILE = (Resolve-Path deploy/dev/keys/identity-control-registration.pem).Path
 $env:IDENTITY_TOKEN_ISSUER           = 'http://127.0.0.1:8081/realms/scnehaux'
 $env:IDENTITY_TOKEN_AUDIENCE         = 'identity-control'
 $env:IDENTITY_JWKS_URL               = 'http://127.0.0.1:8081/realms/scnehaux/protocol/openid-connect/certs'
@@ -204,6 +206,7 @@ own key source would choose the key that validates it.
 ## 7. Exercise it
 
 ```powershell
+$env:IDENTITY_CALLER_KEY_FILE = (Resolve-Path deploy/dev/keys/identity-control-caller.pem).Path
 ./scripts/dev-smoke.ps1
 ```
 

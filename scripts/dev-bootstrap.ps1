@@ -15,7 +15,6 @@
 # SECRETS: read from the environment, never defaulted.
 #
 #   $env:IDENTITY_APP_PASSWORD    = '...'   # the identity_app login role
-#   $env:IDENTITY_CONTROL_SECRET  = '...'   # the service's Admin API client secret
 #   $env:KC_ADMIN_PASSWORD        = '...'   # Keycloak bootstrap admin, for step 2 only
 #   $env:IDENTITY_CALLER_PASSWORD = '...'   # the password step 2 sets
 #
@@ -46,7 +45,9 @@ function Require-Env($name) {
 }
 
 $appPassword    = Require-Env "IDENTITY_APP_PASSWORD"
-$serviceSecret  = Require-Env "IDENTITY_CONTROL_SECRET"
+# The service's Admin API client authenticates with the key dev-keycloak.ps1 made. It has no secret.
+$serviceKey = Join-Path $PSScriptRoot "..\deploy\dev\keys\identity-control.pem"
+if (-not (Test-Path $serviceKey)) { throw "$serviceKey is missing; run ./scripts/dev-keycloak.ps1 first" }
 $kcPassword     = Require-Env "KC_ADMIN_PASSWORD"
 $callerPassword = Require-Env "IDENTITY_CALLER_PASSWORD"
 
@@ -66,7 +67,7 @@ $env:IDENTITY_DATABASE_URL = "postgres://identity_app:$appPassword@${pgHost}:${p
 $env:IDENTITY_KEYCLOAK_REALM = $realm
 $env:IDENTITY_KEYCLOAK_BASE_URL = $kcBase
 $env:IDENTITY_KEYCLOAK_CLIENT_ID = "identity-control"
-$env:IDENTITY_KEYCLOAK_CLIENT_SECRET = $serviceSecret
+$env:IDENTITY_KEYCLOAK_CLIENT_KEY_FILE = (Resolve-Path $serviceKey).Path
 
 $arguments = @(
     "run", "./cmd/identity-bootstrap",

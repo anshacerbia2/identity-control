@@ -19,7 +19,7 @@
 #   7. an unreachable Keycloak is 'unresolved', and the sweep converges once it is back
 #
 # SECRETS: read from the environment.
-#   IDENTITY_CALLER_SECRET, IDENTITY_CALLER_PASSWORD   a provider-scope token, as dev-smoke.ps1
+#   IDENTITY_CALLER_KEY_FILE, IDENTITY_CALLER_PASSWORD  a provider-scope token, as dev-smoke.ps1
 #   KC_BOOTSTRAP_ADMIN_USERNAME, KC_BOOTSTRAP_ADMIN_PASSWORD   the console administrator
 #
 # KC_BASE_URL is where the login form is served, KC_ADMIN_URL the kernel's private address where
@@ -37,7 +37,7 @@ $realm     = if ($env:KC_REALM) { $env:KC_REALM } else { "scnehaux" }
 $container = if ($env:KERNEL_KEYCLOAK_CONTAINER) { $env:KERNEL_KEYCLOAK_CONTAINER } else { "scnehaux-identity-dev-keycloak-1" }
 $adminUser = if ($env:KC_BOOTSTRAP_ADMIN_USERNAME) { $env:KC_BOOTSTRAP_ADMIN_USERNAME } else { "admin" }
 
-foreach ($name in @("IDENTITY_CALLER_SECRET", "IDENTITY_CALLER_PASSWORD", "KC_BOOTSTRAP_ADMIN_PASSWORD")) {
+foreach ($name in @("IDENTITY_CALLER_KEY_FILE", "IDENTITY_CALLER_PASSWORD", "KC_BOOTSTRAP_ADMIN_PASSWORD")) {
     if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
         throw "$name is required."
     }
@@ -80,7 +80,7 @@ $script:apiTokenAt = [datetime]::MinValue
 function Api($method, $path, $body, $headers) {
     if (((Get-Date) - $script:apiTokenAt).TotalSeconds -gt 150) {
         $script:apiToken = Get-ScnehauxToken -Username "bootstrap-operator" `
-            -Password $env:IDENTITY_CALLER_PASSWORD -ClientSecret $env:IDENTITY_CALLER_SECRET
+            -Password $env:IDENTITY_CALLER_PASSWORD -KeyFile $env:IDENTITY_CALLER_KEY_FILE
         $script:apiTokenAt = Get-Date
     }
     return Send $method "$api$path" $body $script:apiToken $headers

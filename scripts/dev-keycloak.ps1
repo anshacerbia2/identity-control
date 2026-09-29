@@ -18,12 +18,13 @@
 #
 # Idempotent: every step checks before it writes.
 #
-# SECRETS: every credential is read from the environment. Nothing is defaulted and nothing is
-# written to a file.
+# CREDENTIALS: the two clients hold no secret. Each authenticates with its own key by signed JWT
+# (ADR-IAM-001 §5.12). The keys are made here, in deploy/dev/keys (git-ignored), by identity-kernel's
+# client-key tool from the sibling checkout, and only their public halves are given to Keycloak. A
+# key that already exists is kept, so a rerun does not cut off a running service.
 #
 #   $env:KC_ADMIN_PASSWORD            = '...'   # Keycloak bootstrap admin
-#   $env:IDENTITY_CONTROL_SECRET      = '...'   # the service's Admin API client secret
-#   $env:IDENTITY_CALLER_SECRET       = '...'   # harness caller client secret
+#   $env:IDENTITY_KERNEL_DIR          = '...'   # optional; defaults to ../identity-kernel
 #
 # This script creates no user. The first Principal comes from the bootstrap ceremony
 # (scripts/dev-bootstrap.ps1), because ADR-IAM-001 §5.11 gives that authority to the Identity
@@ -46,8 +47,28 @@ function Require-Env($name) {
 }
 
 $kcAdminPassword = Require-Env "KC_ADMIN_PASSWORD"
-$serviceSecret   = Require-Env "IDENTITY_CONTROL_SECRET"
-$callerSecret    = Require-Env "IDENTITY_CALLER_SECRET"
+$kernelDir = if ($env:IDENTITY_KERNEL_DIR) { $env:IDENTITY_KERNEL_DIR } else { Join-Path $PSScriptRoot "..\..\identity-kernel" }
+$keyDir = Join-Path $PSScriptRoot "..\deploy\dev\keys"
+New-Item -ItemType Directory -Force $keyDir | Out-Null
+$keyDir = (Resolve-Path $keyDir).Path
+
+# Get-ClientJWKS makes the client's key pair if it has none, and returns the JWKS Keycloak is given:
+# the public half only.
+function Get-ClientJWKS($name) {
+    $pem = Join-Path $keyDir "$name.pem"
+    if (-not (Test-Path $pem)) {
+        Push-Location $kernelDir
+        try { go run ./cmd/client-key new -out $pem | Out-Host } finally { Pop-Location }
+        if ($LASTEXITCODE -ne 0) { throw "client-key could not make the key for $name" }
+    }
+    $jwk = Get-Content -Raw (Join-Path $keyDir "$name.jwk.json") | ConvertFrom-Json
+    return (@{ keys = @($jwk) } | ConvertTo-Json -Depth 5 -Compress)
+}
+$keyAttributes = @{
+    "token.endpoint.auth.signing.alg" = "PS256"
+    "use.jwks.url"                    = "false"
+    "use.jwks.string"                 = "true"
+}
 
 $adminToken = (Invoke-RestMethod -Method Post -ContentType "application/x-www-form-urlencoded" `
     -Uri "$kcBase/realms/master/protocol/openid-connect/token" -Body @{
@@ -61,7 +82,7 @@ $H = @{ Authorization = "Bearer $adminToken" }
 # ---------------------------------------------------------------------------------------------
 # 1. The realm identity-kernel applied
 # ---------------------------------------------------------------------------------------------
-Write-Host "[1/3] realm $realm, as identity-kernel applied it"
+Write-Host "[1/4] realm $realm, as identity-kernel applied it"
 $realms = Invoke-RestMethod -Uri "$kcBase/admin/realms" -Headers $H
 if (-not ($realms | Where-Object { $_.realm -eq $realm })) {
     throw "realm $realm does not exist. Apply identity-kernel's realm definition first (see the header of this script)."
@@ -95,17 +116,18 @@ function Upsert-Client($payload) {
 # ---------------------------------------------------------------------------------------------
 # 2. The service client
 # ---------------------------------------------------------------------------------------------
-Write-Host "[2/3] client identity-control"
+Write-Host "[2/4] client identity-control"
 $serviceClientId = Upsert-Client @{
     clientId                  = "identity-control"
     name                      = "Identity Control Service"
     enabled                   = $true
     protocol                  = "openid-connect"
     publicClient              = $false
+    clientAuthenticatorType   = "client-jwt"
     serviceAccountsEnabled    = $true
     standardFlowEnabled       = $false
     directAccessGrantsEnabled = $false
-    secret                    = $serviceSecret
+    attributes                = $keyAttributes + @{ "jwks.string" = (Get-ClientJWKS "identity-control") }
 }
 
 # Exactly manage-users and view-users. TDD-identity-control-001 gives this service user creation,
@@ -133,9 +155,37 @@ Invoke-RestMethod -Method Post -Headers $H -ContentType "application/json" -Uri 
 Write-Host "      roles: $($wanted -join ', ')"
 
 # ---------------------------------------------------------------------------------------------
-# 3. The harness caller client
+# 3. The registration path's client
 # ---------------------------------------------------------------------------------------------
-Write-Host "[3/3] client identity-control-caller"
+# Its own credential, clients and admin events and no users (TDD-identity-control-003 §Security
+# Notes), so one leaked key cannot both mint a Principal and register a client that redirects its
+# tokens. The local counterpart of deploy/dev/create-registration-client.sh.
+Write-Host "[3/4] client identity-control-registration"
+$registrationClientId = Upsert-Client @{
+    clientId                  = "identity-control-registration"
+    name                      = "Identity Control registration path"
+    enabled                   = $true
+    protocol                  = "openid-connect"
+    publicClient              = $false
+    clientAuthenticatorType   = "client-jwt"
+    serviceAccountsEnabled    = $true
+    standardFlowEnabled       = $false
+    directAccessGrantsEnabled = $false
+    attributes                = $keyAttributes + @{ "jwks.string" = (Get-ClientJWKS "identity-control-registration") }
+}
+$registrationAccount = Invoke-RestMethod -Headers $H `
+    -Uri "$kcBase/admin/realms/$realm/clients/$registrationClientId/service-account-user"
+$registrationRoles = @($available | Where-Object { @("manage-clients", "view-clients", "view-events") -contains $_.name } |
+    ForEach-Object { @{ id = $_.id; name = $_.name } })
+Invoke-RestMethod -Method Post -Headers $H -ContentType "application/json" `
+    -Uri "$kcBase/admin/realms/$realm/users/$($registrationAccount.id)/role-mappings/clients/$($realmManagement.id)" `
+    -Body (ConvertTo-Json @($registrationRoles) -Depth 5) | Out-Null
+Write-Host "      roles: manage-clients, view-clients, view-events"
+
+# ---------------------------------------------------------------------------------------------
+# 4. The harness caller client
+# ---------------------------------------------------------------------------------------------
+Write-Host "[4/4] client identity-control-caller"
 # Authorization Code with PKCE S256 and no password grant: STD-IAM-001 3.2 prohibits that grant, and
 # a direct grant carries no auth_time, which a provider-scope token must (STD-IAM-002 3.2).
 # scripts/dev-token.ps1 drives the real flow without a browser. The access token lifetime is 240
@@ -151,11 +201,12 @@ $callerClientId = Upsert-Client @{
     standardFlowEnabled       = $true
     directAccessGrantsEnabled = $false
     redirectUris              = @("http://127.0.0.1:8099/callback")
-    secret                    = $callerSecret
-    attributes                = @{
+    clientAuthenticatorType   = "client-jwt"
+    attributes                = $keyAttributes + @{
         "access.token.signed.response.alg" = "PS256"
         "pkce.code.challenge.method"       = "S256"
         "access.token.lifespan"            = "240"
+        "jwks.string"                      = (Get-ClientJWKS "identity-control-caller")
     }
 }
 
@@ -187,7 +238,8 @@ Write-Host "      scnehaux-provider attached"
 
 Write-Host ""
 Write-Host "keycloak ready."
-Write-Host "  service client   identity-control (manage-users, view-users)"
-Write-Host "  caller client    identity-control-caller (Authorization Code + PKCE S256, scnehaux-provider, L0)"
+Write-Host "  service client   identity-control (manage-users, view-users), key $keyDir\identity-control.pem"
+Write-Host "  registration     identity-control-registration (manage-clients, view-clients, view-events), key $keyDir\identity-control-registration.pem"
+Write-Host "  caller client    identity-control-caller (Authorization Code + PKCE S256, scnehaux-provider, L0), key $keyDir\identity-control-caller.pem"
 Write-Host ""
 Write-Host "No user exists yet. Next: ./scripts/dev-database.ps1 then ./scripts/dev-bootstrap.ps1"

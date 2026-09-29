@@ -49,8 +49,12 @@ jobs:
             echo "KC_BOOTSTRAP_ADMIN_PASSWORD=$(openssl rand -hex 16)"
           } > .env
           docker compose -f compose.yaml -f compose.ci.yaml up -d --wait --wait-timeout 300
+          # realm-apply's service account authenticates with its own key; the key belongs to the
+          # runner here because realm-apply runs on the runner below, not in its container.
+          bash ./new-client-key.sh realm-apply ./keys "$(id -u):$(id -g)"
           bash ./create-apply-client.sh > "$RUNNER_TEMP/kernel-client.env"
           set -a; . "$RUNNER_TEMP/kernel-client.env"; set +a
+          export KEYCLOAK_ADMIN_CLIENT_KEY_FILE="$PWD/keys/realm-apply.pem"
           cd ../..
           go run ./cmd/realm-apply -environment development -url http://localhost:8080 -apply
 
@@ -66,6 +70,11 @@ jobs:
             echo "KERNEL_KEYCLOAK_CONTAINER=scnehaux-identity-dev-keycloak-1"
             echo "KC_BOOTSTRAP_ADMIN_USERNAME=admin"
             echo "KC_BOOTSTRAP_ADMIN_PASSWORD=$kernel_password"
+            # The kernel's key tools, and the owner of this service's private keys. The runner
+            # owns them here, and the containers run as the runner, so dev-credential-split.ps1
+            # can sign with the same keys the service does.
+            echo "KERNEL_DEPLOY_DIR=$GITHUB_WORKSPACE/.kernel/deploy/dev"
+            echo "KEYS_OWNER=$(id -u):$(id -g)"
             # Short enough that Proof B sees the schedule run within the job.
             echo "IDENTITY_REGISTRATION_RECONCILE_INTERVAL=20s"
           } > .env
@@ -94,6 +103,8 @@ jobs:
         run: |
           set -a; . deploy/dev/.env; set +a
           export KC_ADMIN_URL=http://localhost:8080
+          export IDENTITY_KEYCLOAK_CLIENT_KEY_FILE="$PWD/deploy/dev/keys/identity-control.pem"
+          export IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_KEY_FILE="$PWD/deploy/dev/keys/identity-control-registration.pem"
           pwsh -NoProfile -File scripts/dev-credential-split.ps1
 
       - name: build, migrate, and start the service

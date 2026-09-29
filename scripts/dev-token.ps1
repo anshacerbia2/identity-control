@@ -27,6 +27,7 @@
 
 Add-Type -AssemblyName System.Web
 Set-StrictMode -Version Latest
+. "$PSScriptRoot\client-assertion.ps1"
 
 # Add-LoopbackCookies copies Set-Cookie values into the session with Secure cleared.
 #
@@ -67,7 +68,9 @@ function Get-ScnehauxToken {
         [string] $KcBase   = $(if ($env:KC_BASE_URL) { $env:KC_BASE_URL } else { "http://127.0.0.1:8081" }),
         [string] $Realm    = $(if ($env:KC_REALM) { $env:KC_REALM } else { "scnehaux" }),
         [string] $ClientId = "identity-control-caller",
-        [Parameter(Mandatory = $true)] [string] $ClientSecret,
+        # The caller's private key. The code is exchanged with an assertion signed by it; the
+        # client holds no secret (ADR-IAM-001 §5.12).
+        [Parameter(Mandatory = $true)] [string] $KeyFile,
         [string] $RedirectUri = "http://127.0.0.1:8099/callback"
     )
 
@@ -177,14 +180,16 @@ function Get-ScnehauxToken {
     $code = $query["code"]
     if (-not $code) { throw "no authorization code in the redirect" }
 
+    $assertion = New-ClientAssertion -KeyFile $KeyFile -ClientId $ClientId -Audience (Get-RealmIssuer $KcBase $Realm)
     $token = Invoke-RestMethod -Method Post -ContentType "application/x-www-form-urlencoded" `
         -Uri "$KcBase/realms/$Realm/protocol/openid-connect/token" -Body @{
-            grant_type    = "authorization_code"
-            code          = $code
-            redirect_uri  = $RedirectUri
-            client_id     = $ClientId
-            client_secret = $ClientSecret
-            code_verifier = $verifier
+            grant_type            = "authorization_code"
+            code                  = $code
+            redirect_uri          = $RedirectUri
+            client_id             = $ClientId
+            client_assertion_type = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+            client_assertion      = $assertion
+            code_verifier         = $verifier
         }
     return $token.access_token
 }

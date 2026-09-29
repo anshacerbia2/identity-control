@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-001
   title: Canonical Principal Identifier and Creation Path
   owner: Core Platform Team
-  version: 1.5.0
+  version: 1.5.1
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-10
-  last_reviewed: 2026-09-28
+  last_reviewed: 2026-09-30
   parent_sad: SAD-001
 ---
 
@@ -570,13 +570,18 @@ outcome is pre-decided so a partial result requires no unplanned amendment:
 | `IDENTITY_KEYCLOAK_BASE_URL` | none, required | Admin API base URL |
 | `IDENTITY_KEYCLOAK_REALM` | none, required | Target realm |
 | `IDENTITY_KEYCLOAK_CLIENT_ID` | none, required | Service account client used for administration |
+| `IDENTITY_KEYCLOAK_CLIENT_KEY_FILE` | none, required | That client's PEM private key. It authenticates by signed JWT and has no secret |
 | `IDENTITY_PROVISION_TIMEOUT` | `10s` | Upper bound on a single Admin API call |
 | `IDENTITY_PENDING_RECOVERY_AFTER` | `60s` | Age at which a pending mapping enters recovery |
 | `IDENTITY_RECONCILE_INTERVAL` | `15m` | Sweep cadence |
 | `IDENTITY_RECONCILE_PAGE_SIZE` | `200` | Admin API pagination size |
 
-The administration client credential is sourced from the approved secret manager and
-is never present in application configuration or source control.
+The administration client credential is a private key (`ADR-IAM-001 §5.12`). It is sourced from
+the approved secret manager as a file, and is never present in application configuration or
+source control. The kernel holds only its public half, so neither the kernel's database nor its
+administrators can read anything that authenticates as this service. The assertion's audience is
+read from the realm's discovery, because this service reaches the kernel on an internal address
+while the issuer is the public one.
 
 ## Testing Strategy
 

@@ -35,9 +35,10 @@ cp .env.example .env
 #   KEYCLOAK_ISSUER           the kernel's issuer, as its discovery document states it
 #   POSTGRES_PASSWORD, IDENTITY_APP_PASSWORD, IDENTITY_CALLER_PASSWORD
 #   KC_BOOTSTRAP_ADMIN_PASSWORD, copied from the kernel's deploy/dev/.env
+#   KERNEL_DEPLOY_DIR         the kernel checkout's deploy/dev, whose key tools the scripts use
 
-./create-kernel-clients.sh                   # prints two secrets; put both into .env
-./create-registration-client.sh              # prints one secret; put it into .env
+./create-kernel-clients.sh >> .env           # both clients, each with its own key in ./keys
+./create-registration-client.sh              # the registration client, with its key
 docker compose up -d --build
 curl -fsS http://127.0.0.1:8082/readyz       # ready once the migration job has succeeded
 
@@ -90,7 +91,7 @@ its own database would break three things:
 - **Ceremony:** its bootstrap ceremony would collide with the existing `bootstrap-operator`.
 
 So a laptop does not run a second authority. It runs a second *replica* of this one: the server's
-Control Database, the server's client secret, and the server's Keycloak. The service is built for
+Control Database, the server's clients, and the server's Keycloak. The service is built for
 several replicas, because idempotency and the outbox live in the database. Migrations stay with the
 server's migration job, so the laptop needs no Postgres and no Atlas.
 
@@ -109,9 +110,31 @@ docker compose up -d
 devtunnel port create <tunnel> -p 5433      # no --anonymous: owner-only
 ```
 
+**The laptop signs with its own keys, never the server's.** No client has a secret, and a private
+key never leaves the host that made it (ADR-IAM-001 §5.12). So the laptop makes a key pair for each
+Admin API client and sends only the public halves to whoever operates the server:
+
+```powershell
+cd ../identity-kernel
+go run ./cmd/client-key new -out ../identity-control/deploy/dev/keys/identity-control.pem
+go run ./cmd/client-key new -out ../identity-control/deploy/dev/keys/identity-control-registration.pem
+# send deploy/dev/keys/*.jwk.json to the server's operator
+```
+
+The operator installs each laptop key beside the server's own. A client accepts at most two keys, so
+this cannot overlap a rotation. The operator runs, from the kernel's `deploy/dev`:
+
+```sh
+./set-client-key.sh scnehaux identity-control /srv/identity-control/deploy/dev/keys/identity-control.jwk.json laptop-identity-control.jwk.json
+./set-client-key.sh scnehaux identity-control-registration /srv/identity-control/deploy/dev/keys/identity-control-registration.jwk.json laptop-identity-control-registration.jwk.json
+```
+
+When the laptop is done, the operator installs the server's key alone again, and the laptop's
+keys stop working.
+
 On the laptop, forward the tunnel's ports to localhost and keep that running. That forwards
 `8081` (Keycloak's private port) and `5433` (the Control Database). Then run the service with the
-server's values from `deploy/dev/.env`:
+server's values from `deploy/dev/.env` and the laptop's own keys:
 
 ```powershell
 devtunnel connect <tunnel>
@@ -121,9 +144,9 @@ $env:IDENTITY_LISTEN_ADDRESS         = ':8090'
 $env:IDENTITY_KEYCLOAK_REALM         = 'scnehaux'
 $env:IDENTITY_KEYCLOAK_BASE_URL      = 'http://localhost:8081'
 $env:IDENTITY_KEYCLOAK_CLIENT_ID     = 'identity-control'
-$env:IDENTITY_KEYCLOAK_CLIENT_SECRET = '<IDENTITY_KEYCLOAK_CLIENT_SECRET>'
-$env:IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID     = 'identity-control-registration'
-$env:IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_SECRET = '<IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_SECRET>'
+$env:IDENTITY_KEYCLOAK_CLIENT_KEY_FILE = (Resolve-Path deploy/dev/keys/identity-control.pem).Path
+$env:IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID       = 'identity-control-registration'
+$env:IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_KEY_FILE = (Resolve-Path deploy/dev/keys/identity-control-registration.pem).Path
 $env:IDENTITY_TOKEN_ISSUER           = '<KEYCLOAK_ISSUER>'
 $env:IDENTITY_TOKEN_AUDIENCE         = 'identity-control'
 $env:IDENTITY_JWKS_URL               = 'http://localhost:8081/realms/scnehaux/protocol/openid-connect/certs'
@@ -132,8 +155,8 @@ go run ./cmd/identity-control
 
 - **Keycloak:** the Admin API must be reached on the private port. The public port refuses
   `/admin` to everyone, which is what keeps it off the internet.
-- **Do not run `scripts/dev-keycloak.ps1` against this realm.** It sets the clients' secrets from
-  your environment, and the server's replica would lose access to Keycloak. The clients are already
+- **Do not run `scripts/dev-keycloak.ps1` against this realm.** It replaces the clients' keys with
+  the laptop's, and the server's replica would lose access to Keycloak. The clients are already
   registered, by `create-kernel-clients.sh`.
 - **Do not run the ceremony again.** It succeeded once, on the server, and belongs to this Control
   Database.
@@ -162,8 +185,44 @@ one. Add it once, without rerunning `create-kernel-clients.sh`:
 
 ```sh
 cd identity-control/deploy/dev
-./create-registration-client.sh >> .env      # refuses if the client already exists
-```n
-It creates `identity-control-registration` and changes nothing else in the realm. Run it again
-and it refuses, because the secret cannot be read back and replacing it would cut off whatever
-holds it.
+./create-registration-client.sh              # refuses if the client already exists
+```
+
+It creates `identity-control-registration` and its key, and changes nothing else in the realm. Run
+it again and it refuses. A key is replaced by a rotation, below, never by a rerun.
+
+## Keys, and moving a server from secrets to keys
+
+Every client of this service authenticates with its own key by signed JWT. The private keys live
+in `./keys`, mode 0600, owned by `KEYS_OWNER`: the service's container user, 65532 unless `.env`
+says otherwise. The kernel holds only the public halves. `identity-kernel/deploy/dev/README.md`
+documents its two tools, `new-client-key.sh` and `set-client-key.sh`.
+
+**A server stood up with client secrets** moves once. Each client stops authenticating between its
+`set-client-key.sh` and the rebuild, so run the steps together. From this directory, after `git
+pull`:
+
+```sh
+k="$KERNEL_DEPLOY_DIR"   # after: set -a; . ./.env; set +a
+mkdir -p keys
+"$k/new-client-key.sh" identity-control "$PWD/keys" "${KEYS_OWNER:-65532:65532}"
+"$k/new-client-key.sh" identity-control-registration "$PWD/keys" "${KEYS_OWNER:-65532:65532}"
+"$k/new-client-key.sh" identity-control-caller "$PWD/keys" "$(id -u):$(id -g)"
+"$k/set-client-key.sh" scnehaux identity-control "$PWD/keys/identity-control.jwk.json"
+"$k/set-client-key.sh" scnehaux identity-control-registration "$PWD/keys/identity-control-registration.jwk.json"
+"$k/set-client-key.sh" scnehaux identity-control-caller "$PWD/keys/identity-control-caller.jwk.json"
+# .env: delete IDENTITY_KEYCLOAK_CLIENT_SECRET, IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_SECRET and
+# IDENTITY_CALLER_SECRET; add KERNEL_DEPLOY_DIR, and IDENTITY_CALLER_KEY_FILE=$PWD/keys/identity-control-caller.pem
+docker compose up -d --build
+curl -fsS http://127.0.0.1:8082/readyz
+```
+
+**Rotating a key.**
+
+1. Make the new pair under a new name, for example `identity-control-next`.
+2. Install both public keys, the current one and the new one.
+3. Move the new pair over the current file names (`identity-control.pem` and `.jwk.json`).
+4. Restart the service.
+5. Install the new public key alone.
+
+The service is never without an accepted key while this runs.
