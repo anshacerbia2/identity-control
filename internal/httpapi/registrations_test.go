@@ -59,6 +59,13 @@ func (s *stubReconciler) GrantException(_ context.Context, exception reconcile.E
 	return exception, s.grantErr
 }
 
+func (s *stubReconciler) ExceptionsFor(_ context.Context, registration id.UUID) ([]reconcile.Exception, error) {
+	if s.statusErr != nil {
+		return nil, s.statusErr
+	}
+	return []reconcile.Exception{{Registration: registration, FieldClass: reconcile.RedirectURIs, Actor: "admin-user"}}, nil
+}
+
 func registrationsHandler(t *testing.T, stub *stubReconciler) http.Handler {
 	t.Helper()
 	registrations, err := httpapi.NewRegistrations(&stubRegistrar{}, stub)
@@ -95,6 +102,7 @@ func TestEveryDriftRouteRequiresAnAuthenticatedPrincipal(t *testing.T) {
 		httptest.NewRequest(http.MethodGet, "/v1/registrations:drift", nil),
 		httptest.NewRequest(http.MethodPost, "/v1/registrations:reconcile", nil),
 		httptest.NewRequest(http.MethodPost, "/v1/registrations/"+mustUUID(t).String()+"/drift-exceptions", strings.NewReader(`{}`)),
+		httptest.NewRequest(http.MethodGet, "/v1/registrations/"+mustUUID(t).String()+"/drift-exceptions", nil),
 	} {
 		if w := serve(handler, r); w.Code != http.StatusUnauthorized {
 			t.Errorf("%s %s answered %d without a caller, want 401", r.Method, r.URL.Path, w.Code)
@@ -242,6 +250,43 @@ func TestADriftExceptionRefusesWhatItCannotGrant(t *testing.T) {
 		"no such registration":     {path, valid, &stubReconciler{grantErr: reconcile.ErrNoSuchRegistration}, http.StatusNotFound},
 	} {
 		r, _ := asPrincipal(t, httptest.NewRequest(http.MethodPost, c.path, strings.NewReader(c.body)))
+		if w := serve(registrationsHandler(t, c.stub), r); w.Code != c.want {
+			t.Errorf("%s answered %d, want %d", name, w.Code, c.want)
+		}
+	}
+}
+
+func TestARegistrationsDriftExceptionsAreReported(t *testing.T) {
+	registrationID := mustUUID(t)
+	path := "/v1/registrations/" + registrationID.String() + "/drift-exceptions"
+	r, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, path, nil))
+	w := serve(registrationsHandler(t, &stubReconciler{}), r)
+	var body struct {
+		Exceptions []struct {
+			Registration string `json:"registration_id"`
+			FieldClass   string `json:"field_class"`
+			Actor        string `json:"actor"`
+		} `json:"exceptions"`
+	}
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", w.Code, w.Body)
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Exceptions) != 1 || body.Exceptions[0].Registration != registrationID.String() ||
+		body.Exceptions[0].FieldClass != "redirect_uris" || body.Exceptions[0].Actor != "admin-user" {
+		t.Errorf("exceptions: %s", w.Body)
+	}
+	for name, c := range map[string]struct {
+		path string
+		stub *stubReconciler
+		want int
+	}{
+		"a malformed id": {"/v1/registrations/nope/drift-exceptions", &stubReconciler{}, http.StatusBadRequest},
+		"a failed read":  {path, &stubReconciler{statusErr: errors.New("database down")}, http.StatusInternalServerError},
+	} {
+		r, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, c.path, nil))
 		if w := serve(registrationsHandler(t, c.stub), r); w.Code != c.want {
 			t.Errorf("%s answered %d, want %d", name, w.Code, c.want)
 		}

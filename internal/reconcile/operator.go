@@ -350,6 +350,55 @@ func (r *Reconciler) GrantException(ctx context.Context, exception Exception, la
 	return exception, nil
 }
 
+const registrationExceptionsStatement = `SELECT exception_id::text, registration_id::text, field_class, actor, reason,
+       granted_by::text, granted_at, expires_at
+FROM identity.drift_exception
+WHERE registration_id = $1
+ORDER BY granted_at DESC
+LIMIT 100`
+
+// ExceptionsFor is one registration's drift exceptions, newest first, expired ones included: who
+// was allowed to change what in the console, why, and until when. An expired exception stays the
+// record of why a sanctioned finding was left in place.
+func (r *Reconciler) ExceptionsFor(ctx context.Context, registration id.UUID) ([]Exception, error) {
+	var out []Exception
+	err := r.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		// Reset on every attempt, in case the transaction is retried.
+		out = []Exception{}
+		rows, err := tx.Query(ctx, registrationExceptionsStatement, registration.String())
+		if err != nil {
+			return fmt.Errorf("reconcile: read drift exceptions: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var (
+				rawException, rawRegistration, field, rawGrantedBy string
+				exception                                          Exception
+			)
+			if err := rows.Scan(&rawException, &rawRegistration, &field, &exception.Actor, &exception.Reason,
+				&rawGrantedBy, &exception.GrantedAt, &exception.ExpiresAt); err != nil {
+				return fmt.Errorf("reconcile: scan drift exception: %w", err)
+			}
+			if exception.ID, err = id.Parse(rawException); err != nil {
+				return err
+			}
+			if exception.Registration, err = id.Parse(rawRegistration); err != nil {
+				return err
+			}
+			if exception.GrantedBy, err = id.Parse(rawGrantedBy); err != nil {
+				return err
+			}
+			exception.FieldClass = FieldClass(field)
+			out = append(out, exception)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // latestByClient is the newest admin event on each client that this service did not cause. The
 // reconciler's own repairs are admin events too, and attributing a divergence to them would name
 // the reconciler as the one who made the change it is repairing.

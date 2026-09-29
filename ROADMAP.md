@@ -401,7 +401,7 @@ Acceptance criteria, also from RESPONSE-4 §4:
    sweeps at a time. `GET /v1/registrations:drift` reports the last run and the open findings.
    `POST /v1/registrations:reconcile` sweeps now, and with a reason applies desired state to named
    blocked or unattributed findings. `POST /v1/registrations/{id}/drift-exceptions` grants up to 24
-   hours. Two field classes are compared: `token_lifespan` and `redirect_uris`. An absent client
+   hours, and `GET` on the same path lists them, expired ones included. Two field classes are compared: `token_lifespan` and `redirect_uris`. An absent client
    is reported, not recreated, and no client is treated as unmanaged until step 5 registers them
    (TDD-003 §Drift Reconciliation).
 5. ✅ Build the registration API: `POST /v1/registrations` (with an Idempotency-Key),
