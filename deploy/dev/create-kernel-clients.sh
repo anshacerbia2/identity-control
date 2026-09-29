@@ -31,7 +31,7 @@ set -a
 . ./.env
 set +a
 
-kernel="${KERNEL_DEPLOY_DIR:?set KERNEL_DEPLOY_DIR in .env to the kernel checkout's deploy/dev}"
+kernel="${KERNEL_DEPLOY_DIR:?set KERNEL_DEPLOY_DIR in .env to the deploy/dev directory of the kernel checkout}"
 container="${KERNEL_KEYCLOAK_CONTAINER:-scnehaux-identity-dev-keycloak-1}"
 owner="${KEYS_OWNER:-65532:65532}"
 realm=scnehaux
