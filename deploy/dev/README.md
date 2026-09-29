@@ -73,9 +73,23 @@ the API with it. They are the same scripts CI runs:
 
 ```sh
 set -a; . deploy/dev/.env; set +a
-export IDENTITY_API_URL=http://127.0.0.1:8082 KC_BASE_URL=http://127.0.0.1:8081   # the kernel's private port
+# KC_BASE_URL is the kernel's public origin: the origin of KEYCLOAK_ISSUER, which is the tunnel host in tunnel mode
+export IDENTITY_API_URL=http://127.0.0.1:8082 KC_BASE_URL=https://<KEYCLOAK_HOSTNAME>
 pwsh ./scripts/dev-smoke.ps1
 ```
+
+**Log in on the public origin, never the private port.** Keycloak's hostname is fixed, so its
+login form always posts to the public origin. A login started on `http://127.0.0.1:8081` stores
+its session cookie for `127.0.0.1`, and the form's post then goes to the tunnel host without it.
+Keycloak answers "Restart login cookie not found". CI uses `https://localhost` because that is
+its kernel's public origin. The private port is for Admin API calls from code only.
+
+The scripts need PowerShell 7 (`pwsh`). A server without it can run the same flow in another
+language. The steps are:
+
+1. Authorization Code with PKCE `S256` on the public origin.
+2. Exchange the code with a PS256 assertion signed by `IDENTITY_CALLER_KEY_FILE`.
+3. Call the API.
 
 To call the API from off the server, add port `8082` to the tunnel. Keep it owner-only unless
 something else must reach it. Every mutation is refused without a provider-scope token either way.
