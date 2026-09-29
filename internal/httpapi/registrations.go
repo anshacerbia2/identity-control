@@ -29,6 +29,7 @@ type Reconciler interface {
 	Sweep(ctx context.Context) (reconcile.Run, error)
 	Resolve(ctx context.Context, resolution reconcile.Resolution) error
 	GrantException(ctx context.Context, exception reconcile.Exception, lasting time.Duration) (reconcile.Exception, error)
+	ExceptionsFor(ctx context.Context, registration id.UUID) ([]reconcile.Exception, error)
 }
 
 // Registrar is the registration path (TDD-identity-control-003 §Registration Path).
@@ -344,6 +345,26 @@ func (h *Registrations) GrantException(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, exception)
+}
+
+// Exceptions handles GET /v1/registrations/{registration_id}/drift-exceptions: that client's drift
+// exceptions, newest first, expired ones included.
+func (h *Registrations) Exceptions(w http.ResponseWriter, r *http.Request) {
+	if _, ok := callerPrincipal(r); !ok {
+		httpapi.Problem(w, r, httpapi.AuthenticationRequired, "The request carries no authenticated caller")
+		return
+	}
+	registrationID, err := id.Parse(r.PathValue("registration_id"))
+	if err != nil {
+		httpapi.Problem(w, r, httpapi.ValidationFailed, "registration_id is not a valid identifier")
+		return
+	}
+	exceptions, err := h.reconciler.ExceptionsFor(r.Context(), registrationID)
+	if err != nil {
+		httpapi.Problem(w, r, httpapi.Internal, "The drift exceptions could not be read")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"exceptions": exceptions})
 }
 
 func writeReconcileError(w http.ResponseWriter, r *http.Request, err error) {

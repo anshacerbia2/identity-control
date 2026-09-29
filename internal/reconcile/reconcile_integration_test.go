@@ -318,6 +318,21 @@ func TestASanctionedChangeIsRepairedOnceItsExceptionExpires(t *testing.T) {
 	if len(f) != 1 || f[0].class != string(Repaired) || f[0].actor != admin || f[0].convergedAt == nil {
 		t.Errorf("findings = %+v, want the same finding repaired and still attributed to %s", f, admin)
 	}
+
+	// The expired exception is still listed, as the record of why the change was left in place, and
+	// a later one is listed before it.
+	if _, err := h.reconciler.GrantException(context.Background(), Exception{Registration: caller.id,
+		FieldClass: RedirectURIs, Actor: admin, Reason: "second fix", GrantedBy: grantor}, time.Hour); err != nil {
+		t.Fatalf("grant a second exception: %v", err)
+	}
+	listed, err := h.reconciler.ExceptionsFor(context.Background(), caller.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 2 || listed[0].FieldClass != RedirectURIs || listed[1].FieldClass != TokenLifespan ||
+		listed[1].Reason != "load test" || listed[1].GrantedBy != grantor || !listed[1].ExpiresAt.Before(h.clock.now()) {
+		t.Errorf("exceptions = %+v, want the second, then the expired first", listed)
+	}
 }
 
 // Another administrator's change is not covered by an exception naming someone else.

@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-003
   title: Protocol Client and Protected-Resource Registration
   owner: Core Platform Team
-  version: 1.8.0
+  version: 1.9.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -335,6 +335,7 @@ POST   /v1/registrations/{registration_id}:retire
 POST   /v1/registrations/{registration_id}/credentials:rotate
 POST   /v1/registrations/{registration_id}/credentials/{credential_id}:revoke
 POST   /v1/registrations/{registration_id}/drift-exceptions
+GET    /v1/registrations/{registration_id}/drift-exceptions
 GET    /v1/registrations/{registration_id}/findings
 GET    /v1/registrations:drift
 POST   /v1/registrations:reconcile
@@ -359,6 +360,14 @@ findings (`/findings`, newest first), are where its convergence time is read. `P
 `X-Administrative-Reason` and the ids of open `blocked`, `unattributed` or `missing` findings, it
 also applies desired state to those, which a scheduled sweep never does on its own.
 The reason and the caller are recorded on the finding.
+
+`GET /v1/registrations/{registration_id}/drift-exceptions` lists that registration's drift
+exceptions, newest first, at most 100: `{"exceptions": [...]}`, each with the field class,
+the Keycloak user it names, the reason, the granting Principal, and its window. Expired
+exceptions are listed too. An expired exception is the record of why a `sanctioned`
+finding was left in place, and the table keeps it for that reason. Whether one is still in
+force is `expires_at` against now, which the caller compares. An unknown registration
+lists nothing rather than answering 404, as `/findings` does.
 
 `POST /v1/registrations` and `:rotate` are the only responses that ever carry a secret
 value, and each carries it exactly once. A subsequent `GET` returns the registration
