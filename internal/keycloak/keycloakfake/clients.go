@@ -27,8 +27,9 @@ type Registry struct {
 
 	// FailGet and FailPatch are returned by their operations when set. keycloak.ErrUnavailable in
 	// FailGet is an unreachable kernel.
-	FailGet   error
-	FailPatch error
+	FailGet    error
+	FailPatch  error
+	FailDelete error
 
 	// FailEvents is returned by ClientAdminEvents when set. keycloak.ErrForbidden is a credential
 	// without view-events.
@@ -62,6 +63,7 @@ type Registry struct {
 	serviceAccounts map[keycloak.ClientUUID]keycloak.User
 	defaultScopes   map[keycloak.ClientUUID][]string
 	events          []keycloak.AdminEvent
+	deletes         int
 }
 
 // NewRegistry returns an empty registry acting as the given service account.
@@ -96,6 +98,37 @@ func (r *Registry) Remove(actor string, client keycloak.ClientUUID) {
 	delete(r.clients, client)
 	r.events = append(r.events, keycloak.AdminEvent{Time: r.now(), OperationType: "DELETE",
 		ResourcePath: "clients/" + string(client), UserID: actor})
+}
+
+// Deletes counts the clients deleted through DeleteClient, for a test's assertions.
+func (r *Registry) Deletes() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.deletes
+}
+
+// DeleteClient deletes a client and its service-account user, as the kernel does, recording the admin
+// event under this registry's own service account.
+func (r *Registry) DeleteClient(ctx context.Context, _ keycloak.Realm, client keycloak.ClientUUID) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.FailDelete != nil {
+		return r.FailDelete
+	}
+	if _, ok := r.clients[client]; !ok {
+		return keycloak.ErrNotFound
+	}
+	delete(r.clients, client)
+	delete(r.specs, client)
+	delete(r.serviceAccounts, client)
+	delete(r.defaultScopes, client)
+	r.deletes++
+	r.events = append(r.events, keycloak.AdminEvent{Time: r.now(), OperationType: "DELETE",
+		ResourcePath: "clients/" + string(client), UserID: r.ServiceAccount})
+	return nil
 }
 
 // ConsoleChange changes a client as the named user would in the console, recording the admin
@@ -157,6 +190,9 @@ func (r *Registry) PatchClient(ctx context.Context, _ keycloak.Realm, client key
 	}
 	if patch.AccessTokenLifespan != nil {
 		stored.AccessTokenLifespan = *patch.AccessTokenLifespan
+	}
+	if patch.NotBefore != nil {
+		stored.NotBefore = *patch.NotBefore
 	}
 	if patch.Keys != nil {
 		spec := r.specs[client]

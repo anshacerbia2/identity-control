@@ -73,6 +73,8 @@ func newHarness(t *testing.T) *harness {
 			   (SELECT registration_id FROM identity.client_registration WHERE realm = $1)`,
 			`DELETE FROM identity.registration_adoption WHERE registration_id IN
 			   (SELECT registration_id FROM identity.client_registration WHERE realm = $1)`,
+			`DELETE FROM identity.registration_state_change WHERE registration_id IN
+			   (SELECT registration_id FROM identity.client_registration WHERE realm = $1)`,
 			`DELETE FROM identity.registration_finding WHERE registration_id IS NULL AND $1 <> ''`,
 			`DELETE FROM identity.reconcile_run WHERE $1 <> ''`,
 			`DELETE FROM identity.client_registration WHERE realm = $1`,
@@ -925,5 +927,136 @@ func TestAnUnmanagedFindingConvergesOnceTheClientIsRegistered(t *testing.T) {
 	h.sweep()
 	if f := h.findings("kc-stray-app"); len(f) != 1 || f[0].convergedAt == nil {
 		t.Errorf("after the client was registered its finding is %+v, want converged", f)
+	}
+}
+
+// lifecycle is the registration service over the harness's tables and kernel, for the tests that
+// suspend, restore or retire a registration the harness stored.
+func (h *harness) lifecycle() *clientregistration.Service {
+	h.t.Helper()
+	service, err := clientregistration.New(h.pool, h.kernel, clientregistration.Config{Realm: realm,
+		CallTimeout: time.Second, PendingRecoveryAfter: time.Minute}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	return service
+}
+
+func (h *harness) stop(registrationID id.UUID) clientregistration.StateChange {
+	return clientregistration.StateChange{RegistrationID: registrationID, ChangedBy: registrationID, Reason: "contain it"}
+}
+
+// A suspended client enabled again in the console is disabled again by the next sweep, attributed or
+// not, and its other field classes are left for the restore.
+func TestASuspendedClientIsHeldDisabled(t *testing.T) {
+	h := newHarness(t)
+	caller := h.caller()
+	h.sweep()
+	service := h.lifecycle()
+	if _, err := service.Suspend(context.Background(), h.stop(caller.id)); err != nil {
+		t.Fatal(err)
+	}
+	notBefore := h.live(caller.client).NotBefore
+
+	for _, actor := range []string{admin, ""} {
+		h.tick(time.Second)
+		h.kernel.ConsoleChange(actor, caller.client, func(c *keycloak.Client) {
+			c.Enabled, c.NotBefore = true, 0
+			c.RedirectURIs = []string{takeoverURI}
+		})
+		h.tick(time.Second)
+		if run := h.sweep(); run.Outcome != Drift {
+			t.Errorf("actor %q: run = %+v, want drift", actor, run)
+		}
+		if live := h.live(caller.client); live.Enabled || live.NotBefore != notBefore {
+			t.Errorf("actor %q: the suspended client is enabled %v with not-before %d, want disabled at %d", actor,
+				live.Enabled, live.NotBefore, notBefore)
+		}
+	}
+	var suspension int
+	for _, f := range h.findings(caller.client) {
+		switch {
+		case f.field == string(Suspension) && f.class == string(Repaired) && f.convergedAt != nil:
+			suspension++
+		case f.field == string(Suspension):
+			t.Errorf("a suspension finding is %s, converged %v", f.class, f.convergedAt)
+		default:
+			t.Errorf("a suspended registration was compared for %s", f.field)
+		}
+	}
+	if suspension != 2 {
+		t.Errorf("%d converged suspension repairs, want 2", suspension)
+	}
+	h.tick(time.Minute)
+	if run := h.sweep(); run.Outcome != Converged {
+		t.Errorf("a sweep of a held suspension answered %+v, want converged", run)
+	}
+}
+
+// An operator's reconcile does not lift a suspended client's block: it would enable the client. The
+// restore does, and resolves the block with the caller and the reason.
+func TestARestoreLiftsTheBlockOfASuspendedClient(t *testing.T) {
+	h := newHarness(t)
+	caller := h.caller()
+	h.sweep()
+	h.tick(time.Second)
+	h.kernel.ConsoleChange(admin, caller.client, func(c *keycloak.Client) {
+		c.RedirectURIs = append(c.RedirectURIs, takeoverURI)
+	})
+	h.tick(time.Second)
+	h.sweep()
+	blocked := h.findings(caller.client)[0]
+
+	service := h.lifecycle()
+	if _, err := service.Suspend(context.Background(), h.stop(caller.id)); err != nil {
+		t.Fatal(err)
+	}
+	operator, _ := id.NewV7()
+	if err := h.reconciler.Resolve(context.Background(), Resolution{Findings: []id.UUID{blocked.id}, ResolvedBy: operator,
+		Reason: "lift it"}); !errors.Is(err, ErrNotResolvable) {
+		t.Fatalf("resolving a suspended client's block answered %v, want ErrNotResolvable", err)
+	}
+
+	if _, err := service.Restore(context.Background(), h.stop(caller.id)); err != nil {
+		t.Fatal(err)
+	}
+	live := h.live(caller.client)
+	if !live.Enabled || !slices.Equal(live.RedirectURIs, []string{callbackURI}) {
+		t.Errorf("the restored client = %+v, want enabled with its registered redirect URI", live)
+	}
+	if f := h.findings(caller.client)[0]; f.convergedAt == nil || f.resolvedBy != caller.id.String() {
+		t.Errorf("the block after the restore = %+v, want resolved by the restoring caller", f)
+	}
+	h.tick(time.Minute)
+	if run := h.sweep(); run.Outcome != Converged {
+		t.Errorf("the sweep after the restore answered %+v, want converged", run)
+	}
+}
+
+// A retired registration's open findings converge: its client is deleted, and nothing compares it
+// again.
+func TestARetiredRegistrationsFindingsConverge(t *testing.T) {
+	h := newHarness(t)
+	caller := h.caller()
+	h.sweep()
+	h.tick(time.Second)
+	h.kernel.Remove(admin, caller.client)
+	h.tick(time.Second)
+	h.sweep()
+	if f := h.findings(caller.client); len(f) != 1 || f[0].class != string(Missing) || f[0].convergedAt != nil {
+		t.Fatalf("findings = %+v, want one open missing finding", f)
+	}
+
+	service := h.lifecycle()
+	if _, err := service.Suspend(context.Background(), h.stop(caller.id)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Retire(context.Background(), h.stop(caller.id)); err != nil {
+		t.Fatal(err)
+	}
+	h.tick(time.Minute)
+	h.sweep()
+	if f := h.findings(caller.client); len(f) != 1 || f[0].convergedAt == nil {
+		t.Errorf("findings after the retirement = %+v, want the missing finding converged", f)
 	}
 }

@@ -214,10 +214,17 @@ func (r *Reconciler) Resolve(ctx context.Context, resolution Resolution) error {
 					continue
 				}
 				for _, reg := range desired {
-					if reg.client == key.client {
-						targets = append(targets, target{findingID, reg, key.field})
-						found = true
+					if reg.client != key.client {
+						continue
 					}
+					if reg.state != "active" {
+						// Both a resolution and a recreation would enable the client of a suspended
+						// registration. A restore is the path that does (ADR-IAM-001 §5.13).
+						return fmt.Errorf("%w: %s is suspended; restoring it applies its desired state", ErrNotResolvable,
+							findingID)
+					}
+					targets = append(targets, target{findingID, reg, key.field})
+					found = true
 				}
 			}
 			if !found {

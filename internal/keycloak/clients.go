@@ -48,6 +48,12 @@ type Client struct {
 	// the JWKS held on it, and those keys. The reconciler compares it for a confidential or
 	// workload client (the client_keys field class).
 	Credential ClientCredential
+
+	// NotBefore is the client's revocation time in Unix seconds, and 0 when none is set. The kernel
+	// refuses a refresh token this client was issued before it, even after the client is enabled
+	// again, which a disable alone does not do (TDD-identity-control-003 §Suspension, Restoration,
+	// and Retirement).
+	NotBefore int64
 }
 
 // ClientCredential is a client's authentication configuration as the kernel holds it.
@@ -95,6 +101,9 @@ type ClientPatch struct {
 	// client by those keys alone (TDD-identity-control-003 §Client Key Rotation). An empty list is a
 	// client with no key, which authenticates as nothing: what revoking its last key means.
 	Keys *[]JWK
+
+	// NotBefore sets the client's revocation time, in Unix seconds.
+	NotBefore *int64
 }
 
 // JWK is one public key a confidential or workload client authenticates with: RSA, for signatures,
@@ -209,6 +218,10 @@ type ClientRegistry interface {
 
 	// DefaultClientScopes returns the names of the client's default client scopes.
 	DefaultClientScopes(ctx context.Context, realm Realm, client ClientUUID) ([]string, error)
+
+	// DeleteClient deletes a client, and with it its service-account user. It answers ErrNotFound
+	// for a client that does not exist, which a retirement retried after a deletion reads as done.
+	DeleteClient(ctx context.Context, realm Realm, client ClientUUID) error
 }
 
 // ClientSpec is a client built from desired state (TDD-identity-control-003 §Profiles). Exactly one
@@ -386,6 +399,9 @@ func (a *Admin) PatchClient(ctx context.Context, realm Realm, client ClientUUID,
 		attributes[AttrAccessTokenLifespan] = strconv.Itoa(*patch.AccessTokenLifespan)
 		representation["attributes"] = attributes
 	}
+	if patch.NotBefore != nil {
+		representation["notBefore"] = *patch.NotBefore
+	}
 	if patch.Keys != nil {
 		if len(*patch.Keys) > MaxClientKeys {
 			return fmt.Errorf("keycloak: a client holds at most %d keys", MaxClientKeys)
@@ -411,6 +427,20 @@ func (a *Admin) PatchClient(ctx context.Context, realm Realm, client ClientUUID,
 	return nil
 }
 
+// DeleteClient deletes one client. Not marked mutating: a repeat of a delete that took effect answers
+// 404, which the caller reads as done, so a lost response costs a repeated call and nothing more.
+func (a *Admin) DeleteClient(ctx context.Context, realm Realm, client ClientUUID) error {
+	if client == "" {
+		return errors.New("keycloak: a client identifier is required")
+	}
+	response, err := a.do(ctx, http.MethodDelete, a.clientPath(realm, client), nil, nil, false)
+	if err != nil {
+		return err
+	}
+	response.Close()
+	return nil
+}
+
 func (a *Admin) clientRepresentation(ctx context.Context, realm Realm, client ClientUUID) (map[string]any, error) {
 	response, err := a.do(ctx, http.MethodGet, a.clientPath(realm, client), nil, nil, false)
 	if err != nil {
@@ -429,6 +459,9 @@ func clientFrom(representation map[string]any) (Client, error) {
 	client.ID = ClientUUID(stringField(representation, "id"))
 	client.ClientID = stringField(representation, "clientId")
 	client.Enabled, _ = representation["enabled"].(bool)
+	if notBefore, ok := representation["notBefore"].(float64); ok {
+		client.NotBefore = int64(notBefore)
+	}
 	if uris, ok := representation["redirectUris"].([]any); ok {
 		for _, uri := range uris {
 			if value, ok := uri.(string); ok {

@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-003
   title: Protocol Client and Protected-Resource Registration
   owner: Core Platform Team
-  version: 1.15.0
+  version: 1.16.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -38,7 +38,7 @@ enforced.
 - Redirect URI, audience class, and signing-algorithm validation.
 - Client public-key registration, rotation, and revocation (`ADR-IAM-001 §5.12`).
 - Drift detection between desired state and Keycloak runtime state.
-- Deprovisioning.
+- Suspension, restoration, and retirement (`ADR-IAM-001 §5.13`).
 
 **Out of scope**
 
@@ -322,6 +322,31 @@ was enabled), and which repairable differences the adoption converged. The runti
 and reads it, and can neither update nor delete it (`grants.sql`), so the record of how a client
 came under management outlives whoever adopted it (`ADR-IAM-001 §5.12` rule 5).
 
+### Lifecycle Records
+
+```sql
+CREATE TABLE identity.registration_state_change (
+    change_id        UUID        PRIMARY KEY,
+    registration_id  UUID        NOT NULL REFERENCES identity.client_registration(registration_id),
+    from_state       TEXT        NOT NULL,
+    to_state         TEXT        NOT NULL,
+    changed_by       UUID        NOT NULL,
+    reason           TEXT        NOT NULL,
+    changed_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT registration_state_change_reason_check CHECK (btrim(reason) <> ''),
+    CONSTRAINT registration_state_change_transition_check CHECK (
+        (from_state = 'active' AND to_state IN ('suspended', 'retired'))
+        OR (from_state = 'suspended' AND to_state IN ('active', 'retired')))
+);
+```
+
+One row per suspension, restoration, and retirement: who moved the registration, from which state
+to which, when, and why (`ADR-IAM-001 §5.13`, `STD-IAM-001 §3.8`). A repeated request that finds
+the registration already in the state it asks for records nothing, because nothing moved. The
+runtime role inserts and reads it, and can neither update nor delete it (`grants.sql`).
+`client_registration.suspended_at` is the latest suspension, kept after a restore; the state says
+whether it is in force.
+
 ### Client Key Records
 
 A confidential or workload client authenticates with `private_key_jwt` (`ADR-IAM-001 §5.12`,
@@ -432,6 +457,19 @@ exceptions are listed too. An expired exception is the record of why a `sanction
 finding was left in place, and the table keeps it for that reason. Whether one is still in
 force is `expires_at` against now, which the caller compares. An unknown registration
 lists nothing rather than answering 404, as `/findings` does.
+
+`:suspend`, `:restore` and `:retire` take no body and require an `X-Administrative-Reason`, recorded
+with the caller (§Lifecycle Records). Each answers `200` with the registration. Each is idempotent on
+the state it moves to: a repeat records nothing and applies that state to the kernel again, which is
+how a caller retries after a kernel failure. They answer:
+
+- `404` for an unknown registration;
+- `409` for a transition §Suspension, Restoration, and Retirement refuses, naming the rule: a
+  `pending` registration, a retirement of a client that is not suspended, a suspension of a resource,
+  a workload's client, or a resource another registration names in its audience, with those
+  registrations named;
+- `503` when the kernel did not confirm the change. A suspension is recorded already, and the sweep
+  or a retry finishes it; a restore or a retirement is not recorded, and a retry repeats it.
 
 **No response ever carries a secret, because none exists.**
 
@@ -664,6 +702,11 @@ sweep():
         if Keycloak is unreachable, or refuses the client read:
             finish the run 'unresolved', change no finding, stop
 
+    for each suspended registration:
+        if its client is absent:
+            record 'missing', leave it absent, raise an alert
+        else if the client is enabled, or its notBefore is before the suspension's:
+            disable it and set the notBefore, record 'repaired'
     for each active registration:
         if its client is absent:
             record 'missing', leave it absent, raise an alert
@@ -685,6 +728,7 @@ sweep():
         record 'unmanaged', raise an alert
         disable it, when IDENTITY_UNMANAGED_CLIENTS is 'disable'
     converge an open 'unmanaged' finding whose client is now registered or gone
+    converge every open finding of a retired registration
 
     finish the run 'converged' when nothing differs, 'drift' otherwise
 ```
@@ -699,6 +743,15 @@ Each field class has one policy, and the first two are what the drift proof exer
 | `signing_algorithm` | `access.token.signed.response.alg` | repair |
 | `profile` | `publicClient`, `serviceAccountsEnabled`, `standardFlowEnabled` | repair |
 | `client_keys` | `clientAuthenticatorType`, `use.jwks.string`, `jwks.string` | block |
+| `suspension` | `enabled`, `notBefore`, of a suspended registration's client | repair, always |
+
+**A suspension is repaired without attribution.** Disabling a suspended client and setting its
+not-before removes access and never grants it, the reason blocking needs no attribution. So a
+suspended client re-enabled in the console is disabled again by the next sweep, whoever did it, and
+no drift exception covers it: the supported way to enable it is `:restore`. A suspended
+registration is compared for `suspension` only. Its other classes are written again by the restore.
+An operator's reconcile and a recreation refuse a suspended registration, because both would enable
+its client, and `:restore` is the path that does.
 
 **A client key is blocked, not restored, for the same reason as a redirect URI.** A key added in
 the console lets whoever holds its private key authenticate as the client. So does switching the
@@ -759,18 +812,18 @@ who registered it. A drift exception's field classes are therefore unchanged.
 **Built so far.** Three field classes are compared: `token_lifespan`, `redirect_uris`, the two the
 drift proof exercises first, and `client_keys`, for a confidential or workload client: its
 authenticator, whether it takes its keys from the JWKS held on it, and the keys in it, compared by
-`kid` and key material together. `audience_scope`, `signing_algorithm` and `profile` are designed
-above and not compared yet.
+`kid` and key material together. `suspension` is compared for every suspended registration.
+`audience_scope`, `signing_algorithm` and `profile` are designed above and not compared yet.
 
 - **An absent client is held, not recreated.** It is recorded as one open `missing`
   finding naming whoever the deletion's admin event names, and every sweep leaves it
   absent. Only an operator's reconcile naming the finding recreates it from desired state,
   which closes the finding as `recreated` with the operator and the reason. Deleting a
-  client in the console is how an operator contains a compromised one, and the runtime
-  stop path that would make deletion unnecessary, `:suspend` and `:retire`, is not
-  built. A sweep that recreated the client would undo that containment within one
-  interval. When the lifecycle exists, this can be revisited; until then, holding is the
-  conservative reading (RESPONSE-27, D5).
+  client in the console was how an operator contained a compromised one before `:suspend`
+  existed, and a sweep that recreated the client would undo that containment within one
+  interval. With the lifecycle built (`ADR-IAM-001 §5.13`), the hold stays: a recreation
+  nobody named is an automatic change no admin event attributes, and the supported stops
+  are now `:suspend` and `:retire` (RESPONSE-27, D5).
 - **A client no registration describes is found on every sweep.** Its finding is `unmanaged`, with
   no registration and no field class, attributed to whoever its latest admin event names. Two
   groups are exempt, by `clientId`:
@@ -798,22 +851,88 @@ An unmanaged client is a security finding. Reaching that state requires either a
 in this path or a direct Admin Console change, and ADR-IAM-001 §5.7 prohibits the
 second.
 
-### Retirement
+### Suspension, Restoration, and Retirement
+
+`ADR-IAM-001 §5.13` stops a registration in two steps: a suspension that can be undone, and a
+retirement only after one.
 
 ```text
-retire(registration):
-    reject if any other active registration names this resource in its audience
-    remove every registered key from the client's JWKS; record each 'revoked'
-    disable the client in Keycloak
-    set state = 'retired', keep the record
+suspend(registration, reason, caller):
+    refuse a workload's client: it is stopped through its workload
+    refuse a resource: it holds no credential; it is retired instead
+    in one transaction, holding the registration's row lock:
+        refuse unless it is 'active', or already 'suspended'
+        'active': set 'suspended' and suspended_at = now; record the change
+    converge(registration)
+
+restore(registration, reason, caller):
+    refuse a workload's client, and a resource, which is never suspended
+    in one transaction, holding the row lock:
+        already 'active': return it, changing nothing
+        refuse unless it is 'suspended'
+        set 'active'; record the change
+        write its desired redirect URIs, keys and lifespan to the client, and enable it
+        an absent client is refused: a suspended registration whose client is gone is retired
+        resolve its open findings of a field class, with the caller and the reason
+
+converge(registration):
+    in one transaction, holding the row lock, read the committed state:
+        'suspended': disable the client, and set its notBefore to suspended_at plus one second
+        any other state: change nothing
+    a client that is absent stays absent: the sweep holds it 'missing'
+
+retire(registration, reason, caller):
+    refuse a workload's client
+    in one transaction, holding the row lock:
+        already 'retired': return it
+        a resource: refuse unless 'active', and refuse while an active or suspended
+                    registration names it in its audience; the refusal names them
+        any other profile: refuse unless 'suspended'
+        remove its keys from the client, then delete the client; an absent client is deleted already
+        set 'retired' and retired_at = now; record every key 'revoked'; record the change
 ```
 
-The audience check prevents retiring a resource that other clients still hold tokens
-for. The refusal names the dependent registrations.
-
-The record is kept after retirement. `client_key` is released for reuse only through
-the partial unique index, so a retired registration remains auditable while its key
-becomes available.
+- **A suspension is recorded before the kernel changes.** The record is desired state. `converge`
+  reads what was committed and makes the kernel match it under the row lock, so two operators
+  racing end on the last state committed, and a kernel call that fails leaves a suspended
+  registration the sweep converges (§Drift Reconciliation, the `suspension` class).
+- **A restore changes the kernel inside the transaction that records it.** Nothing converges an
+  active registration's client to enabled: the sweep never enables a client, because enabling grants
+  access. So a restore recorded first and then failed would leave an active registration whose
+  client stays disabled. Inside one transaction, a kernel call that fails rolls the restore back and
+  leaves the client suspended, and a commit lost after the call leaves an enabled client the sweep
+  disables again. Either failure errs toward the suspension. A restore of an active registration
+  changes nothing, so it can never lift a block the reconciler set on an active client.
+- **A restore resolves what it settled.** It wrote every compared field class from desired state and
+  enabled the client, which is what an operator's reconcile does, so the registration's open findings
+  of a field class are recorded resolved, by the caller and with the reason. A `blocked` finding left
+  open would otherwise never converge.
+- **A retired registration's open findings converge at the next sweep.** Its client is deleted, and
+  nothing compares it again.
+- **The not-before ends the refresh tokens.** A disabled client's refresh tokens are accepted again
+  once it is enabled; its not-before keeps every token issued before it refused (`identity-kernel`
+  compat run 36765561606). The kernel compares issued-at in seconds, and a token issued in the same
+  second as the not-before is not before it, so the not-before is the second after the
+  suspension. A sign-in in that second, after a restore, has its refresh refused once and signs in
+  again.
+- **A restore writes desired state before it enables.** The sweep compares a suspended registration
+  for its suspension only, so a redirect URI or a key changed in the console while it was
+  suspended would come back to life with it. The restore writes the registered values first, the
+  way an operator's reconcile lifts a block.
+- **A retirement changes the kernel first.** A deleted client cannot be converged back, so the
+  retirement deletes it before it records, holding the row lock throughout, as a key change does. A
+  commit that fails after the deletion leaves a suspended registration whose client is gone, and
+  the retirement retried finds the client absent and records it. The keys are removed before the
+  deletion, so a deletion that fails leaves a disabled client that cannot authenticate either.
+- **A resource's dependents include suspended registrations,** because a restore would bring them
+  back holding an audience that no longer exists.
+- **The record is kept.** The registration, its keys, its findings and its lifecycle records stay.
+  The partial unique index releases the `client_key`, and every key's thumbprint stays taken, so a
+  client registered again under the name registers a new key pair.
+- **A pending registration is not stopped.** Recovery resolves it (§Registration Path).
+- **A workload's client is refused.** Deleting a client deletes its service-account user, which
+  carries the workload's identity (`identity-kernel` compat run 36765561606). The workload lifecycle
+  stops the client and its Principal together (`TDD-identity-control-004`).
 
 ## Configuration
 
@@ -925,11 +1044,24 @@ becomes available.
 
 ### Lifecycle
 
-- Retiring a resource still named in another active registration's audience is refused,
-  and the refusal names the dependents.
-- A retired registration's `client_key` can be reused; the retired record remains.
-- A crash between the Admin API call and the local commit leaves `pending`, and
+- A suspension disables the client and sets its not-before to the second after it, records the
+  change with the caller and the reason, and answers the registration `suspended`; a repeat records
+  nothing and applies it again.
+- A restore writes the registered redirect URIs, keys and lifespan, enables the client, and records
+  the change; a restore the kernel refuses leaves the registration suspended; a restore of an active
+  registration changes nothing, a blocked client included.
+- A suspended client re-enabled in the console is disabled again by the next sweep and recorded
+  `repaired`, attributed or not; an operator's reconcile and a recreation refuse it.
+- A retirement of a client that is not suspended is refused; a suspended one is retired: its keys
+  removed, the client deleted, every key `revoked`, the change recorded, and the `client_key`
+  registrable again while the retired record remains.
+- A retirement retried after the client is already deleted records the retirement.
+- A resource is refused suspension, and refused retirement while an active or suspended
+  registration names it in its audience, with the dependents named; with none, it is retired.
+- A workload's client is refused every lifecycle action.
+- A crash between the Admin API call and the local commit of a creation leaves `pending`, and
   recovery adopts the existing client rather than creating a second one.
+- The runtime role cannot update or delete a lifecycle record.
 
 ## Security Notes
 
@@ -994,6 +1126,8 @@ authentication.
 | Registrations in `pending` past the recovery threshold | any occurrence | — |
 | Drift repairs per sweep | above baseline | — |
 | Client blocked for a redirect URI change | — | any occurrence |
+| Suspended client found enabled | — | any occurrence |
+| Registration suspended | any occurrence | — |
 | Unattributed divergence | any occurrence | — |
 | Last registration sweep finished | older than 2 intervals | older than 4 intervals, or `unresolved` twice in a row |
 | Registration with `application_authority = manual` | tracked as debt | — |
@@ -1010,6 +1144,9 @@ compromised client key, expired client key recovery, and registration drift repa
 | Governed by | ADR-IAM-001 §5.2, §5.7 — supported interfaces only; no unmanaged console change |
 | Governed by | ADR-IAM-001 §5.12 — confidential and workload clients authenticate with registered keys |
 | Governed by | ADR-IAM-001 §5.12 — a bootstrap client comes under registration by explicit adoption; the service's own Admin API clients are exempt from the unmanaged rule |
+| Governed by | ADR-IAM-001 §5.13 — a registration stops by a suspension that ends its sessions, and is removed only by a retirement after one |
+| Conforms to | STD-IAM-001 §3.4 — a stop ends the sessions issued before it; a permanent removal follows a reversible stop |
+| Evidence | `identity-kernel` `compat/client_lifecycle_test.go`, run 36765561606 — a disabled client's refresh resumes on re-enable, a not-before ends it, a deleted client's service-account user goes with it |
 | Evidence | Terraform `import` blocks, CloudFormation resource import, Crossplane `external-name` and its `Observe` management policy: explicit per-resource adoption, planned first |
 | Conforms to | STD-IAM-001 §3.2 — PKCE, exact redirect URIs, no secret in a public client, `private_key_jwt` for confidential and workload clients |
 | Evidence | `identity-kernel` `compat/client_keys_test.go` — key overlap, immediate removal, replay refusal |

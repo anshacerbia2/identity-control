@@ -37,16 +37,19 @@ const finishRunStatement = `UPDATE identity.reconcile_run
 SET finished_at = $2, outcome = $3, attribution = $4, findings = $5
 WHERE run_id = $1 AND finished_at IS NULL`
 
-// desiredStatement is every active registration the sweep compares, with its derived access token
-// lifespan (registration.LifespanSQL, TDD-identity-control-003 §Data Model).
+// desiredStatement is every active or suspended registration the sweep compares, with its derived
+// access token lifespan (registration.LifespanSQL, TDD-identity-control-003 §Data Model). A
+// suspended one is compared for its suspension only.
 var desiredStatement = `SELECT r.registration_id::text,
        r.client_key,
        r.kc_client_id,
        r.profile,
        coalesce(r.redirect_uris, '{}'::text[]),
-       ` + clientregistration.LifespanSQL("r.realm", "r.audience") + `
+       ` + clientregistration.LifespanSQL("r.realm", "r.audience") + `,
+       r.state,
+       r.suspended_at
 FROM identity.client_registration r
-WHERE r.realm = $1 AND r.state = 'active' AND r.kc_client_id IS NOT NULL
+WHERE r.realm = $1 AND r.state IN ('active', 'suspended') AND r.kc_client_id IS NOT NULL
 ORDER BY r.client_key`
 
 // desiredKeysStatement is the active and retiring keys of every active registration in the realm:
@@ -123,7 +126,8 @@ func readRegistrations(ctx context.Context, tx db.Tx, realm keycloak.Realm) ([]r
 			reg      registration
 			clientID string
 		)
-		if err := rows.Scan(&raw, &reg.clientKey, &clientID, &reg.profile, &reg.redirectURIs, &reg.lifespan); err != nil {
+		if err := rows.Scan(&raw, &reg.clientKey, &clientID, &reg.profile, &reg.redirectURIs, &reg.lifespan, &reg.state,
+			&reg.suspendedAt); err != nil {
 			return nil, fmt.Errorf("reconcile: scan desired state: %w", err)
 		}
 		parsed, err := id.Parse(raw)
@@ -297,6 +301,13 @@ func writeFinding(ctx context.Context, tx db.Tx, w findingWrite) error {
 	}
 	return nil
 }
+
+// convergeRetiredStatement closes every open finding of a retired registration. Its client is
+// deleted, so no sweep compares it again, and a finding left open would never converge.
+const convergeRetiredStatement = `UPDATE identity.registration_finding f
+SET converged_at = $2, run_id = $3
+FROM identity.client_registration r
+WHERE f.registration_id = r.registration_id AND r.realm = $1 AND r.state = 'retired' AND f.converged_at IS NULL`
 
 const convergeStatement = `UPDATE identity.registration_finding
 SET converged_at = $2, run_id = $3

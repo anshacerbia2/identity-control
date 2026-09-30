@@ -316,6 +316,31 @@ type stubRegistrar struct {
 	revokedKey id.UUID
 	revokedBy  id.UUID
 	reason     string
+
+	// The lifecycle surface's record of what it was asked.
+	action string
+	change registration.StateChange
+}
+
+func (s *stubRegistrar) lifecycle(action string, change registration.StateChange) (registration.Registration, error) {
+	s.action, s.change = action, change
+	if s.err != nil {
+		return registration.Registration{}, s.err
+	}
+	states := map[string]string{"suspend": "suspended", "restore": "active", "retire": "retired"}
+	return registration.Registration{ID: change.RegistrationID, State: states[action]}, nil
+}
+
+func (s *stubRegistrar) Suspend(_ context.Context, change registration.StateChange) (registration.Registration, error) {
+	return s.lifecycle("suspend", change)
+}
+
+func (s *stubRegistrar) Restore(_ context.Context, change registration.StateChange) (registration.Registration, error) {
+	return s.lifecycle("restore", change)
+}
+
+func (s *stubRegistrar) Retire(_ context.Context, change registration.StateChange) (registration.Registration, error) {
+	return s.lifecycle("retire", change)
 }
 
 func (s *stubRegistrar) Adopt(_ context.Context, req registration.AdoptRequest) (registration.AdoptResult, error) {
@@ -780,6 +805,75 @@ func TestAnAdoptionRefusesWhatItCannotRead(t *testing.T) {
 		}
 		if c.err == registration.ErrNotAdoptable && !strings.Contains(w.Body.String(), "client_keys differs") {
 			t.Errorf("a refused adoption does not name what stopped it: %s", w.Body)
+		}
+	}
+}
+
+func TestALifecycleActionNamesItsCallerAndReason(t *testing.T) {
+	for action, state := range map[string]string{"suspend": "suspended", "restore": "active", "retire": "retired"} {
+		registrationID := mustUUID(t)
+		registrar := &stubRegistrar{}
+		r, principal := asPrincipal(t, httptest.NewRequest(http.MethodPost,
+			"/v1/registrations/"+registrationID.String()+":"+action, nil))
+		r.Header.Set(httpapi.AdministrativeReasonHeader, "the BFF's key may have leaked")
+		w := serve(registrarHandler(t, registrar), r)
+		if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"state":"`+state+`"`) {
+			t.Fatalf("%s: status %d: %s", action, w.Code, w.Body)
+		}
+		if registrar.action != action || registrar.change != (registration.StateChange{RegistrationID: registrationID,
+			ChangedBy: principal, Reason: "the BFF's key may have leaked"}) {
+			t.Errorf("%s asked %s with %+v", action, registrar.action, registrar.change)
+		}
+	}
+}
+
+func TestALifecycleActionIsRefusedBeforeTheRegistrarIsAsked(t *testing.T) {
+	registrationID := mustUUID(t)
+	for name, c := range map[string]struct {
+		path   string
+		reason string
+		caller bool
+		want   int
+	}{
+		"no caller":                {"/v1/registrations/" + registrationID.String() + ":suspend", "r", false, http.StatusUnauthorized},
+		"no reason":                {"/v1/registrations/" + registrationID.String() + ":suspend", "", true, http.StatusBadRequest},
+		"an unknown action":        {"/v1/registrations/" + registrationID.String() + ":release", "r", true, http.StatusNotFound},
+		"no action":                {"/v1/registrations/" + registrationID.String(), "r", true, http.StatusNotFound},
+		"a malformed registration": {"/v1/registrations/nope:retire", "r", true, http.StatusBadRequest},
+	} {
+		registrar := &stubRegistrar{}
+		r := httptest.NewRequest(http.MethodPost, c.path, nil)
+		if c.caller {
+			r, _ = asPrincipal(t, r)
+		}
+		if c.reason != "" {
+			r.Header.Set(httpapi.AdministrativeReasonHeader, c.reason)
+		}
+		if w := serve(registrarHandler(t, registrar), r); w.Code != c.want || registrar.action != "" {
+			t.Errorf("%s answered %d, want %d, and asked %q", name, w.Code, c.want, registrar.action)
+		}
+	}
+}
+
+func TestTheLifecycleRoutesMapTheRegistrarsErrors(t *testing.T) {
+	for name, c := range map[string]struct {
+		err  error
+		want int
+		body string
+	}{
+		"an unknown registration": {registration.ErrNotFound, http.StatusNotFound, "No such registration"},
+		"a refused transition": {fmt.Errorf("%w: a client is suspended before it is retired; this one is active",
+			registration.ErrInvalidTransition), http.StatusConflict, "suspended before it is retired"},
+		"a workload's client": {registration.ErrWorkloadLifecycle, http.StatusConflict, "through its workload"},
+		"a resource in use": {&registration.ResourceInUseError{Dependents: []string{"orders-bff", "billing-worker"}},
+			http.StatusConflict, "orders-bff, billing-worker"},
+		"an unreachable kernel": {keycloak.ErrUnavailable, http.StatusServiceUnavailable, "retry the same action"},
+	} {
+		registrar := &stubRegistrar{err: c.err}
+		r, _ := asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/registrations/"+mustUUID(t).String()+":retire", nil))
+		r.Header.Set(httpapi.AdministrativeReasonHeader, "decommissioned")
+		if w := serve(registrarHandler(t, registrar), r); w.Code != c.want || !strings.Contains(w.Body.String(), c.body) {
+			t.Errorf("%s answered %d, want %d: %s", name, w.Code, c.want, w.Body)
 		}
 	}
 }

@@ -402,6 +402,7 @@ func TestRegistrationRecordsAreNeverDeleted(t *testing.T) {
 		{"identity.workload", []string{"SELECT", "INSERT", "UPDATE"}, []string{"DELETE", "TRUNCATE"}},
 		{"identity.workload_owner_change", []string{"SELECT", "INSERT"}, []string{"UPDATE", "DELETE", "TRUNCATE"}},
 		{"identity.registration_adoption", []string{"SELECT", "INSERT"}, []string{"UPDATE", "DELETE", "TRUNCATE"}},
+		{"identity.registration_state_change", []string{"SELECT", "INSERT"}, []string{"UPDATE", "DELETE", "TRUNCATE"}},
 	} {
 		for _, privilege := range want.held {
 			if !queryBool(t, pool, ctx,
