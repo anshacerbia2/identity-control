@@ -21,7 +21,8 @@
       "internal/identity/provisioning",
       "internal/keycloak",
       "internal/reconcile",
-      "internal/registration"
+      "internal/registration",
+      "internal/workload"
     ],
     "cmd/identity-migrate": ["internal/controldb"],
 
@@ -59,11 +60,19 @@
       "internal/registration"
     ],
 
+    "internal/workload": [
+      "internal/identity/provisioning",
+      "internal/keycloak",
+      "internal/keycloak/keycloakfake",
+      "internal/registration"
+    ],
+
     "internal/httpapi": [
       "internal/identity/provisioning",
       "internal/keycloak",
       "internal/reconcile",
-      "internal/registration"
+      "internal/registration",
+      "internal/workload"
     ]
   },
 

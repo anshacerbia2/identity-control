@@ -23,6 +23,7 @@ type Prober interface {
 type RoutesConfig struct {
 	Principals    *Principals
 	Registrations *Registrations
+	Workloads     *Workloads
 	Database      Prober
 	Telemetry     *observability.Telemetry
 
@@ -61,6 +62,9 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	}
 	if cfg.Registrations == nil {
 		return Surface{}, errors.New("httpapi: the registration drift handler is required")
+	}
+	if cfg.Workloads == nil {
+		return Surface{}, errors.New("httpapi: the workload handler is required")
 	}
 	if cfg.Database == nil {
 		return Surface{}, errors.New("httpapi: a database prober is required")
@@ -113,6 +117,9 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	api.HandleFunc("POST /v1/registrations/{registration_id}/keys", cfg.Registrations.AddKey)
 	api.HandleFunc("GET /v1/registrations/{registration_id}/keys", cfg.Registrations.Keys)
 	api.HandleFunc("POST /v1/registrations/{registration_id}/keys/{key_action}", cfg.Registrations.KeyAction)
+	api.HandleFunc("POST /v1/workloads", cfg.Workloads.CreateWorkload)
+	api.HandleFunc("GET /v1/workloads/{target}", cfg.Workloads.GetWorkload)
+	api.HandleFunc("POST /v1/workloads/{target}", cfg.Workloads.WorkloadAction)
 
 	return Surface{Probes: probes, API: api}, nil
 }

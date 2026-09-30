@@ -47,21 +47,28 @@ type Registry struct {
 	// Scopes are the realm's client scopes, by name, with their identifiers.
 	Scopes map[string]string
 
+	// OnServiceAccount is called, outside the lock, when a created client gets a service-account
+	// user, as a workload client does in the real kernel. A test joins it to the user fake with
+	// Client.AddServiceAccount, so the two fakes see one user, as the two credentials do.
+	OnServiceAccount func(user keycloak.User)
+
 	// RealmDefaults are the scope identifiers every created client holds as default scopes, as the
 	// real kernel attaches its realm default client scopes, acr among them. Empty unless a test sets
 	// it.
 	RealmDefaults []string
 
-	clients       map[keycloak.ClientUUID]keycloak.Client
-	specs         map[keycloak.ClientUUID]keycloak.ClientSpec
-	defaultScopes map[keycloak.ClientUUID][]string
-	events        []keycloak.AdminEvent
+	clients         map[keycloak.ClientUUID]keycloak.Client
+	specs           map[keycloak.ClientUUID]keycloak.ClientSpec
+	serviceAccounts map[keycloak.ClientUUID]keycloak.User
+	defaultScopes   map[keycloak.ClientUUID][]string
+	events          []keycloak.AdminEvent
 }
 
 // NewRegistry returns an empty registry acting as the given service account.
 func NewRegistry(serviceAccount string) *Registry {
 	return &Registry{ServiceAccount: serviceAccount, clients: map[keycloak.ClientUUID]keycloak.Client{},
-		specs: map[keycloak.ClientUUID]keycloak.ClientSpec{}, defaultScopes: map[keycloak.ClientUUID][]string{},
+		serviceAccounts: map[keycloak.ClientUUID]keycloak.User{},
+		specs:           map[keycloak.ClientUUID]keycloak.ClientSpec{}, defaultScopes: map[keycloak.ClientUUID][]string{},
 		Scopes: map[string]string{"scnehaux-internal": "scope-internal", "scnehaux-provider": "scope-provider",
 			"scnehaux-external": "scope-external"}}
 }
@@ -213,27 +220,35 @@ func (r *Registry) Spec(client keycloak.ClientUUID) (keycloak.ClientSpec, []stri
 	return spec, append([]string(nil), r.defaultScopes[client]...), ok
 }
 
-func (r *Registry) CreateClient(ctx context.Context, _ keycloak.Realm, spec keycloak.ClientSpec) (keycloak.ClientUUID, error) {
+func (r *Registry) CreateClient(ctx context.Context, realm keycloak.Realm, spec keycloak.ClientSpec) (keycloak.ClientUUID, error) {
+	client, serviceAccount, err := r.createClient(ctx, realm, spec)
+	if serviceAccount != nil && r.OnServiceAccount != nil {
+		r.OnServiceAccount(*serviceAccount)
+	}
+	return client, err
+}
+
+func (r *Registry) createClient(ctx context.Context, _ keycloak.Realm, spec keycloak.ClientSpec) (keycloak.ClientUUID, *keycloak.User, error) {
 	if err := ctx.Err(); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if err := spec.Validate(); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.FailCreate != nil && !r.AmbiguousCreateSucceeds {
-		return "", r.FailCreate
+		return "", nil, r.FailCreate
 	}
 	for _, existing := range r.clients {
 		if existing.ClientID == spec.ClientID {
-			return "", keycloak.ErrConflict
+			return "", nil, keycloak.ErrConflict
 		}
 	}
 	// A UUID, as the kernel's identifiers are: they are unique across every test sharing a database.
 	minted, err := id.NewV7()
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	client := keycloak.ClientUUID(minted.String())
 	r.clients[client] = keycloak.Client{ID: client, ClientID: spec.ClientID, Enabled: true,
@@ -242,10 +257,36 @@ func (r *Registry) CreateClient(ctx context.Context, _ keycloak.Realm, spec keyc
 	r.defaultScopes[client] = append([]string(nil), r.RealmDefaults...)
 	r.events = append(r.events, keycloak.AdminEvent{Time: r.now(), OperationType: "CREATE",
 		ResourcePath: "clients/" + string(client), UserID: r.ServiceAccount})
-	if r.FailCreate != nil {
-		return "", r.FailCreate
+	var serviceAccount *keycloak.User
+	if spec.Workload {
+		user := keycloak.User{ID: keycloak.UserID("sa-" + string(client)), Username: "service-account-" + spec.ClientID,
+			Enabled: true}
+		r.serviceAccounts[client] = user
+		serviceAccount = &user
 	}
-	return client, nil
+	if r.FailCreate != nil {
+		return "", serviceAccount, r.FailCreate
+	}
+	return client, serviceAccount, nil
+}
+
+func (r *Registry) ServiceAccountUser(ctx context.Context, _ keycloak.Realm, client keycloak.ClientUUID) (keycloak.User, error) {
+	if err := ctx.Err(); err != nil {
+		return keycloak.User{}, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.FailGet != nil {
+		return keycloak.User{}, r.FailGet
+	}
+	if _, ok := r.clients[client]; !ok {
+		return keycloak.User{}, keycloak.ErrNotFound
+	}
+	user, ok := r.serviceAccounts[client]
+	if !ok {
+		return keycloak.User{}, keycloak.ErrNotFound
+	}
+	return user, nil
 }
 
 func (r *Registry) FindClients(ctx context.Context, _ keycloak.Realm, clientID string) ([]keycloak.Client, error) {

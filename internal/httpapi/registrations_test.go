@@ -76,7 +76,7 @@ func registrationsHandler(t *testing.T, stub *stubReconciler) http.Handler {
 	if err != nil {
 		t.Fatal(err)
 	}
-	built, err := httpapi.Routes(httpapi.RoutesConfig{Principals: principals, Registrations: registrations, Database: &stubProber{}})
+	built, err := httpapi.Routes(httpapi.RoutesConfig{Principals: principals, Registrations: registrations, Workloads: stubWorkloads(t), Database: &stubProber{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -362,7 +362,7 @@ func registrarHandler(t *testing.T, registrar *stubRegistrar) http.Handler {
 		t.Fatal(err)
 	}
 	principals, _ := httpapi.NewPrincipals(&stubProvisioner{}, realm)
-	built, err := httpapi.Routes(httpapi.RoutesConfig{Principals: principals, Registrations: registrations, Database: &stubProber{}})
+	built, err := httpapi.Routes(httpapi.RoutesConfig{Principals: principals, Registrations: registrations, Workloads: stubWorkloads(t), Database: &stubProber{}})
 	if err != nil {
 		t.Fatal(err)
 	}

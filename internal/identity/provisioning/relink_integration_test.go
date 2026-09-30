@@ -212,3 +212,26 @@ func TestReconcileRecoversPendingAndSweeps(t *testing.T) {
 		t.Errorf("Reconcile = %d recovered, %d dangling, %v", recovered, dangling, err)
 	}
 }
+
+// A workload is never relinked here. Its user is its client's service account, and a user this path
+// created would carry the workload's identity into no token; the workload path rebuilds it.
+func TestAWorkloadIsNotRelinkedAsAUser(t *testing.T) {
+	p := newPortability(t)
+	owner := p.create("workload.owner")
+	principalID, _ := id.NewV7()
+	if err := p.pool.InTx(context.Background(), func(ctx context.Context, tx db.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO identity.principal_mapping
+		    (principal_id, realm, username, subject_type, workload_owner, keycloak_user_id, state)
+		    VALUES ($1, $2, 'service-account-nightly-job', 'workload', $3, $4, 'active')`,
+			principalID.String(), string(portabilityRealm), owner.PrincipalID.String(), "sa-"+principalID.String())
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.relink(principalID, "its client was deleted"); !errors.Is(err, provisioning.ErrWorkloadPath) {
+		t.Errorf("relinking a workload answered %v, want ErrWorkloadPath", err)
+	}
+	if p.kernel.Calls.CreateUser != 1 {
+		t.Errorf("%d users were created; only the owner should have been", p.kernel.Calls.CreateUser)
+	}
+}

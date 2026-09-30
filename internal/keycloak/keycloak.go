@@ -270,4 +270,13 @@ type AdminClient interface {
 	// caused by a reconciler defect is recoverable, and the deletion of a Principal is
 	// not. It is idempotent — disabling an already-disabled user succeeds.
 	DisableUser(ctx context.Context, realm Realm, userID UserID) error
+
+	// WriteWorkloadIdentity writes a workload's claim-source attributes on the service-account
+	// user of its client: its principal_id, subject_type=workload and workload_owner. A client
+	// credentials token is issued for that user and no other, so this is the only place the
+	// attributes reach the workload's token (TDD-identity-kernel-001 §Claim Projection). It reads
+	// the user back and fails when the declared profile dropped an attribute, because a workload
+	// whose token carries no principal_id is refused by every consumer while every call reported
+	// success.
+	WriteWorkloadIdentity(ctx context.Context, realm Realm, userID UserID, principalID, owner id.UUID) error
 }

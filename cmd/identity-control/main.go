@@ -33,6 +33,7 @@ import (
 	"github.com/anshacerbia2/identity-control/internal/keycloak"
 	"github.com/anshacerbia2/identity-control/internal/reconcile"
 	"github.com/anshacerbia2/identity-control/internal/registration"
+	"github.com/anshacerbia2/identity-control/internal/workload"
 )
 
 func main() {
@@ -164,6 +165,22 @@ func run() error {
 		return fmt.Errorf("registration drift handler: %w", err)
 	}
 
+	// A workload spans both credentials: the registration credential creates its client and reads
+	// the client's service-account user, and the Principal credential writes the workload's identity
+	// on that user. Each port is handed only the credential that serves it.
+	workloads, err := workload.New(pool, registrar, registry, kernel, workload.Config{
+		Realm:                keycloak.Realm(cfg.KeycloakRealm),
+		CallTimeout:          cfg.ProvisionTimeout,
+		PendingRecoveryAfter: cfg.PendingRecoveryAfter,
+	}, logger)
+	if err != nil {
+		return fmt.Errorf("workload service: %w", err)
+	}
+	workloadHandler, err := httpapi.NewWorkloads(workloads)
+	if err != nil {
+		return fmt.Errorf("workload handler: %w", err)
+	}
+
 	principals, err := httpapi.NewPrincipals(provisioner, keycloak.Realm(cfg.KeycloakRealm))
 	if err != nil {
 		return fmt.Errorf("principal handler: %w", err)
@@ -172,6 +189,7 @@ func run() error {
 	surface, err := httpapi.Routes(httpapi.RoutesConfig{
 		Principals:    principals,
 		Registrations: registrations,
+		Workloads:     workloadHandler,
 		Database:      pool,
 		Telemetry:     telemetry,
 	})
@@ -252,7 +270,7 @@ func run() error {
 	// The registration sweep runs on a schedule from here, the one package allowed to start a
 	// goroutine. Every replica schedules it; the reconciler's run claim lets one sweep at a time
 	// through, so the others' ticks are skipped rather than duplicated.
-	go scheduleSweeps(ctx, provisioner, registrar, reconciler, cfg.RegistrationReconcileInterval, logger)
+	go scheduleSweeps(ctx, provisioner, registrar, workloads, reconciler, cfg.RegistrationReconcileInterval, logger)
 
 	select {
 	case err := <-serveErr:
@@ -279,6 +297,7 @@ func run() error {
 // sweep cut off by shutdown leaves its run unfinished, which is how a stopped replica's run is
 // meant to look, and it stops blocking the next one after two intervals.
 func scheduleSweeps(ctx context.Context, provisioner *provisioning.Provisioner, registrar *registration.Service,
+	workloads *workload.Service,
 	reconciler *reconcile.Reconciler, interval time.Duration, logger *slog.Logger) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -296,6 +315,13 @@ func scheduleSweeps(ctx context.Context, provisioner *provisioning.Provisioner, 
 			logger.Error("pending registration recovery failed", slog.String("error", err.Error()))
 		} else if resolved > 0 {
 			logger.Info("pending registrations recovered", slog.Int("resolved", resolved))
+		}
+		// Pending workloads after pending registrations: a workload whose client creation was lost
+		// finds its registration active, and binds its identity to the client's service account.
+		if finished, err := workloads.RecoverPending(ctx); err != nil {
+			logger.Error("pending workload recovery failed", slog.String("error", err.Error()))
+		} else if finished > 0 {
+			logger.Info("pending workloads recovered", slog.Int("finished", finished))
 		}
 		// Client keys whose rotation overlap or lifetime ended are removed before the sweep reads the
 		// clients, so a retiring key is gone within one interval of its overlap ending.

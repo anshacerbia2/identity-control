@@ -77,6 +77,7 @@ existing SAD document. Root artifacts never link downward into this repository.
 | `internal/identity/provisioning/` | Principal minting, the Keycloak creation path, and pending-state recovery |
 | `internal/registration/` | Client and protected-resource registration, and client public keys: registration, rotation, revocation, expiry |
 | `internal/reconcile/` | The registration drift sweep and what an operator does with its findings |
+| `internal/workload/` | Workload Principals: creation bound to the client's service account, recovery, ownership |
 | `internal/keycloak/` | Typed client over the supported Admin REST API: users, and clients through a second credential |
 | `internal/httpapi/` | Routing, request decoding, and the error-to-problem mapping |
 | `internal/controldb/` | Roles, grants, and the privilege assertions |

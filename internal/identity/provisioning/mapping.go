@@ -47,6 +47,12 @@ var (
 	ErrNotFound          = errors.New("provisioning: mapping not found")
 	ErrDuplicateInKernel = errors.New("provisioning: more than one kernel user carries this principal_id")
 	ErrIdentifierTaken   = errors.New("provisioning: principal_id already exists")
+
+	// ErrWorkloadPath refuses a workload on the human creation and relink paths. A workload's
+	// Keycloak user is its client's service-account user, the one a client credentials token is
+	// issued for, so a user this path created would carry the workload's identity into no token at
+	// all. Workloads are created and rebuilt through the workload path (TDD-identity-control-004).
+	ErrWorkloadPath = errors.New("provisioning: a workload is created through POST /v1/workloads, not as a user")
 )
 
 // transitions is the state machine from TDD-identity-control-001, expressed as data.
@@ -200,6 +206,29 @@ func (Repository) Activate(ctx context.Context, tx db.Tx, principalID id.UUID, u
 	tag, err := tx.Exec(ctx, activateStatement, principalID.String(), string(userID))
 	if err != nil {
 		return fmt.Errorf("provisioning: activate mapping: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+const setWorkloadOwnerStatement = `UPDATE identity.principal_mapping
+SET workload_owner = $2, version = version + 1
+WHERE principal_id = $1 AND subject_type = 'workload' AND state = 'active'`
+
+// SetWorkloadOwner records a workload's new accountable owner on its mapping, in the caller's
+// transaction, so the mapping and the workload record never name two owners.
+func (Repository) SetWorkloadOwner(ctx context.Context, tx db.Tx, principalID, owner id.UUID) error {
+	if db.IsNilTx(tx) {
+		return errors.New("provisioning: a transaction handle is required")
+	}
+	if owner.IsNil() {
+		return errors.New("provisioning: a workload requires an accountable workload_owner")
+	}
+	tag, err := tx.Exec(ctx, setWorkloadOwnerStatement, principalID.String(), owner.String())
+	if err != nil {
+		return fmt.Errorf("provisioning: record the workload owner: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound

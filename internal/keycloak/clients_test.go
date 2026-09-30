@@ -470,3 +470,19 @@ func TestRemoveDefaultClientScopeDetachesByIdentifier(t *testing.T) {
 		t.Error("a detachment without a scope was sent")
 	}
 }
+
+func TestServiceAccountUserIsTheClientsOwnUser(t *testing.T) {
+	k := &kernel{adminBody: `{"id":"sa-1","username":"service-account-nightly-job","enabled":true}`}
+	admin, _ := newAdmin(t, k)
+	user, err := admin.ServiceAccountUser(context.Background(), testRealm, "c1")
+	if err != nil || user.ID != "sa-1" || user.Username != "service-account-nightly-job" {
+		t.Fatalf("ServiceAccountUser = %+v, %v", user, err)
+	}
+	if k.lastPath != "/admin/realms/scnehaux/clients/c1/service-account-user" {
+		t.Errorf("read %s", k.lastPath)
+	}
+	none, _ := newAdmin(t, &kernel{adminStatus: http.StatusNotFound})
+	if _, err := none.ServiceAccountUser(context.Background(), testRealm, "c1"); !errors.Is(err, keycloak.ErrNotFound) {
+		t.Errorf("a client without a service account answered %v", err)
+	}
+}

@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-001
   title: Canonical Principal Identifier and Creation Path
   owner: Core Platform Team
-  version: 1.5.1
+  version: 1.6.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -404,8 +404,17 @@ caller, the reason and the previous `keycloak_user_id` are recorded with the
 transition.
 
 `POST /v1/principals` requires an `Idempotency-Key` header. The response carries
-`principal_id`. The request must declare `subject_type`; a workload also requires an
-active human `workload_owner`. `keycloak_user_id` is never present in any response body.
+`principal_id`. The request must declare `subject_type`. `keycloak_user_id` is never present in any
+response body.
+
+**A workload is refused here, and by `:relink`.** A workload authenticates as its own client with
+the client credentials grant, and that grant issues its token for the client's service-account
+user and no other (`TDD-identity-kernel-001` §Claim Projection). A user this path created would
+carry the workload's `principal_id` into no token. Workloads are created through
+`POST /v1/workloads`, which mints the `principal_id` the same way and binds the mapping to the
+service-account user (`TDD-identity-control-004` §Creation). The mapping's `subject_type` and
+`workload_owner` columns and their constraint are unchanged, and a workload's mapping is written by
+that path.
 
 ### Keycloak Admin API
 

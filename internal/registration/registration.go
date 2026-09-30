@@ -62,6 +62,10 @@ var (
 	ErrKeyTaken = errors.New("registration: the client_key is already in use")
 
 	ErrNotFound = errors.New("registration: no such registration")
+
+	// ErrWorkloadRecreate is an operator's recreate of a workload's client. The workload's identity
+	// lives on its client's service-account user, so the client is rebuilt through the workload.
+	ErrWorkloadRecreate = errors.New("registration: a workload's client is rebuilt through its workload, not recreated alone")
 )
 
 // Transactor is the transaction source this package needs.
@@ -319,26 +323,7 @@ func (s *Service) Register(ctx context.Context, req Request) (Registration, erro
 	if strings.TrimSpace(req.CallerScope) == "" || strings.TrimSpace(req.IdempotencyKey) == "" {
 		return Registration{}, fmt.Errorf("%w: a caller and an Idempotency-Key are required", ErrInvalid)
 	}
-	if err := validate(req); err != nil {
-		return Registration{}, err
-	}
-	var key *PublicKey
-	if keyed(req.Profile) {
-		parsed, err := parsePublicKey(req.PublicKey)
-		if err != nil {
-			return Registration{}, err
-		}
-		key = &parsed
-	}
-
-	// Kernel reads before anything is written: a class whose scope the realm lacks, and a
-	// client_key a Keycloak client already holds, are refused with nothing recorded.
-	scopeID, err := call(ctx, s.cfg.CallTimeout, func(ctx context.Context) (string, error) {
-		return s.kernel.ClientScopeID(ctx, s.cfg.Realm, managedScopes[req.AudienceClass])
-	})
-	if errors.Is(err, keycloak.ErrNotFound) {
-		return Registration{}, fmt.Errorf("%w: %s", ErrScopeUndeclared, managedScopes[req.AudienceClass])
-	}
+	prepared, err := s.Prepare(ctx, req)
 	if err != nil {
 		return Registration{}, err
 	}
@@ -360,15 +345,93 @@ func (s *Service) Register(ctx context.Context, req Request) (Registration, erro
 			}
 			return json.Unmarshal(claim.Body, &registration)
 		}
-		registration, err = s.insertPending(ctx, tx, req, key)
+		registration, err = s.Reserve(ctx, tx, prepared)
 		return err
 	})
 	if err != nil || replay {
 		return registration, err
 	}
 
+	// The key's response is stored whichever way the realization ends, so a retry is told the same
+	// thing instead of waiting on a request that will never finish.
+	active, _, err := s.Realize(ctx, prepared, registration, Outcome{
+		Refused: func(ctx context.Context, tx db.Tx) error {
+			return idempotency.Complete(ctx, tx, req.CallerScope, req.IdempotencyKey, requestDigest, 409,
+				json.RawMessage(`{"error":"client_key in use by an unregistered Keycloak client"}`))
+		},
+		Active: func(ctx context.Context, tx db.Tx, active Registration) error {
+			body, err := json.Marshal(active)
+			if err != nil {
+				return err
+			}
+			return idempotency.Complete(ctx, tx, req.CallerScope, req.IdempotencyKey, requestDigest, 201, body)
+		},
+	})
+	return active, err
+}
+
+// Prepared is a registration request that passed every rule needing nothing but the request and a
+// kernel read. Reserve records it, and Realize creates its client.
+type Prepared struct {
+	req     Request
+	key     *PublicKey
+	scopeID string
+}
+
+// Prepare validates a registration, parses its public key, and resolves its managed scope. Kernel
+// reads happen here, before anything is written: a class whose scope the realm lacks is refused with
+// nothing recorded.
+func (s *Service) Prepare(ctx context.Context, req Request) (Prepared, error) {
+	if err := validate(req); err != nil {
+		return Prepared{}, err
+	}
+	prepared := Prepared{req: req}
+	if keyed(req.Profile) {
+		parsed, err := parsePublicKey(req.PublicKey)
+		if err != nil {
+			return Prepared{}, err
+		}
+		prepared.key = &parsed
+	}
+	scopeID, err := call(ctx, s.cfg.CallTimeout, func(ctx context.Context) (string, error) {
+		return s.kernel.ClientScopeID(ctx, s.cfg.Realm, managedScopes[req.AudienceClass])
+	})
+	if errors.Is(err, keycloak.ErrNotFound) {
+		return Prepared{}, fmt.Errorf("%w: %s", ErrScopeUndeclared, managedScopes[req.AudienceClass])
+	}
+	if err != nil {
+		return Prepared{}, err
+	}
+	prepared.scopeID = scopeID
+	return prepared, nil
+}
+
+// Reserve records a prepared registration pending, with its first key, inside the caller's
+// transaction. A workload reserves its registration in the same transaction as its own intent, so
+// recovery never finds one without the other (TDD-identity-control-004 §Creation).
+func (s *Service) Reserve(ctx context.Context, tx db.Tx, prepared Prepared) (Registration, error) {
+	return s.insertPending(ctx, tx, prepared.req, prepared.key)
+}
+
+// Outcome is what the caller of Realize records in the transaction that closes a realization:
+// Refused in the one that retires a registration an unregistered client's key refused, and Active
+// in the one that activates it. Either may be nil.
+type Outcome struct {
+	Refused func(ctx context.Context, tx db.Tx) error
+	Active  func(ctx context.Context, tx db.Tx, active Registration) error
+}
+
+// Realize creates a reserved registration's client, scopes it, and activates the registration,
+// returning it with its client.
+//
+// A client_key an unregistered Keycloak client holds is refused, never adopted: the pending row is
+// retired, which keeps the record and releases the key, its keys are revoked, and ErrKeyTaken is
+// returned. Any other failure leaves the registration pending on purpose, as Principal creation
+// leaves its mapping: on ErrAmbiguous the client may exist, and recovery adopts it by client_key
+// rather than creating a second.
+func (s *Service) Realize(ctx context.Context, prepared Prepared, registration Registration, outcome Outcome) (Registration, keycloak.ClientUUID, error) {
 	existing, err := call(ctx, s.cfg.CallTimeout, func(ctx context.Context) ([]keycloak.Client, error) {
-		return s.kernel.FindClients(ctx, s.cfg.Realm, req.ClientKey)
+		return s.kernel.FindClients(ctx, s.cfg.Realm, registration.ClientKey)
 	})
 	if err == nil && len(existing) > 0 {
 		err = keycloak.ErrConflict
@@ -376,17 +439,14 @@ func (s *Service) Register(ctx context.Context, req Request) (Registration, erro
 	var client keycloak.ClientUUID
 	if err == nil {
 		var keys []keycloak.JWK
-		if key != nil {
-			keys = []keycloak.JWK{key.JWK}
+		if prepared.key != nil {
+			keys = []keycloak.JWK{prepared.key.JWK}
 		}
 		client, err = call(ctx, s.cfg.CallTimeout, func(ctx context.Context) (keycloak.ClientUUID, error) {
 			return s.kernel.CreateClient(ctx, s.cfg.Realm, spec(registration, keys))
 		})
 	}
 	if errors.Is(err, keycloak.ErrConflict) {
-		// A client no registration describes holds the key. The pending row is retired, which
-		// releases the key and keeps the record; the key's response is stored, so a retry is told
-		// the same thing instead of waiting on a request that will never finish.
 		if retireErr := s.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
 			if _, err := tx.Exec(ctx, retirePendingStatement, registration.ID.String()); err != nil {
 				return err
@@ -394,32 +454,32 @@ func (s *Service) Register(ctx context.Context, req Request) (Registration, erro
 			if _, err := tx.Exec(ctx, revokeRefusedKeysStatement, registration.ID.String(), s.now()); err != nil {
 				return err
 			}
-			return idempotency.Complete(ctx, tx, req.CallerScope, req.IdempotencyKey, requestDigest, 409,
-				json.RawMessage(`{"error":"client_key in use by an unregistered Keycloak client"}`))
+			if outcome.Refused != nil {
+				return outcome.Refused(ctx, tx)
+			}
+			return nil
 		}); retireErr != nil {
-			return Registration{}, fmt.Errorf("registration: retire the refused registration: %w", retireErr)
+			return Registration{}, "", fmt.Errorf("registration: retire the refused registration: %w", retireErr)
 		}
-		return Registration{}, ErrKeyTaken
+		return Registration{}, "", ErrKeyTaken
 	}
 	if err != nil {
-		// Left pending on purpose, as Principal creation leaves its mapping: on ErrAmbiguous the
-		// client may exist, and recovery adopts it by client_key rather than creating a second.
 		s.logger.WarnContext(ctx, "client creation did not confirm; registration left pending for recovery",
-			slog.String("client_key", req.ClientKey), slog.String("error", err.Error()))
-		return Registration{}, fmt.Errorf("registration: create client: %w", err)
+			slog.String("client_key", registration.ClientKey), slog.String("error", err.Error()))
+		return Registration{}, "", fmt.Errorf("registration: create client: %w", err)
 	}
 
-	if err := s.finish(ctx, registration, client, scopeID, func(ctx context.Context, tx db.Tx, active Registration) error {
-		body, err := json.Marshal(active)
-		if err != nil {
-			return err
+	var active Registration
+	if err := s.finish(ctx, registration, client, prepared.scopeID, func(ctx context.Context, tx db.Tx, activated Registration) error {
+		active = activated
+		if outcome.Active != nil {
+			return outcome.Active(ctx, tx, activated)
 		}
-		registration = active
-		return idempotency.Complete(ctx, tx, req.CallerScope, req.IdempotencyKey, requestDigest, 201, body)
+		return nil
 	}); err != nil {
-		return Registration{}, err
+		return Registration{}, "", err
 	}
-	return registration, nil
+	return active, client, nil
 }
 
 // prohibitedDefaults are the kernel's built-in scopes a profile must not hold, by profile. Keycloak
@@ -620,6 +680,12 @@ func (s *Service) Recreate(ctx context.Context, registrationID id.UUID) (keycloa
 	}
 	if registration.State != "active" {
 		return "", fmt.Errorf("registration: %s is %s, not active", registrationID, registration.State)
+	}
+	// A workload's client carries its Principal on its service-account user, which a new client
+	// does not have: a recreated client would authenticate as a workload whose token names no
+	// principal_id. Its client is rebuilt through the workload, which is not built yet.
+	if registration.Profile == ProfileWorkload {
+		return "", ErrWorkloadRecreate
 	}
 	scopeID, err := call(ctx, s.cfg.CallTimeout, func(ctx context.Context) (string, error) {
 		return s.kernel.ClientScopeID(ctx, s.cfg.Realm, managedScopes[registration.AudienceClass])

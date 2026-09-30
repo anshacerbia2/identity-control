@@ -7,6 +7,8 @@ import (
 
 	"github.com/anshacerbia2/foundation-platform/db"
 	"github.com/anshacerbia2/foundation-platform/id"
+
+	"github.com/anshacerbia2/identity-control/internal/keycloak"
 )
 
 const keyInUseStatement = `SELECT count(*) FROM identity.client_registration
@@ -215,3 +217,27 @@ ORDER BY created_at LIMIT 100`
 const relinkStatement = `UPDATE identity.client_registration
 SET kc_client_id = $2, version = version + 1
 WHERE registration_id = $1 AND state = 'active'`
+
+const clientStatement = `SELECT state, coalesce(kc_client_id, '') FROM identity.client_registration
+WHERE registration_id = $1 AND realm = $2`
+
+// Client reports a registration's state and its kernel client, which is empty while it is pending.
+// A workload reads it to find the client whose service-account user carries its identity.
+func (s *Service) Client(ctx context.Context, registrationID id.UUID) (string, keycloak.ClientUUID, error) {
+	var state, client string
+	err := s.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		rows, err := tx.Query(ctx, clientStatement, registrationID.String(), string(s.cfg.Realm))
+		if err != nil {
+			return fmt.Errorf("registration: read the client: %w", err)
+		}
+		defer rows.Close()
+		if !rows.Next() {
+			if err := rows.Err(); err != nil {
+				return err
+			}
+			return ErrNotFound
+		}
+		return rows.Scan(&state, &client)
+	})
+	return state, keycloak.ClientUUID(client), err
+}

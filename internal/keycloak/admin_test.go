@@ -83,6 +83,8 @@ type kernel struct {
 	adminBodyFor func(query url.Values) string
 	// lastTokenForm is what the client sent the token endpoint.
 	lastTokenForm url.Values
+	// lastPutBody is the body of the last PUT, for a call that reads back after it writes.
+	lastPutBody []byte
 }
 
 func (k *kernel) handler() http.Handler {
@@ -120,6 +122,9 @@ func (k *kernel) handler() http.Handler {
 		k.lastMethod, k.lastPath, k.lastQuery = r.Method, r.URL.Path, r.URL.RawQuery
 		k.lastAuth = r.Header.Get("Authorization")
 		k.lastBody, _ = io.ReadAll(r.Body)
+		if r.Method == http.MethodPut {
+			k.lastPutBody = k.lastBody
+		}
 
 		if k.adminLocation != "" {
 			w.Header().Set("Location", k.adminLocation)
@@ -688,4 +693,48 @@ func TestCreateUserRefusesAnInvalidRequestBeforeCalling(t *testing.T) {
 	if k.adminCalls.Load() != 0 {
 		t.Error("an invalid request reached the kernel")
 	}
+}
+
+// A workload's identity is written on its service-account user as the whole representation with the
+// three attributes set, and read back: a declared profile that dropped one would otherwise leave a
+// workload whose token carries no principal_id while every call reported success.
+func TestWriteWorkloadIdentityWritesAndReadsBack(t *testing.T) {
+	principalID, owner := mustID(t), mustID(t)
+	held := fmt.Sprintf(`{"id":"sa-1","username":"service-account-job","enabled":true,"attributes":{`+
+		`"scnehaux_principal_id":["%s"],"scnehaux_subject_type":["workload"],"scnehaux_workload_owner":["%s"]}}`,
+		principalID, owner)
+	k := &kernel{adminBody: held}
+	admin, _ := newAdmin(t, k)
+	if err := admin.WriteWorkloadIdentity(context.Background(), testRealm, "sa-1", principalID, owner); err != nil {
+		t.Fatal(err)
+	}
+	var written struct {
+		Username   string              `json:"username"`
+		Attributes map[string][]string `json:"attributes"`
+	}
+	if err := json.Unmarshal(k.lastPutBody, &written); err != nil {
+		t.Fatal(err)
+	}
+	if written.Username != "service-account-job" || written.Attributes["scnehaux_principal_id"][0] != principalID.String() ||
+		written.Attributes["scnehaux_subject_type"][0] != "workload" || written.Attributes["scnehaux_workload_owner"][0] != owner.String() {
+		t.Errorf("wrote %s", k.lastPutBody)
+	}
+
+	// The kernel accepted the write and kept none of it.
+	dropped, _ := newAdmin(t, &kernel{adminBody: `{"id":"sa-1","username":"service-account-job","attributes":{}}`})
+	if err := dropped.WriteWorkloadIdentity(context.Background(), testRealm, "sa-1", principalID, owner); err == nil {
+		t.Error("a write the declared profile dropped was reported as done")
+	}
+	if err := admin.WriteWorkloadIdentity(context.Background(), testRealm, "sa-1", principalID, id.UUID{}); err == nil {
+		t.Error("a workload identity without an owner was written")
+	}
+}
+
+func mustID(t *testing.T) id.UUID {
+	t.Helper()
+	minted, err := id.NewV7()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return minted
 }

@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-003
   title: Protocol Client and Protected-Resource Registration
   owner: Core Platform Team
-  version: 1.12.0
+  version: 1.13.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -459,8 +459,12 @@ every new client, and `acr` puts `acr=1` into a client credentials token, which 
 prohibits for a workload. `identity-kernel` leaves the realm default alone and records that a
 workload client does not hold it (TDD-identity-kernel-001 §Claim Projection, proven by its
 `compat/workload_test.go`). The detachment runs wherever the managed scope is attached, so
-pending recovery and an operator's recreate apply it too, and a realm without an `acr` scope has
-nothing to detach. Internal, privileged,
+pending recovery applies it too, and a realm without an `acr` scope has nothing to detach.
+
+A `workload` registration is made by the workload path (`TDD-identity-control-004`), which reserves
+it in the same transaction as the workload and realizes it through this path. An operator's
+reconcile that would recreate a deleted client refuses a workload's: a new client has a new
+service-account user, which does not carry the workload's identity. Internal, privileged,
 and workload registrations issue PS256 only. External registrations also default to
 PS256; RS256 is permitted only while the recorded compatibility exception remains
 unexpired. No request can select another algorithm, and the reconciler restores the

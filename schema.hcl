@@ -951,3 +951,220 @@ table "client_key" {
     expr = "((state = 'revoked') = (revoked_at IS NOT NULL)) AND ((state = 'retiring') = (retiring_at IS NOT NULL) OR state = 'revoked') AND expires_at > registered_at"
   }
 }
+
+// A workload Principal: a service, job, connector or governed agent, and the human answerable for it
+// (TDD-identity-control-004). Its principal_id is minted here, before either kernel call, together
+// with the reservation of its client registration, so recovery can finish a partly realized
+// workload and can never find one whose owner was not recorded. Its Keycloak user is its client's
+// service-account user, the one a client credentials token is issued for.
+table "workload" {
+  schema  = schema.identity
+  comment = "A workload Principal and its accountable owner. TDD-identity-control-004."
+
+  column "principal_id" {
+    null = false
+    type = uuid
+  }
+
+  column "registration_id" {
+    null = false
+    type = uuid
+  }
+
+  column "display_name" {
+    null = false
+    type = text
+  }
+
+  column "purpose" {
+    null    = false
+    type    = text
+    comment = "Why the workload exists. A workload whose purpose nobody wrote down is one nobody can decide to retire."
+  }
+
+  column "workload_type" {
+    null = false
+    type = text
+  }
+
+  column "owner_principal_id" {
+    null    = false
+    type    = uuid
+    comment = "The accountable human Principal, projected into workload_owner."
+  }
+
+  column "team_reference" {
+    null    = true
+    type    = text
+    comment = "The team or group answerable when the owner is not, as Entra's serviceManagementReference and CIS 5.5's department owner."
+  }
+
+  column "owner_recorded_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+
+  column "state" {
+    null = false
+    type = text
+  }
+
+  column "orphaned_at" {
+    null = true
+    type = timestamptz
+  }
+
+  column "last_seen_at" {
+    null = true
+    type = timestamptz
+  }
+
+  column "created_by" {
+    null = false
+    type = uuid
+  }
+
+  column "created_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+
+  column "activated_at" {
+    null = true
+    type = timestamptz
+  }
+
+  // The creating request's idempotency claim, held so recovery can complete it. Without it, a
+  // creation that failed after the claim would leave the caller's key in progress forever.
+  column "idempotency_scope" {
+    null = false
+    type = text
+  }
+
+  column "idempotency_key" {
+    null = false
+    type = text
+  }
+
+  column "request_digest" {
+    null = false
+    type = text
+  }
+
+  column "version" {
+    null    = false
+    type    = bigint
+    default = 1
+  }
+
+  primary_key {
+    columns = [column.principal_id]
+  }
+
+  foreign_key "workload_registration_id_fkey" {
+    columns     = [column.registration_id]
+    ref_columns = [table.client_registration.column.registration_id]
+    on_update   = NO_ACTION
+    on_delete   = NO_ACTION
+  }
+
+  index "workload_registration" {
+    unique  = true
+    columns = [column.registration_id]
+  }
+
+  index "workload_by_owner" {
+    columns = [column.owner_principal_id]
+    where   = "state <> 'retired'"
+  }
+
+  index "workload_orphaned" {
+    columns = [column.orphaned_at]
+    where   = "state = 'orphaned'"
+  }
+
+  check "workload_type_check" {
+    expr = "workload_type IN ('service', 'job', 'connector', 'agent')"
+  }
+
+  check "workload_state_check" {
+    expr = "state IN ('pending', 'active', 'orphaned', 'suspended', 'retired')"
+  }
+
+  check "workload_named_check" {
+    expr = "btrim(display_name) <> '' AND btrim(purpose) <> ''"
+  }
+
+  // A workload cannot answer for itself.
+  check "workload_owner_not_self_check" {
+    expr = "owner_principal_id <> principal_id"
+  }
+
+  check "workload_orphaned_check" {
+    expr = "state <> 'orphaned' OR orphaned_at IS NOT NULL"
+  }
+}
+
+// Every change of a workload's owner: who moved it, from whom to whom, and why. Insert-only, so the
+// record of who was answerable at a given time cannot be rewritten by whoever holds it now.
+table "workload_owner_change" {
+  schema  = schema.identity
+  comment = "An insert-only record of a workload's change of owner. TDD-identity-control-004."
+
+  column "change_id" {
+    null = false
+    type = uuid
+  }
+
+  column "principal_id" {
+    null = false
+    type = uuid
+  }
+
+  column "previous_owner" {
+    null = false
+    type = uuid
+  }
+
+  column "new_owner" {
+    null = false
+    type = uuid
+  }
+
+  column "changed_by" {
+    null = false
+    type = uuid
+  }
+
+  column "reason" {
+    null = false
+    type = text
+  }
+
+  column "changed_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+
+  primary_key {
+    columns = [column.change_id]
+  }
+
+  foreign_key "workload_owner_change_principal_id_fkey" {
+    columns     = [column.principal_id]
+    ref_columns = [table.workload.column.principal_id]
+    on_update   = NO_ACTION
+    on_delete   = NO_ACTION
+  }
+
+  index "workload_owner_change_by_workload" {
+    columns = [column.principal_id, column.changed_at]
+  }
+
+  check "workload_owner_change_reason_check" {
+    expr = "btrim(reason) <> ''"
+  }
+}
