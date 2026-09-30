@@ -126,6 +126,14 @@ func (s *Service) Adopt(ctx context.Context, req AdoptRequest) (AdoptResult, err
 		declaredKeys = append(declaredKeys, key.JWK)
 	}
 
+	if !req.DryRun {
+		// A completed adoption replays before the checks: its client_key is registered by then, and
+		// the retry must answer what the first request answered.
+		if replayed, ok, err := s.replayedAdoption(ctx, req); err != nil || ok {
+			return replayed, err
+		}
+	}
+
 	scopeName := managedScopes[req.AudienceClass]
 	scopeID, err := call(ctx, s.cfg.CallTimeout, func(ctx context.Context) (string, error) {
 		return s.kernel.ClientScopeID(ctx, s.cfg.Realm, scopeName)
@@ -215,6 +223,32 @@ func adoptDigest(req AdoptRequest) string {
 		RegisteredBy string
 	}{req, req.RegisteredBy.String()})
 	return idempotency.Digest(body)
+}
+
+// errFreshClaim rolls back the claim replayedAdoption takes only to look.
+var errFreshClaim = errors.New("registration: the adoption has not completed")
+
+// replayedAdoption answers the stored result when this Idempotency-Key completed an adoption. A key
+// never seen is claimed and rolled back, so the adoption itself claims it afresh.
+func (s *Service) replayedAdoption(ctx context.Context, req AdoptRequest) (AdoptResult, bool, error) {
+	var result AdoptResult
+	err := s.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		claim, err := idempotency.Claim(ctx, tx, req.CallerScope, req.IdempotencyKey, adoptDigest(req))
+		if err != nil {
+			return err
+		}
+		if claim.State != idempotency.StateReplay {
+			return errFreshClaim
+		}
+		return json.Unmarshal(claim.Body, &result)
+	})
+	switch {
+	case errors.Is(err, errFreshClaim):
+		return AdoptResult{}, false, nil
+	case err != nil:
+		return AdoptResult{}, false, err
+	}
+	return result, true, nil
 }
 
 var adoptLifespanStatement = `SELECT ` + LifespanSQL("$1::text", "$2::text[]")

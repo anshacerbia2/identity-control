@@ -555,6 +555,7 @@ A client created before this service existed, by a bootstrap script, is refused 
 adopt(request):
     validate the declaration as a registration, with one or two public keys, and a reason
     reject a profile other than 'confidential'
+    unless dry_run: an Idempotency-Key that completed an adoption returns its stored answer
     reject a client_key a registration already holds
     read the one Keycloak client with that client_key; none is not found
     compare it with the declaration, per field class:
@@ -582,6 +583,10 @@ it was adopted, the registration. The first declared key is recorded `active` an
 - **Only `confidential` is adopted.** A workload's client carries its Principal on its
   service-account user and is created through the workload path (`TDD-identity-control-004`); a
   `public` client and a resource hold no key to prove anything with (`ADR-IAM-001 §5.12` rule 4).
+- **A replay answers before the checks.** Once adopted, the client_key is registered, so the
+  checks would refuse the retry of the request that registered it. The retry with the same
+  `Idempotency-Key` returns the first answer instead; a key not yet completed is claimed only to
+  look, and rolled back.
 - **The plan changes nothing.** It is what an operator reads before adopting, and what the
   refusal of an adoption returns, so a refused adoption says which class stopped it.
 - **Convergence happens before the record.** A converged difference left behind by a failed commit
