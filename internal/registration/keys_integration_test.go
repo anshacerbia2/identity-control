@@ -165,14 +165,11 @@ func TestAWorkloadWaitsForTheKernelsWorkloadScope(t *testing.T) {
 		t.Errorf("a confidential client lost acr: %v (registration %s)", scopes, registration.ID)
 	}
 
-	// A workload built again by an operator's recreate is scoped the same way.
+	// A workload's client is not recreated alone: its identity lives on the service-account user a
+	// new client would not have.
 	h.kernel.Remove("console-admin", keycloak.ClientUUID(client))
-	recreated, err := h.service.Recreate(context.Background(), workload.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, scopes, _ := h.kernel.Spec(recreated); slices.Contains(scopes, "scope-acr") {
-		t.Errorf("the recreated workload holds acr: %v", scopes)
+	if _, err := h.service.Recreate(context.Background(), workload.ID); !errors.Is(err, ErrWorkloadRecreate) {
+		t.Errorf("recreating a workload's client answered %v, want ErrWorkloadRecreate", err)
 	}
 }
 

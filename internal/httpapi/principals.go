@@ -222,6 +222,10 @@ func writeProvisioningError(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, provisioning.ErrNotFound):
 		httpapi.Problem(w, r, httpapi.NotFound, "No such Principal")
 
+	case errors.Is(err, provisioning.ErrWorkloadPath):
+		httpapi.Problem(w, r, httpapi.ValidationFailed,
+			"A workload is created through POST /v1/workloads: its identity lives on its client's service account")
+
 	case errors.Is(err, provisioning.ErrIdentifierTaken),
 		errors.Is(err, provisioning.ErrDuplicateInKernel),
 		errors.Is(err, keycloak.ErrForbidden):

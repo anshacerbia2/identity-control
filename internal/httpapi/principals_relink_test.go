@@ -19,7 +19,7 @@ func principalRoutes(t *testing.T, stub *stubProvisioner) http.Handler {
 		t.Fatal(err)
 	}
 	registrations, _ := httpapi.NewRegistrations(&stubRegistrar{}, &stubReconciler{})
-	built, err := httpapi.Routes(httpapi.RoutesConfig{Principals: principals, Registrations: registrations, Database: &stubProber{}})
+	built, err := httpapi.Routes(httpapi.RoutesConfig{Principals: principals, Registrations: registrations, Workloads: stubWorkloads(t), Database: &stubProber{}})
 	if err != nil {
 		t.Fatal(err)
 	}

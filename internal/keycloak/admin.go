@@ -289,6 +289,54 @@ func (a *Admin) DisableUser(ctx context.Context, realm Realm, userID UserID) err
 	return nil
 }
 
+// WriteWorkloadIdentity reads the whole user representation, sets the three attributes, and writes
+// it back, as identity-kernel's compat/workload_test.go proved against the pinned kernel. The whole
+// representation rather than the attributes alone, because a partial update is not a documented
+// no-op for the fields it omits.
+func (a *Admin) WriteWorkloadIdentity(ctx context.Context, realm Realm, userID UserID, principalID, owner id.UUID) error {
+	switch {
+	case userID == "":
+		return errors.New("keycloak: a user identifier is required")
+	case principalID.IsNil() || owner.IsNil():
+		return errors.New("keycloak: a workload identity names its principal_id and its owner")
+	}
+	path := fmt.Sprintf("/admin/realms/%s/users/%s", url.PathEscape(string(realm)), url.PathEscape(string(userID)))
+	response, err := a.do(ctx, http.MethodGet, path, nil, nil, false)
+	if err != nil {
+		return err
+	}
+	var representation map[string]any
+	decodeErr := json.Unmarshal(response.body, &representation)
+	response.Close()
+	if decodeErr != nil {
+		return fmt.Errorf("keycloak: decode user: %w", decodeErr)
+	}
+	attributes, _ := representation["attributes"].(map[string]any)
+	if attributes == nil {
+		attributes = map[string]any{}
+	}
+	attributes[AttrPrincipalID] = []string{principalID.String()}
+	attributes[AttrSubjectType] = []string{string(SubjectWorkload)}
+	attributes[AttrWorkloadOwner] = []string{owner.String()}
+	representation["attributes"] = attributes
+	// Not marked mutating: a PUT of a whole representation is idempotent.
+	written, err := a.do(ctx, http.MethodPut, path, nil, representation, false)
+	if err != nil {
+		return err
+	}
+	written.Close()
+
+	back, err := a.GetUser(ctx, realm, userID)
+	if err != nil {
+		return fmt.Errorf("keycloak: read the workload identity back: %w", err)
+	}
+	if back.PrincipalID != principalID || back.SubjectType != SubjectWorkload || back.WorkloadOwner != owner {
+		return errors.New("keycloak: the service-account user does not hold the workload identity after the write; " +
+			"the realm's declared user profile dropped an attribute")
+	}
+	return nil
+}
+
 // userRepresentation is the subset of the kernel representation this service reads.
 //
 // Fields the kernel returns and this service must not hold — credentials, federated identities,

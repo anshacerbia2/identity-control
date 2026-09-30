@@ -14,6 +14,7 @@ import (
 	"github.com/anshacerbia2/foundation-platform/id"
 
 	"github.com/anshacerbia2/identity-control/internal/keycloak"
+	registrations "github.com/anshacerbia2/identity-control/internal/registration"
 )
 
 // What an operator does with the reconciler: read its last run and open findings, lift a block or
@@ -266,6 +267,9 @@ func (r *Reconciler) recreateMissing(ctx context.Context, finding id.UUID, reg r
 		return fmt.Errorf("%w: nothing is configured to recreate %s", ErrNotResolvable, reg.clientKey)
 	}
 	client, err := r.cfg.Recreate(ctx, reg.id)
+	if errors.Is(err, registrations.ErrWorkloadRecreate) {
+		return fmt.Errorf("%w: %s is a workload's client, rebuilt through its workload", ErrNotResolvable, reg.clientKey)
+	}
 	if err != nil {
 		return fmt.Errorf("reconcile: recreate %s: %w", reg.clientKey, err)
 	}

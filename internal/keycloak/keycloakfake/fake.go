@@ -65,10 +65,11 @@ type Client struct {
 	// a response lost after the kernel committed.
 	AmbiguousCreateSucceeds bool
 
-	// FailFind, FailList, and FailDisable are returned by their operations when set.
+	// FailFind, FailList, FailDisable and FailWrite are returned by their operations when set.
 	FailFind    error
 	FailList    error
 	FailDisable error
+	FailWrite   error
 
 	// Calls counts each operation, so a test can assert that a repeated idempotency key
 	// performed no remote call.
@@ -84,6 +85,7 @@ type Calls struct {
 	FindByPrincipalID int
 	ListUsers         int
 	DisableUser       int
+	WriteWorkload     int
 }
 
 type stored struct {
@@ -288,6 +290,35 @@ func (c *Client) GetUser(ctx context.Context, realm keycloak.Realm, userID keycl
 		return keycloak.User{}, keycloak.ErrNotFound
 	}
 	return stored.user, nil
+}
+
+// AddServiceAccount records a client's service-account user, as the kernel creates one with a
+// workload client. It carries no attribute until WriteWorkloadIdentity writes them.
+func (c *Client) AddServiceAccount(realm keycloak.Realm, user keycloak.User) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.users[user.ID] = stored{realm: realm, user: keycloak.User{ID: user.ID, Username: user.Username, Enabled: true}}
+}
+
+// WriteWorkloadIdentity sets a workload's claim-source attributes on a user.
+func (c *Client) WriteWorkloadIdentity(ctx context.Context, realm keycloak.Realm, userID keycloak.UserID,
+	principalID, owner id.UUID) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.Calls.WriteWorkload++
+	if c.FailWrite != nil {
+		return c.FailWrite
+	}
+	entry, ok := c.users[userID]
+	if !ok || entry.realm != realm {
+		return keycloak.ErrNotFound
+	}
+	entry.user.PrincipalID, entry.user.SubjectType, entry.user.WorkloadOwner = principalID, keycloak.SubjectWorkload, owner
+	c.users[userID] = entry
+	return nil
 }
 
 // DeleteUser removes a user, as an administrator deleting it in the console would.

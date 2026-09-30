@@ -468,6 +468,12 @@ func TestCreateRejectsInvalidRequests(t *testing.T) {
 			r.SubjectType = keycloak.SubjectWorkload
 			return r
 		},
+		// A workload's user is its client's service account, so this path can create no workload
+		// whose token would carry its identity (TDD-identity-control-004 §Creation).
+		"any workload at all": func(r provisioning.CreateRequest) provisioning.CreateRequest {
+			r.SubjectType, r.WorkloadOwner = keycloak.SubjectWorkload, mustUUID(t)
+			return r
+		},
 	}
 
 	for name, mutate := range cases {

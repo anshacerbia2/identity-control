@@ -350,6 +350,8 @@ func validateCreate(req CreateRequest) error {
 		return fmt.Errorf("provisioning: subject_type %q is not human or workload", req.SubjectType)
 	case req.SubjectType == keycloak.SubjectWorkload && req.WorkloadOwner.IsNil():
 		return errors.New("provisioning: a workload requires an accountable workload_owner")
+	case req.SubjectType == keycloak.SubjectWorkload:
+		return ErrWorkloadPath
 	case req.SubjectType == keycloak.SubjectHuman && !req.WorkloadOwner.IsNil():
 		return errors.New("provisioning: a human must not carry a workload_owner")
 	// ADR-IAM-001 §5.6 places the authority for a provider grant in the Organization Platform, so

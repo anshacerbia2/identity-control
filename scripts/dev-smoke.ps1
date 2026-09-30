@@ -8,11 +8,12 @@
 #   3. a human Principal is created                        TDD-identity-control-001
 #   4. a replayed Idempotency-Key returns the same id      STD-GLB-002
 #   5. a workload without an owner is refused              accountability is structural
-#   6. a workload with an owner is created
+#   6. a workload is refused on the Principal path         its identity lives on its client's service account
 #   7. an unknown field is refused                         no client-supplied keycloak_user_id
 #   8. a missing Idempotency-Key is refused
 #  10. the registration sweep runs and reports    TDD-identity-control-003, Proof B step 4
 #   9. clients are registered from desired state  TDD-identity-control-003, Proof B step 5
+#  11. a workload is created, and its own token names it    TDD-identity-control-004
 #
 # SECRETS: read from the environment.
 #   $env:IDENTITY_CALLER_KEY_FILE = '...'   # the caller's private key, printed by create-kernel-clients.sh
@@ -122,12 +123,14 @@ Expect "refused" $r.code 400
 Write-Host "        $($r.body)"
 
 Write-Host ""
-Write-Host "6. workload with an owner"
+Write-Host "6. a workload on the Principal path"
+# A user created through POST /users is not the one a client credentials token is issued for, so a
+# workload made here would carry its identity into no token. Workloads go through /v1/workloads.
 $owner = $payload.principal_id
 $r = Send-Json "POST" "/v1/principals" `
     "{`"username`":`"svc.reporting`",`"subject_type`":`"workload`",`"workload_owner`":`"$owner`"}" `
-    $token "smoke-workload-0001"
-Expect "created" $r.code 201
+    $token "smoke-workload-principal-path"
+Expect "refused" $r.code 400
 Write-Host "        $($r.body)"
 
 Write-Host ""
@@ -190,6 +193,57 @@ Expect "the last run is reported" $r.code 200
 if ($r.code -eq 200) {
     Expect "a last run exists" ([bool](($r.body | ConvertFrom-Json).last_run)) $true
 }
+Write-Host ""
+Write-Host "11. a workload, end to end"
+# The workload's deployable holds its private key; here that is a key made for this run. The smoke
+# then authenticates as the workload with it and reads its own token: principal_id, subject_type and
+# workload_owner come from the client's service-account user, and acr is absent (STD-IAM-002 3.2).
+# A fresh key and client_key each run, because a registered key is never registered again.
+if ($PSVersionTable.PSEdition -ne 'Core') {
+    Write-Host "  skip  PowerShell 7 is needed to make a PKCS#8 key for the run"
+} else {
+    $run = [Guid]::NewGuid().ToString("N").Substring(0, 12)
+    $workloadClient = "smoke-job-$run"
+    $rsa = [System.Security.Cryptography.RSA]::Create(3072)
+    $keyFile = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "$workloadClient.pem")
+    try {
+        $pem = "-----BEGIN PRIVATE KEY-----`n" +
+            [Convert]::ToBase64String($rsa.ExportPkcs8PrivateKey(), [Base64FormattingOptions]::InsertLineBreaks) +
+            "`n-----END PRIVATE KEY-----`n"
+        [System.IO.File]::WriteAllText($keyFile, $pem)
+        $public = $rsa.ExportParameters($false)
+        $jwk = @{ kty = "RSA"; n = (ConvertTo-Base64Url $public.Modulus); e = (ConvertTo-Base64Url $public.Exponent) }
+        $body = @{
+            display_name = "Smoke job"; purpose = "Proves a workload authenticates as itself"; workload_type = "job"
+            owner_principal_id = $owner; client_key = $workloadClient; application_ref = "smoke"; public_key = $jwk
+        } | ConvertTo-Json -Compress -Depth 4
+        $r = Send-Json "POST" "/v1/workloads" $body $token "smoke-workload-$run"
+        Expect "created" $r.code 201
+        if ($r.code -eq 201) {
+            $created = $r.body | ConvertFrom-Json
+            Expect "state" $created.state "active"
+            Expect "owner" $created.owner_principal_id $owner
+
+            $issuer = Get-RealmIssuer $kcBase $realm
+            $assertion = New-ClientAssertion -KeyFile $keyFile -ClientId $workloadClient -Audience $issuer
+            $grant = Invoke-RestMethod -Method Post -Uri "$kcBase/realms/$realm/protocol/openid-connect/token" -Body @{
+                grant_type = "client_credentials"; client_id = $workloadClient
+                client_assertion_type = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+                client_assertion = $assertion
+            }
+            $claims = Decode-Segment $grant.access_token.Split('.')[1] | ConvertFrom-Json
+            Expect "principal_id" $claims.principal_id $created.principal_id
+            Expect "subject_type" $claims.subject_type "workload"
+            Expect "workload_owner" $claims.workload_owner $owner
+            Expect "no acr" ($claims.PSObject.Properties.Name -contains 'acr') $false
+            Expect "no refresh token" ($grant.PSObject.Properties.Name -contains 'refresh_token') $false
+        }
+    } finally {
+        $rsa.Dispose()
+        Remove-Item -Force -ErrorAction SilentlyContinue $keyFile
+    }
+}
+
 Write-Host ""
 if ($failures -gt 0) {
     Write-Host "$failures case(s) failed."

@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-004
   title: Workload and Bounded Agent Identity
   owner: Core Platform Team
-  version: 1.2.0
+  version: 1.3.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -70,6 +70,24 @@ What differs is everything about its lifecycle:
 | Refresh tokens | Permitted | Prohibited — it re-authenticates instead |
 | Step-up | Possible | Meaningless; there is nobody to prompt |
 
+**Its Keycloak user is its client's service-account user.** A workload authenticates as its own
+client with the client credentials grant, and that grant issues its token for the user Keycloak
+creates with the client, the service-account user, and for no other user. The claim-source
+attributes a workload's token carries are therefore that user's, and a user created with
+`POST /users` would carry the workload's identity into no token at all. identity-kernel proved it
+against the pinned release (`compat/workload_test.go`, identity-kernel#23), and
+`TDD-identity-kernel-001` §Claim Projection records it. The human creation path in
+`TDD-identity-control-001` therefore refuses a workload, and so does `:relink`.
+
+**Where the workload may act is not decided here.** Every platform with a long record of workload
+identity keeps the identity in one home and grants its access by separate bindings: a Google Cloud
+service account lives in one project and is granted roles in others, an Entra application has one
+home tenant and a service principal in every tenant that uses it, an AWS role lives in one account
+and is assumed from others, and a Kubernetes ServiceAccount lives in one namespace and is bound by
+RoleBindings elsewhere. Here the binding is a Membership, which organization-control grants and
+revokes like any other, and whose grant records who made it. This service creates the identity and
+keeps its owner, and needs no Membership data to do either.
+
 The lifecycle difference is the whole problem. **Workloads outlive the people who
 create them.** A connector built by an engineer who left two years ago keeps running,
 keeps holding credentials, and keeps having nobody who can say whether it should. That
@@ -85,27 +103,34 @@ a cryptographic one.
 | `AgentDelegationService` | `internal/workload` | Bounded delegation for governed agents |
 | `WorkloadReconciler` | `internal/reconcile` | Orphan sweep, unused-workload detection |
 
+**Built so far.** `WorkloadProvisioner` is built: creation, pending-workload recovery, and reading a
+workload. Of `OwnershipRegistry`, reassignment is built. Orphan detection needs the owner-lifecycle
+events this service does not consume yet, and the suspension it leads to needs the registration
+lifecycle (`TDD-identity-control-003`, `:suspend` and `:retire`). `AgentDelegationService`,
+`WorkloadReconciler`, unused detection and periodic review are not built, and an `agent` workload is
+refused until delegation is.
+
 ### Creation
 
 ```mermaid
 sequenceDiagram
     participant C as Caller
     participant W as WorkloadProvisioner
-    participant P as PrincipalProvisioner
     participant R as RegistrationService
     participant D as Control Database
+    participant K as Keycloak
 
     C->>W: Create workload, with owner, purpose, and its public key
-    W->>W: Validate the owner has an active Membership
-    W->>D: Begin control-plane transaction
-    W->>P: Reserve principal_id, subject_type=workload, workload_owner=owner
-    W->>D: Persist workload and registration intents
+    W->>R: Prepare the workload-profile registration: validation, key, managed scope
+    W->>D: Begin: claim the Idempotency-Key, check the owner is an active human Principal
+    W->>D: Mint principal_id, reserve the registration and its key, record the workload pending
     W->>D: Commit complete local intent
-    W->>P: Realize reserved Principal in Keycloak
-    P-->>W: Principal active
-    W->>R: Realize workload-profile client, with the public key
-    R-->>W: Registration, its key registered
-    W->>D: Persist ownership record
+    W->>R: Realize the client, holding the public key
+    R->>K: Create the client; attach scnehaux-workload; detach acr
+    K-->>R: Client, with its service-account user
+    W->>K: Read the client's service-account user (registration credential)
+    W->>K: Write principal_id, subject_type=workload, workload_owner on it (Principal credential)
+    W->>D: Record the mapping to that user, activate the workload, complete the key
     W-->>C: principal_id and the registration, nothing secret
 ```
 
@@ -113,41 +138,90 @@ The workload's deployable generates its key pair and keeps the private key in it
 custody. The caller supplies only the public key, and nothing secret travels in either
 direction (`ADR-IAM-001 §5.12`, `TDD-identity-control-003` §Client Key Records).
 
-The workload Principal is minted through the same path as a human. The request passes
-`subject_type=workload` and the active human `workload_owner` into
-`PrincipalProvisioner`; those values are immutable claim-source attributes on the
-initial Keycloak create call. There is no second creation path, identifier space, or
-reconciler.
+The workload's `principal_id` is minted the same way as a human's, a UUIDv7 in the Control
+Database, and lives in the same `identity.principal_mapping` registry once its user exists. What
+differs is the user: the mapping binds the `principal_id` to the client's service-account user,
+written by the Principal credential, rather than to a user `PrincipalProvisioner` creates.
 
-The Principal mapping, workload ownership row, and client-registration intent are
-reserved in one Control Database transaction before either remote call. Recovery can
-therefore finish a partially realized workload, but can never discover a workload
-Principal for which no accountable owner was durably recorded.
+The workload record, its owner, and its client-registration intent are reserved in one Control
+Database transaction before either remote call. Recovery can therefore finish a partially realized
+workload, but can never discover a workload whose accountable owner was not durably recorded. The
+mapping is written only when the service-account user exists, so the human pending-recovery path,
+which creates users with `POST /users`, never sees a workload.
+
+**The owner is an active human Principal of this realm.** That is the fact this service owns, and it
+is checked when the workload is created and when it is reassigned. A workload cannot own a
+workload: accountability that ends at a machine ends nowhere. Whether the owner may act in the
+Tenant the workload operates in is a Tenancy fact, decided when organization-control grants the
+workload its Membership, and no platform surveyed requires the owner's own membership as a
+condition of creating the identity: Entra Agent ID requires a sponsor, which may be a guest, and
+CIS 5.5 requires the inventory to name an owner, a purpose and a review date.
+
+**`team_reference`** names the team or group answerable when the owner is not, as Entra's
+`serviceManagementReference` and CIS 5.5's department owner do. It is optional, and Microsoft's
+guidance to keep at least two owners is met by it rather than by a second owner column.
+
+**Recovery.** Pending workloads are resumed before each registration sweep, after pending
+registrations. A workload whose client exists is bound to the client's service-account user. One
+whose client was refused, because an unregistered client held its `client_key`, is retired with its
+registration. One whose client creation is still unresolved waits for registration recovery. The
+creating request's idempotency claim is held on the workload row, so recovery completes it and a
+retry of the same request replays the workload rather than waiting on it forever.
+
+**A workload's client is never recreated alone.** An operator's reconcile that would recreate a
+deleted client refuses a workload's, because a new client has a new service-account user without the
+workload's identity. Rebuilding a workload's client is a workload operation and is not built yet.
 
 ## Data Model
 
 ```sql
 CREATE TABLE identity.workload (
     principal_id      UUID        PRIMARY KEY,
-    registration_id   UUID        NOT NULL REFERENCES identity.client_registration(registration_id),
+    registration_id   UUID        NOT NULL UNIQUE REFERENCES identity.client_registration(registration_id),
     display_name      TEXT        NOT NULL,
     purpose           TEXT        NOT NULL,
     workload_type     TEXT        NOT NULL,
     owner_principal_id UUID       NOT NULL,
+    team_reference    TEXT,
     owner_recorded_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     state             TEXT        NOT NULL,
     orphaned_at       TIMESTAMPTZ,
     last_seen_at      TIMESTAMPTZ,
+    created_by        UUID        NOT NULL,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    activated_at      TIMESTAMPTZ,
+    idempotency_scope TEXT        NOT NULL,
+    idempotency_key   TEXT        NOT NULL,
+    request_digest    TEXT        NOT NULL,
+    version           BIGINT      NOT NULL DEFAULT 1,
     CONSTRAINT workload_type_check
         CHECK (workload_type IN ('service', 'job', 'connector', 'agent')),
     CONSTRAINT workload_state_check
-        CHECK (state IN ('active', 'orphaned', 'suspended', 'retired'))
+        CHECK (state IN ('pending', 'active', 'orphaned', 'suspended', 'retired')),
+    CONSTRAINT workload_named_check CHECK (btrim(display_name) <> '' AND btrim(purpose) <> ''),
+    CONSTRAINT workload_owner_not_self_check CHECK (owner_principal_id <> principal_id),
+    CONSTRAINT workload_orphaned_check CHECK (state <> 'orphaned' OR orphaned_at IS NOT NULL)
 );
 
 CREATE INDEX workload_by_owner ON identity.workload (owner_principal_id) WHERE state <> 'retired';
 CREATE INDEX workload_orphaned ON identity.workload (orphaned_at) WHERE state = 'orphaned';
+
+CREATE TABLE identity.workload_owner_change (
+    change_id       UUID        PRIMARY KEY,
+    principal_id    UUID        NOT NULL REFERENCES identity.workload(principal_id),
+    previous_owner  UUID        NOT NULL,
+    new_owner       UUID        NOT NULL,
+    changed_by      UUID        NOT NULL,
+    reason          TEXT        NOT NULL CHECK (btrim(reason) <> ''),
+    changed_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 ```
+
+A workload is `pending` from its reservation until its identity is bound, and `retired` when its
+creation was refused. The idempotency columns hold the creating request's claim so recovery can
+complete it. The runtime role deletes no workload row, and `workload_owner_change` is insert-only,
+so the record of who answered for a credential at a given time cannot be rewritten by whoever holds
+the workload now (`grants.sql`).
 
 `purpose` is free text and is required. A workload whose purpose nobody wrote down is a
 workload nobody can decide to retire, and the review that should retire it will defer
@@ -180,9 +254,9 @@ it.
 ## API / Interface
 
 ```text
-POST   /v1/workloads
-GET    /v1/workloads/{principal_id}
-POST   /v1/workloads/{principal_id}:reassign
+POST   /v1/workloads                                   built
+GET    /v1/workloads/{principal_id}                    built
+POST   /v1/workloads/{principal_id}:reassign           built
 POST   /v1/workloads/{principal_id}:suspend
 POST   /v1/workloads/{principal_id}:restore
 POST   /v1/workloads/{principal_id}:retire
@@ -192,6 +266,14 @@ GET    /v1/workloads:unused
 POST   /v1/agents/{principal_id}/delegations
 POST   /v1/agents/{principal_id}/delegations/{delegation_id}:revoke
 ```
+
+`POST /v1/workloads` takes an `Idempotency-Key` and `display_name`, `purpose`, `workload_type`
+(`service`, `job` or `connector`), `owner_principal_id`, an optional `team_reference`, `client_key`,
+`application_ref`, an optional `audience`, and `public_key`, the workload's first public key as a
+JWK. The creating Principal is the authenticated caller. It answers `201` with the workload, which
+names its `registration_id` and carries no kernel identifier and nothing secret. An `agent` is
+refused until bounded delegation is built. `:reassign` takes `{"owner_principal_id": ...}` and an
+`X-Administrative-Reason`.
 
 ### Token Shape
 
@@ -208,6 +290,10 @@ POST   /v1/agents/{principal_id}/delegations/{delegation_id}:revoke
   "exp": 1786000540
 }
 ```
+
+`tenant_id` and `membership_version` appear once the workload holds a Membership and its context
+is projected (`TDD-identity-control-002`). `acr` never appears: the workload's client does not hold
+the kernel's built-in `acr` scope (`TDD-identity-control-003` §Profiles).
 
 `subject_type` is what makes a workload distinguishable in audit and authorization, as
 STD-IAM-001 §3.7 requires. A product enforcing a rule that applies only to humans reads
@@ -242,7 +328,7 @@ accounts nobody owns. Never acting leaves credentials owned by nobody, which is 
 state the control exists to prevent.
 
 ```text
-on membership.security.revoked or principal retirement for a human:
+on the owner's Principal being retired, quarantined or disabled:
     for each active workload owned by that Principal:
         set state = 'orphaned', orphaned_at = now()
         notify the owner's administrative chain and the workload's Tenant admins
@@ -254,10 +340,25 @@ daily sweep over orphaned workloads:
     age >= 30 days   → suspend the workload, notify, keep the record
 
 on reassign:
-    validate the new owner has an active Membership in the workload's Tenant
+    validate the new owner is an active human Principal, and not the current owner
+    write the new owner on the workload's service-account user
     set owner, clear orphaned_at, state = 'active'
-    emit a privileged-administration event
+    record the change, with who made it and why, insert-only
+    emit a privileged-administration event (once this service publishes events)
 ```
+
+**The trigger is the owner's identity ending, not a Membership.** An owner who leaves one Tenant but
+stays in the organization is a mover, not a leaver. Whether the workload may still act in that Tenant
+is organization-control's decision about the workload's own Membership; the workload is not orphaned
+by it. Entra's lifecycle workflows treat a sponsor's move the same way, by transferring and
+notifying rather than disabling.
+
+**The schedule is stricter than the platforms' defaults, and within the standard.** None of Google
+Cloud, Entra or AWS disables a workload identity when its owner leaves; they flag ownerless
+identities, notify co-owners and managers, and review. NIST SP 800-53 AC-2(3)(b) requires accounts to
+be disabled within an organization-defined period once they are no longer associated with an
+individual, and the thirty-day suspension is that period. It is reversible, so the control does not
+become an outage.
 
 The workload keeps running while orphaned. That is deliberate: the grace period buys
 the reassignment that ought to happen, and the escalation makes ignoring it
@@ -307,6 +408,20 @@ An unused finding is not automatic retirement. A quarterly job legitimately sits
 for eighty-nine days. The finding puts the decision in front of the owner, who is the
 only party who can make it.
 
+Ninety days is the window Google Cloud's service account insights and Entra's unused-application
+recommendation use. CIS 5.3 asks for forty-five, which would flag a quarterly job every quarter. The
+order after a decision is the platforms' too: disable first, delete only after a grace period, as
+Entra's fifteen-day wait and Google Cloud's thirty-day undelete window do.
+
+### Periodic Review
+
+Every workload is reviewed by its owner at least quarterly: whether it is still needed, whether its
+purpose still holds, and whether its owner and team are right. CIS 5.5 requires the service-account
+inventory to name the owner, the purpose and a review date, reviewed at least quarterly, and NIST
+SP 800-53 AC-2(j) requires accounts to be reviewed at a defined frequency. An overdue review is a
+finding for the owner and then the Tenant administrator, on the orphan escalation's path. The review
+record and its schedule are not built.
+
 ### Agent Delegation
 
 ```text
@@ -336,29 +451,42 @@ event that revokes the human.
 | `IDENTITY_WORKLOAD_UNUSED_THRESHOLD` | `90d` | Unused finding threshold |
 | `IDENTITY_AGENT_DELEGATION_MAX_DURATION` | `24h` | Ceiling on one delegation |
 | `IDENTITY_WORKLOAD_SWEEP_INTERVAL` | `24h` | Orphan and unused sweep cadence |
+| `IDENTITY_WORKLOAD_REVIEW_INTERVAL` | `2160h` (90 days) | Periodic owner review |
+
+None of these is read yet: orphan handling, unused detection, delegation and review are not built.
+Pending-workload recovery runs on the registration sweep's schedule
+(`IDENTITY_REGISTRATION_RECONCILE_INTERVAL`) and uses `IDENTITY_PENDING_RECOVERY_AFTER`.
 
 ## Testing Strategy
 
 ### Identity Model
 
-- A workload carries a `principal_id` minted through the same path as a human.
-- Its token carries `subject_type = workload` and `workload_owner`.
-- A crash after Principal realization but before client realization recovers from the
-  same ownership and registration intents without creating a second Principal.
-- No Keycloak workload user exists before its local ownership intent commits.
+- A workload carries a `principal_id` minted the same way as a human's.
+- Its Keycloak user is its client's service-account user: the identity is written there, the
+  mapping points there, and no user is created with `POST /users`.
+- Its token carries `subject_type = workload` and `workload_owner`, and no `acr`, asserted against
+  a real kernel by the `deploy-dev` smoke.
+- A crash after the client exists and before the identity is bound recovers from the same
+  ownership and registration intents without creating a second Principal or client, and a retry
+  of the creating request then replays the workload.
+- A client creation that never landed is created by registration recovery and then bound.
+- No Keycloak workload client exists before its local ownership intent commits.
+- The human creation path and `:relink` refuse a workload.
 - A workload Membership is created, verified, and revoked through the same path as a
   human Membership, distinguished only by `subject_type`.
 - The `workload` client profile is refused a refresh token.
 
 ### Ownership
 
-- Creating a workload without an owner holding an active Membership is refused.
+- Creating a workload whose owner is not an active human Principal is refused, and records nothing.
+- A workload cannot own a workload, or itself.
 - Revoking the owner's Membership marks every workload they own `orphaned`, and none of
   them stops working.
 - Escalation fires at the configured ages.
 - Suspension at thirty days is applied, is reversible, and keeps the record.
-- Reassignment to a principal without an active Membership in the workload's Tenant is
-  refused.
+- Reassignment to a principal that is not an active human is refused; a reassignment the kernel
+  refuses changes nothing; one that succeeds names the new owner on the record, the mapping and
+  the service-account user, and records who and why.
 
 ### Revocation
 
@@ -440,3 +568,7 @@ credential compromise, agent delegation review, and unused workload retirement.
 | Depends on | `TDD-identity-control-001` — the workload Principal is minted through the same path |
 | Depends on | `TDD-identity-control-003` — the workload's client registration and credential rotation |
 | Depends on | `TDD-organization-control-002` — workload Membership and its revocation |
+| Depends on | `TDD-identity-kernel-001` §Claim Projection — a workload's claim source is its client's service-account user, and its client holds no `acr` scope |
+| Conforms to | NIST SP 800-53 Rev. 5 AC-2(3)(b), AC-2(j) — disable within a defined period once unowned; review at a defined frequency |
+| Conforms to | CIS Controls v8 5.5 — service-account inventory with owner, purpose and review date, reviewed at least quarterly |
+| Evidence | Google Cloud, Microsoft Entra, AWS IAM and Kubernetes documentation on workload-identity scope, ownership, leavers and unused identities, surveyed 2026-09-30 |

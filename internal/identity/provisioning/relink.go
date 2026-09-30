@@ -72,6 +72,9 @@ func (p *Provisioner) Relink(ctx context.Context, req RelinkRequest) (RelinkResu
 	if err != nil {
 		return RelinkResult{}, err
 	}
+	if mapping.SubjectType == keycloak.SubjectWorkload {
+		return RelinkResult{}, ErrWorkloadPath
+	}
 	if mapping.State != StateActive || !mapping.State.CanTransitionTo(StatePending) {
 		return RelinkResult{}, fmt.Errorf("%w: a %s mapping cannot be relinked", ErrInvalidTransition, mapping.State)
 	}

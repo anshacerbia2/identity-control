@@ -35,7 +35,7 @@ func surface(t *testing.T, prober httpapi.Prober) httpapi.Surface {
 	if err != nil {
 		t.Fatalf("NewRegistrations: %v", err)
 	}
-	built, err := httpapi.Routes(httpapi.RoutesConfig{Principals: handler, Registrations: registrations, Database: prober})
+	built, err := httpapi.Routes(httpapi.RoutesConfig{Principals: handler, Registrations: registrations, Workloads: stubWorkloads(t), Database: prober})
 	if err != nil {
 		t.Fatalf("Routes: %v", err)
 	}

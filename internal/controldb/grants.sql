@@ -35,6 +35,8 @@ BEGIN
               ('identity.registration_finding'),
               ('identity.drift_exception'),
               ('identity.client_key'),
+              ('identity.workload'),
+              ('identity.workload_owner_change'),
               ('identity.principal_relink'),
               ('identity.principal_finding'),
               ('platform.outbox'),
@@ -109,6 +111,12 @@ REVOKE UPDATE, DELETE, TRUNCATE ON identity.drift_exception FROM identity_runtim
 -- privilege also revokes it on every column.
 REVOKE UPDATE, DELETE, TRUNCATE ON identity.client_key FROM identity_runtime;
 GRANT UPDATE (state, retiring_at, revoked_at, revoked_by, revocation_reason) ON identity.client_key TO identity_runtime;
+
+-- A workload record outlives the workload: a retired workload stays the record of who answered for
+-- a credential and why it existed. A change of owner is insert-only, so the record of who was
+-- answerable at a given time cannot be rewritten by whoever holds the workload now.
+REVOKE DELETE, TRUNCATE ON identity.workload FROM identity_runtime;
+REVOKE UPDATE, DELETE, TRUNCATE ON identity.workload_owner_change FROM identity_runtime;
 
 -- A relink record says who moved a Principal to a new Keycloak user and why, so it is insert-only.
 -- A dangling-mapping finding is evidence that a user disappeared, kept after it is resolved.

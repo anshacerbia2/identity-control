@@ -157,6 +157,12 @@ type ClientRegistry interface {
 	// RemoveDefaultClientScope detaches a default client scope from a client. Detaching one the
 	// client does not hold succeeds.
 	RemoveDefaultClientScope(ctx context.Context, realm Realm, client ClientUUID, scopeID string) error
+
+	// ServiceAccountUser returns the user a client credentials token of this client is issued for,
+	// the one Keycloak creates with a client whose service accounts are enabled. It answers
+	// ErrNotFound for a client without one. A workload's claim-source attributes live on this user
+	// (TDD-identity-kernel-001 §Claim Projection).
+	ServiceAccountUser(ctx context.Context, realm Realm, client ClientUUID) (User, error)
 }
 
 // ClientSpec is a client built from desired state (TDD-identity-control-003 §Profiles). Exactly one
@@ -570,6 +576,26 @@ func (a *Admin) ClientScopeID(ctx context.Context, realm Realm, name string) (st
 		}
 	}
 	return "", fmt.Errorf("keycloak: the realm declares no client scope %q: %w", name, ErrNotFound)
+}
+
+// ServiceAccountUser reads the client's service-account user.
+func (a *Admin) ServiceAccountUser(ctx context.Context, realm Realm, client ClientUUID) (User, error) {
+	if client == "" {
+		return User{}, errors.New("keycloak: a client identifier is required")
+	}
+	response, err := a.do(ctx, http.MethodGet, a.clientPath(realm, client)+"/service-account-user", nil, nil, false)
+	if err != nil {
+		return User{}, err
+	}
+	defer response.Close()
+	var representation userRepresentation
+	if err := json.Unmarshal(response.body, &representation); err != nil {
+		return User{}, fmt.Errorf("keycloak: decode service-account user: %w", err)
+	}
+	if representation.ID == "" {
+		return User{}, fmt.Errorf("keycloak: the client has no service-account user: %w", ErrNotFound)
+	}
+	return representation.toUser(), nil
 }
 
 // RemoveDefaultClientScope detaches the scope. Idempotent: a scope the client does not hold is
