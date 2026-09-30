@@ -451,3 +451,22 @@ func TestAddDefaultClientScopeAttachesByIdentifier(t *testing.T) {
 		t.Error("an attachment without a client was sent")
 	}
 }
+
+func TestRemoveDefaultClientScopeDetachesByIdentifier(t *testing.T) {
+	k := &kernel{adminStatus: http.StatusNoContent}
+	admin, _ := newAdmin(t, k)
+	if err := admin.RemoveDefaultClientScope(context.Background(), testRealm, "c1", "acr-id"); err != nil {
+		t.Fatal(err)
+	}
+	if k.lastMethod != http.MethodDelete || k.lastPath != "/admin/realms/scnehaux/clients/c1/default-client-scopes/acr-id" {
+		t.Errorf("%s %s", k.lastMethod, k.lastPath)
+	}
+	// A scope the client does not hold is already detached.
+	absent, _ := newAdmin(t, &kernel{adminStatus: http.StatusNotFound})
+	if err := absent.RemoveDefaultClientScope(context.Background(), testRealm, "c1", "acr-id"); err != nil {
+		t.Errorf("detaching a scope the client does not hold answered %v", err)
+	}
+	if err := admin.RemoveDefaultClientScope(context.Background(), testRealm, "c1", ""); err == nil {
+		t.Error("a detachment without a scope was sent")
+	}
+}

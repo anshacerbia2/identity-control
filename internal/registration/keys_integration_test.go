@@ -142,17 +142,37 @@ func TestAWorkloadWaitsForTheKernelsWorkloadScope(t *testing.T) {
 	if _, err := h.service.Register(context.Background(), req); !errors.Is(err, ErrScopeUndeclared) {
 		t.Fatalf("a workload answered %v, want ErrScopeUndeclared", err)
 	}
+	// The realm attaches its default scopes to every new client, acr among them, as the real kernel
+	// does. A workload must not keep acr: it puts acr=1 into a client credentials token.
 	h.kernel.Scopes["scnehaux-workload"] = "scope-workload"
+	h.kernel.Scopes["acr"] = "scope-acr"
+	h.kernel.RealmDefaults = []string{"scope-profile", "scope-acr"}
 	idempotencyKey, _ := id.NewV7()
 	req.IdempotencyKey = idempotencyKey.String()
-	registration, err := h.service.Register(context.Background(), req)
+	workload, err := h.service.Register(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, client := h.state(registration.ID)
+	_, client := h.state(workload.ID)
 	if spec, scopes, _ := h.kernel.Spec(keycloak.ClientUUID(client)); !spec.Workload || len(spec.RedirectURIs) != 0 ||
-		len(spec.Keys) != 1 || !slices.Equal(scopes, []string{"scope-workload"}) {
-		t.Errorf("workload spec = %+v, scopes %v", spec, scopes)
+		len(spec.Keys) != 1 || !slices.Equal(scopes, []string{"scope-profile", "scope-workload"}) {
+		t.Errorf("workload spec = %+v, scopes %v; want the managed scope and no acr", spec, scopes)
+	}
+
+	// A confidential client keeps the realm's acr: STD-IAM-002 permits it outside the workload profile.
+	registration, bff := h.registerConfidential("keeps-acr", testKey(t))
+	if _, scopes, _ := h.kernel.Spec(bff); !slices.Contains(scopes, "scope-acr") {
+		t.Errorf("a confidential client lost acr: %v (registration %s)", scopes, registration.ID)
+	}
+
+	// A workload built again by an operator's recreate is scoped the same way.
+	h.kernel.Remove("console-admin", keycloak.ClientUUID(client))
+	recreated, err := h.service.Recreate(context.Background(), workload.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, scopes, _ := h.kernel.Spec(recreated); slices.Contains(scopes, "scope-acr") {
+		t.Errorf("the recreated workload holds acr: %v", scopes)
 	}
 }
 

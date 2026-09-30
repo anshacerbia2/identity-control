@@ -422,14 +422,49 @@ func (s *Service) Register(ctx context.Context, req Request) (Registration, erro
 	return registration, nil
 }
 
-// finish attaches the managed scope and activates the registration, running then in the
-// activating transaction.
-func (s *Service) finish(ctx context.Context, registration Registration, client keycloak.ClientUUID, scopeID string,
-	then func(context.Context, db.Tx, Registration) error) error {
+// prohibitedDefaults are the kernel's built-in scopes a profile must not hold, by profile. Keycloak
+// attaches its realm default client scopes to every new client, and its acr scope puts acr=1 into a
+// client credentials token, which STD-IAM-002 §3.2 prohibits for a workload. identity-kernel leaves
+// the realm default alone and records that a workload client does not hold it
+// (TDD-identity-kernel-001 §Claim Projection, compat/workload_test.go).
+var prohibitedDefaults = map[string][]string{
+	ProfileWorkload: {"acr"},
+}
+
+// scope attaches the registration's managed scope to its client, and detaches the built-in scopes its
+// profile must not hold. Both are idempotent, so recovery and recreation run it again safely.
+func (s *Service) scope(ctx context.Context, registration Registration, client keycloak.ClientUUID, scopeID string) error {
 	if _, err := call(ctx, s.cfg.CallTimeout, func(ctx context.Context) (struct{}, error) {
 		return struct{}{}, s.kernel.AddDefaultClientScope(ctx, s.cfg.Realm, client, scopeID)
 	}); err != nil {
 		return fmt.Errorf("registration: attach %s: %w", managedScopes[registration.AudienceClass], err)
+	}
+	for _, name := range prohibitedDefaults[registration.Profile] {
+		prohibited, err := call(ctx, s.cfg.CallTimeout, func(ctx context.Context) (string, error) {
+			return s.kernel.ClientScopeID(ctx, s.cfg.Realm, name)
+		})
+		if errors.Is(err, keycloak.ErrNotFound) {
+			// A realm without the scope has nothing to detach.
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("registration: find %s: %w", name, err)
+		}
+		if _, err := call(ctx, s.cfg.CallTimeout, func(ctx context.Context) (struct{}, error) {
+			return struct{}{}, s.kernel.RemoveDefaultClientScope(ctx, s.cfg.Realm, client, prohibited)
+		}); err != nil {
+			return fmt.Errorf("registration: detach %s: %w", name, err)
+		}
+	}
+	return nil
+}
+
+// finish scopes the client and activates the registration, running then in the activating
+// transaction.
+func (s *Service) finish(ctx context.Context, registration Registration, client keycloak.ClientUUID, scopeID string,
+	then func(context.Context, db.Tx, Registration) error) error {
+	if err := s.scope(ctx, registration, client, scopeID); err != nil {
+		return err
 	}
 	return s.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
 		tag, err := tx.Exec(ctx, activateStatement, registration.ID.String(), string(client))
@@ -598,9 +633,7 @@ func (s *Service) Recreate(ctx context.Context, registrationID id.UUID) (keycloa
 	if err != nil {
 		return "", fmt.Errorf("registration: recreate %s: %w", registration.ClientKey, err)
 	}
-	if _, err := call(ctx, s.cfg.CallTimeout, func(ctx context.Context) (struct{}, error) {
-		return struct{}{}, s.kernel.AddDefaultClientScope(ctx, s.cfg.Realm, client, scopeID)
-	}); err != nil {
+	if err := s.scope(ctx, registration, client, scopeID); err != nil {
 		return "", err
 	}
 	if err := s.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {

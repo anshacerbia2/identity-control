@@ -153,6 +153,10 @@ type ClientRegistry interface {
 
 	// AddDefaultClientScope attaches a client scope to a client as a default scope.
 	AddDefaultClientScope(ctx context.Context, realm Realm, client ClientUUID, scopeID string) error
+
+	// RemoveDefaultClientScope detaches a default client scope from a client. Detaching one the
+	// client does not hold succeeds.
+	RemoveDefaultClientScope(ctx context.Context, realm Realm, client ClientUUID, scopeID string) error
 }
 
 // ClientSpec is a client built from desired state (TDD-identity-control-003 §Profiles). Exactly one
@@ -566,6 +570,24 @@ func (a *Admin) ClientScopeID(ctx context.Context, realm Realm, name string) (st
 		}
 	}
 	return "", fmt.Errorf("keycloak: the realm declares no client scope %q: %w", name, ErrNotFound)
+}
+
+// RemoveDefaultClientScope detaches the scope. Idempotent: a scope the client does not hold is
+// already detached, so the kernel's not-found answer is success.
+func (a *Admin) RemoveDefaultClientScope(ctx context.Context, realm Realm, client ClientUUID, scopeID string) error {
+	if client == "" || scopeID == "" {
+		return errors.New("keycloak: a client and a scope are required")
+	}
+	response, err := a.do(ctx, http.MethodDelete,
+		a.clientPath(realm, client)+"/default-client-scopes/"+url.PathEscape(scopeID), nil, nil, false)
+	if errors.Is(err, ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	response.Close()
+	return nil
 }
 
 // AddDefaultClientScope attaches the scope. Idempotent: attaching one already attached succeeds.
