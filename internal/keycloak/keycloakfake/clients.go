@@ -47,6 +47,11 @@ type Registry struct {
 	// Scopes are the realm's client scopes, by name, with their identifiers.
 	Scopes map[string]string
 
+	// RealmDefaults are the scope identifiers every created client holds as default scopes, as the
+	// real kernel attaches its realm default client scopes, acr among them. Empty unless a test sets
+	// it.
+	RealmDefaults []string
+
 	clients       map[keycloak.ClientUUID]keycloak.Client
 	specs         map[keycloak.ClientUUID]keycloak.ClientSpec
 	defaultScopes map[keycloak.ClientUUID][]string
@@ -234,6 +239,7 @@ func (r *Registry) CreateClient(ctx context.Context, _ keycloak.Realm, spec keyc
 	r.clients[client] = keycloak.Client{ID: client, ClientID: spec.ClientID, Enabled: true,
 		RedirectURIs: append([]string(nil), spec.RedirectURIs...), AccessTokenLifespan: spec.AccessTokenLifespan}
 	r.specs[client] = spec
+	r.defaultScopes[client] = append([]string(nil), r.RealmDefaults...)
 	r.events = append(r.events, keycloak.AdminEvent{Time: r.now(), OperationType: "CREATE",
 		ResourcePath: "clients/" + string(client), UserID: r.ServiceAccount})
 	if r.FailCreate != nil {
@@ -274,6 +280,28 @@ func (r *Registry) ClientScopeID(ctx context.Context, _ keycloak.Realm, name str
 		return "", keycloak.ErrNotFound
 	}
 	return scope, nil
+}
+
+func (r *Registry) RemoveDefaultClientScope(ctx context.Context, _ keycloak.Realm, client keycloak.ClientUUID, scopeID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.FailPatch != nil {
+		return r.FailPatch
+	}
+	if _, ok := r.clients[client]; !ok {
+		return keycloak.ErrNotFound
+	}
+	kept := r.defaultScopes[client][:0]
+	for _, held := range r.defaultScopes[client] {
+		if held != scopeID {
+			kept = append(kept, held)
+		}
+	}
+	r.defaultScopes[client] = kept
+	return nil
 }
 
 func (r *Registry) AddDefaultClientScope(ctx context.Context, _ keycloak.Realm, client keycloak.ClientUUID, scopeID string) error {

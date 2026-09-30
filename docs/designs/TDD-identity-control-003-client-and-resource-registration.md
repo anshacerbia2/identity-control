@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-003
   title: Protocol Client and Protected-Resource Registration
   owner: Core Platform Team
-  version: 1.11.0
+  version: 1.12.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -193,11 +193,10 @@ client scope, by `identity-kernel`'s names (`realm/client-scopes.json`):
 | `internal` | `scnehaux-internal` |
 | `privileged` | `scnehaux-provider`, the provider-scope form |
 | `external` | `scnehaux-external` |
-| `workload` | `scnehaux-workload`, not yet declared by the kernel |
+| `workload` | `scnehaux-workload` |
 
-The kernel declares no tenant-scope privileged scope and no workload scope. A
-registration whose class has no declared scope is refused, never created without its
-claim surface. `signing_algorithm` is desired state, not an observation copied
+The kernel declares no tenant-scope privileged scope. A registration whose class has no
+declared scope is refused, never created without its claim surface. `signing_algorithm` is desired state, not an observation copied
 from Keycloak. PS256 is the baseline. RS256 is representable only for an external
 compatibility exception with a named owner, reason, and expiry; the database rejects
 every other combination. This is the persistence boundary for STD-IAM-002 section
@@ -454,7 +453,14 @@ application registers a `confidential` client for its BFF instead.
 `workload` prohibits refresh tokens because a workload re-authenticates with its own
 credential rather than continuing a session.
 
-Every registration attaches exactly one managed audience scope. Internal, privileged,
+Every registration attaches exactly one managed audience scope. A `workload` registration also
+detaches the kernel's built-in `acr` scope. Keycloak attaches its realm default client scopes to
+every new client, and `acr` puts `acr=1` into a client credentials token, which STD-IAM-002 §3.2
+prohibits for a workload. `identity-kernel` leaves the realm default alone and records that a
+workload client does not hold it (TDD-identity-kernel-001 §Claim Projection, proven by its
+`compat/workload_test.go`). The detachment runs wherever the managed scope is attached, so
+pending recovery and an operator's recreate apply it too, and a realm without an `acr` scope has
+nothing to detach. Internal, privileged,
 and workload registrations issue PS256 only. External registrations also default to
 PS256; RS256 is permitted only while the recorded compatibility exception remains
 unexpired. No request can select another algorithm, and the reconciler restores the
@@ -489,8 +495,7 @@ register(request):
 ```
 
 **Built so far.** All four profiles. A `workload` registers the `workload` audience class, whose
-managed scope the kernel does not declare yet, so every workload registration is refused by the
-last rule above until it does. The RS256 exception is not offered: every registration is PS256.
+managed scope `identity-kernel` declares from identity-kernel#23. The RS256 exception is not offered: every registration is PS256.
 The registered host set is not modelled, so that rule is not enforced yet. A `client_key` is 1 to
 128 lowercase letters, digits, `.`, `_` or `-`.
 
@@ -733,6 +738,8 @@ becomes available.
 - A `public` profile supplying a public key is refused. A `confidential` or `workload`
   profile without one is refused.
 - Every registration receives exactly one managed audience scope.
+- A workload registration holds no `acr` scope, after creation, recovery, and recreation alike.
+  Other profiles keep the realm's `acr`.
 - An internal, privileged, or workload registration requesting RS256 is refused by the
   API and by the database constraint.
 - An external RS256 exception without an owner, reason, future expiry, or verifier
