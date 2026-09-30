@@ -237,6 +237,11 @@ func (r *Reconciler) Resolve(ctx context.Context, resolution Resolution) error {
 		case RedirectURIs:
 			uris, enabled := append([]string{}, t.reg.redirectURIs...), true
 			patch.RedirectURIs, patch.Enabled = &uris, &enabled
+		case ClientKeys:
+			// The JWKS is rebuilt from the active and retiring rows, and client-jwt restored, so a
+			// key or a secret the console added stops authenticating before the client is re-enabled.
+			keys, enabled := append([]keycloak.JWK{}, t.reg.keys...), true
+			patch.Keys, patch.Enabled = &keys, &enabled
 		}
 		converged, err := r.apply(ctx, t.reg, t.field, patch)
 		if err != nil {

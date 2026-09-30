@@ -16,7 +16,9 @@
 #      reconcile recreates it: deletion is how a compromised client is contained
 #   6. a Principal whose Keycloak user is deleted is reported, not recreated, and an operator's
 #      :relink provisions a new user carrying the same principal_id
-#   7. an unreachable Keycloak is 'unresolved', and the sweep converges once it is back
+#   7. a workload's keys rotate with an overlap and revoke at once, and a key added in the console
+#      blocks the client until an operator's reconcile puts back exactly the registered keys
+#   8. an unreachable Keycloak is 'unresolved', and the sweep converges once it is back
 #
 # SECRETS: read from the environment.
 #   IDENTITY_CALLER_KEY_FILE, IDENTITY_CALLER_PASSWORD  a provider-scope token, as dev-smoke.ps1
@@ -156,6 +158,12 @@ function Since($f, [datetimeoffset] $at) {
     return $detected -ge $at.AddSeconds(-5)
 }
 
+function Decode-Segment($segment) {
+    $t = $segment.Replace('-', '+').Replace('_', '/')
+    switch ($t.Length % 4) { 2 { $t += '==' } 3 { $t += '=' } }
+    return [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($t))
+}
+
 function Seconds($from, $to) { return [math]::Round((([datetimeoffset]$to) - ([datetimeoffset]$from)).TotalSeconds, 2) }
 
 $failures = 0
@@ -280,7 +288,96 @@ Expect "no longer dangling" $listed.Count 0
 Expect "a relink while the user exists is refused" (Api "POST" "/v1/principals/${principal}:relink" $null @{ "X-Administrative-Reason" = "again" }).code 409
 Record "User deleted in the console" "reported, then relinked by an operator" "same principal_id, new user $($carriers[0].id)"
 
-Write-Host "7. Keycloak unreachable: unresolved, then converged"
+Write-Host ""
+Write-Host "7. client keys: rotation, revocation, and a key added in the console"
+if ($PSVersionTable.PSEdition -ne 'Core') {
+    Write-Host "  skip  PowerShell 7 is needed to make PKCS#8 keys for the run"
+} else {
+    # Keys made for this run. The workload's deployable holds its private keys; here they are temp
+    # files, removed at the end. A fresh client_key each run, because a registered key is never
+    # registered again.
+    $keyFiles = @()
+    function New-RunKey([string] $name) {
+        $rsa = [System.Security.Cryptography.RSA]::Create(3072)
+        try {
+            $file = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "$name.pem")
+            [System.IO.File]::WriteAllText($file, "-----BEGIN PRIVATE KEY-----`n" +
+                [Convert]::ToBase64String($rsa.ExportPkcs8PrivateKey(), [Base64FormattingOptions]::InsertLineBreaks) +
+                "`n-----END PRIVATE KEY-----`n")
+            $script:keyFiles += $file
+            $public = $rsa.ExportParameters($false)
+            $n = ConvertTo-Base64Url $public.Modulus
+            $e = ConvertTo-Base64Url $public.Exponent
+            $sha = [System.Security.Cryptography.SHA256]::Create()
+            $kid = ConvertTo-Base64Url ($sha.ComputeHash([System.Text.Encoding]::ASCII.GetBytes('{"e":"' + $e + '","kty":"RSA","n":"' + $n + '"}')))
+            return @{ file = $file; jwk = @{ kty = "RSA"; n = $n; e = $e }; kid = $kid }
+        } finally { $rsa.Dispose() }
+    }
+    # The token endpoint's answer to a client credentials grant signed with the key: 200 when the
+    # kernel accepts the key, anything else when it does not.
+    $issuer = Get-RealmIssuer $kcAdmin $realm
+    function Token-Status([string] $clientId, $key) {
+        $form = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+        $form["grant_type"] = "client_credentials"
+        $form["client_id"] = $clientId
+        $form["client_assertion_type"] = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+        $form["client_assertion"] = New-ClientAssertion -KeyFile $key.file -ClientId $clientId -Audience $issuer
+        $response = $http.PostAsync("$kcAdmin/realms/$realm/protocol/openid-connect/token",
+            (New-Object System.Net.Http.FormUrlEncodedContent($form))).Result
+        return [int]$response.StatusCode
+    }
+    try {
+        $run = [Guid]::NewGuid().ToString("N").Substring(0, 10)
+        $job = "proofb-job-$run"
+        $a = New-RunKey "$job-a"; $b = New-RunKey "$job-b"; $c = New-RunKey "$job-c"
+        $owner = (Decode-Segment $script:apiToken.Split('.')[1] | ConvertFrom-Json).principal_id
+        $body = @{ display_name = "Proof B job"; purpose = "Proves client keys rotate, revoke and are guarded"
+            workload_type = "job"; owner_principal_id = $owner; client_key = $job; application_ref = "proof-b"
+            public_key = $a.jwk } | ConvertTo-Json -Compress -Depth 4
+        $r = Api "POST" "/v1/workloads" $body @{ "Idempotency-Key" = "proofb-workload-$run" }
+        Expect "workload created with key A" $r.code 201
+        $keyRegistration = $r.json.registration_id
+        $jobUuid = (Kc "GET" "/clients?clientId=$job&search=false" $null).json[0].id
+        Expect "key A authenticates" (Token-Status $job $a) 200
+
+        $r = Api "POST" "/v1/registrations/$keyRegistration/keys" (@{ public_key = $b.jwk } | ConvertTo-Json -Compress -Depth 4) $null
+        Expect "key B registered, a rotation" $r.code 201
+        Expect "during the overlap key A authenticates" (Token-Status $job $a) 200
+        Expect "and so does key B" (Token-Status $job $b) 200
+
+        $retiring = @($r.json.keys | Where-Object { $_.state -eq "retiring" })
+        Expect "key A is the retiring key" (Get-Prop $retiring[0] "kid") $a.kid
+        $r = Api "POST" "/v1/registrations/$keyRegistration/keys/$($retiring[0].key_id):revoke" $null @{ "X-Administrative-Reason" = "proof-b: key A is revoked at once" }
+        Expect "key A revoked" $r.code 200
+        Expect "key A is refused on the next request" ((Token-Status $job $a) -ne 200) $true
+        Expect "key B still authenticates" (Token-Status $job $b) 200
+
+        $at = [datetimeoffset]::UtcNow
+        Console-Change $jobUuid { param($cl)
+            $cl.attributes."jwks.string" = (@{ keys = @(
+                @{ kty = "RSA"; kid = $b.kid; use = "sig"; alg = "PS256"; n = $b.jwk.n; e = $b.jwk.e },
+                @{ kty = "RSA"; kid = $c.kid; use = "sig"; alg = "PS256"; n = $c.jwk.n; e = $c.jwk.e }) } | ConvertTo-Json -Compress -Depth 5)
+        }
+        $f = Wait-Finding $keyRegistration { param($f) (Get-Prop $f "field_class") -eq "client_keys" -and $f.finding_class -eq "blocked" -and (Since $f $at) }
+        Expect "attributed to the console administrator" (Get-Prop $f "actor") $actor
+        Expect "the client is disabled" (Live $jobUuid).enabled $false
+        Expect "the added key does not authenticate" ((Token-Status $job $c) -ne 200) $true
+        $keyBlocked = Seconds $f.changed_at $f.detected_at
+        $r = Api "POST" "/v1/registrations:reconcile" "{`"findings`":[`"$($f.finding_id)`"]}" @{ "X-Administrative-Reason" = "proof-b: the console key was reviewed and removed" }
+        Expect "operator's reconcile accepted" $r.code 200
+        Expect "the client is re-enabled" (Live $jobUuid).enabled $true
+        $held = ((Live $jobUuid).attributes."jwks.string" | ConvertFrom-Json).keys
+        Expect "the JWKS holds exactly the registered key" (@($held | ForEach-Object { $_.kid }) -join ",") $b.kid
+        Expect "key B authenticates again" (Token-Status $job $b) 200
+        Expect "the console key is refused" ((Token-Status $job $c) -ne 200) $true
+        Record "Workload keys: rotate, revoke, console key" "overlap held, revocation at once, console key blocked" "blocked $keyBlocked s after the change"
+    } finally {
+        foreach ($file in $keyFiles) { Remove-Item -Force -ErrorAction SilentlyContinue $file }
+    }
+}
+
+Write-Host ""
+Write-Host "8. Keycloak unreachable: unresolved, then converged"
 # A fresh token first: none can be issued while the kernel is down, and the service verifies this
 # one against the key set it already holds.
 $script:apiTokenAt = [datetime]::MinValue

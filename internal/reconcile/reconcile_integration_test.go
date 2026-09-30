@@ -101,6 +101,9 @@ func (h *harness) tick(d time.Duration) { h.clock.at = h.clock.at.Add(d) }
 type registered struct {
 	id     id.UUID
 	client keycloak.ClientUUID
+
+	// key is the one key a confidential or workload registration holds.
+	key keycloak.JWK
 }
 
 // register stores an active registration and the client Keycloak holds for it, in sync.
@@ -120,11 +123,32 @@ func (h *harness) register(key, profile, lifetimeClass string, audience, redirec
 		    VALUES ($1, $2, $3, $4, $5, 'manual', 'test', $6, $7, $8, $9, $10, 'active')`,
 			registrationID.String(), string(client), string(realm), key, profile, registrationID.String(),
 			audienceClass, lifetime, audience, redirects)
+		if err != nil {
+			return err
+		}
+		if profile != "confidential" && profile != "workload" {
+			return nil
+		}
+		keyID, _ := id.NewV7()
+		_, err = tx.Exec(ctx, `INSERT INTO identity.client_key
+		    (key_id, registration_id, kid, thumbprint, public_jwk, state, registered_by, expires_at)
+		    VALUES ($1, $2, $3, $4, $5::jsonb, 'active', $2, now() + interval '90 days')`,
+			keyID.String(), registrationID.String(), "kid-"+key, "tp-"+keyID.String(),
+			`{"kty":"RSA","kid":"kid-`+key+`","use":"sig","alg":"PS256","n":"n-`+key+`","e":"AQAB"}`)
 		return err
 	}); err != nil {
 		h.t.Fatalf("register %s: %v", key, err)
 	}
-	return registered{id: registrationID, client: client}
+	out := registered{id: registrationID, client: client}
+	if profile == "confidential" || profile == "workload" {
+		out.key = keycloak.JWK{KID: "kid-" + key, N: "n-" + key, E: "AQAB"}
+	}
+	return out
+}
+
+// heldBy is the credential a client holding exactly the given keys has.
+func heldBy(keys ...keycloak.JWK) keycloak.ClientCredential {
+	return keycloak.ClientCredential{Authenticator: "client-jwt", HeldJWKS: true, Keys: keys}
 }
 
 // caller registers a confidential client whose audience is one L0 resource, so its lifespan is
@@ -134,7 +158,7 @@ func (h *harness) caller() registered {
 	h.kernel.Put(keycloak.Client{ID: resource.client, ClientID: "identity-control", Enabled: true})
 	r := h.register("identity-control-caller", "confidential", "", []string{"identity-control"}, []string{callbackURI})
 	h.kernel.Put(keycloak.Client{ID: r.client, ClientID: "identity-control-caller", Enabled: true,
-		RedirectURIs: []string{callbackURI}, AccessTokenLifespan: 240})
+		RedirectURIs: []string{callbackURI}, AccessTokenLifespan: 240, Credential: heldBy(r.key)})
 	return r
 }
 
@@ -683,5 +707,140 @@ func TestAMissingClientNeedsSomethingToRecreateIt(t *testing.T) {
 	}
 	if f := h.findings(caller.client); f[0].convergedAt != nil {
 		t.Error("the refused resolution closed the finding")
+	}
+}
+
+// A key added in the console lets whoever holds its private key authenticate as the client: it is
+// blocked, not restored, and stays blocked until an operator lifts it, which puts back exactly the
+// registered keys. A console fix does not lift it, as for a redirect URI.
+func TestAKeyAddedInTheConsoleBlocksTheClient(t *testing.T) {
+	h := newHarness(t)
+	caller := h.caller()
+	h.sweep()
+
+	intruder := keycloak.JWK{KID: "someone-elses", N: "n-intruder", E: "AQAB"}
+	h.tick(time.Second)
+	h.kernel.ConsoleChange(admin, caller.client, func(c *keycloak.Client) {
+		c.Credential.Keys = append(c.Credential.Keys, intruder)
+	})
+	h.tick(time.Second)
+	h.sweep()
+
+	client := h.live(caller.client)
+	if client.Enabled {
+		t.Error("the client is still enabled after a key was added to it in the console")
+	}
+	if !slices.Contains(client.Credential.Keys, intruder) {
+		t.Error("the added key was removed; it must be kept for whoever investigates")
+	}
+	findings := h.findings(caller.client)
+	if len(findings) != 1 || findings[0].field != string(ClientKeys) || findings[0].class != string(Blocked) ||
+		findings[0].actor != admin {
+		t.Fatalf("findings = %+v, want one open blocked client_keys finding attributed to the administrator", findings)
+	}
+
+	h.kernel.ConsoleChange(admin, caller.client, func(c *keycloak.Client) { c.Credential.Keys = []keycloak.JWK{caller.key} })
+	h.tick(time.Minute)
+	h.sweep()
+	if f := h.findings(caller.client); f[0].convergedAt != nil || h.live(caller.client).Enabled {
+		t.Fatal("a console fix of the keys lifted the block without an operator")
+	}
+
+	operator, _ := id.NewV7()
+	if err := h.reconciler.Resolve(context.Background(), Resolution{Findings: []id.UUID{findings[0].id},
+		ResolvedBy: operator, Reason: "investigated: the key was added by mistake"}); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	client = h.live(caller.client)
+	if !client.Enabled || !client.Credential.ByKeys([]keycloak.JWK{caller.key}) {
+		t.Errorf("after the operator's reconcile the client is %+v, want enabled with its registered key only", client)
+	}
+	if f := h.findings(caller.client)[0]; f.convergedAt == nil || f.resolvedBy != operator.String() {
+		t.Errorf("the finding is %+v, want converged and resolved by the operator", f)
+	}
+}
+
+// Switching the client back to a secret, or to a key URL, is a takeover too, and so is a change
+// nobody can be named for: blocking removes access and never grants it, so it needs no attribution.
+func TestAnyOtherCredentialChangeBlocksTheClient(t *testing.T) {
+	for name, c := range map[string]struct {
+		actor  string
+		change func(*keycloak.Client)
+	}{
+		"a client secret":     {admin, func(c *keycloak.Client) { c.Credential.Authenticator = "client-secret" }},
+		"a JWKS URL":          {admin, func(c *keycloak.Client) { c.Credential.HeldJWKS = false }},
+		"a swapped modulus":   {admin, func(c *keycloak.Client) { c.Credential.Keys[0].N = "n-swapped" }},
+		"a JWKS nobody reads": {admin, func(c *keycloak.Client) { c.Credential.Unreadable = true }},
+		"an unattributed key": {"", func(c *keycloak.Client) { c.Credential.Keys = nil }},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t)
+			caller := h.caller()
+			h.sweep()
+			h.tick(time.Second)
+			h.kernel.ConsoleChange(c.actor, caller.client, c.change)
+			h.tick(time.Second)
+			h.sweep()
+			if h.live(caller.client).Enabled {
+				t.Error("the client is still enabled")
+			}
+			if f := h.findings(caller.client); len(f) != 1 || f[0].field != string(ClientKeys) || f[0].class != string(Blocked) {
+				t.Errorf("findings = %+v, want one blocked client_keys finding", f)
+			}
+		})
+	}
+}
+
+// This service's own rotation writes the kernel before it commits the rows a sweep reads. A sweep
+// that read the rows first and the kernel after sees a difference nobody made, and confirms it
+// under the registration's lock before blocking: by then the rotation has committed.
+func TestARotationInFlightIsNotTakenForDrift(t *testing.T) {
+	h := newHarness(t)
+	caller := h.caller()
+	stale := registration{id: caller.id, client: caller.client, clientKey: "identity-control-caller",
+		profile: "confidential", keys: []keycloak.JWK{caller.key}}
+
+	// The rotation, committed: the next key active, the previous one retiring, the kernel holding both.
+	next := keycloak.JWK{KID: "kid-next", N: "n-next", E: "AQAB"}
+	if err := h.pool.InTx(context.Background(), func(ctx context.Context, tx db.Tx) error {
+		if _, err := tx.Exec(ctx, `UPDATE identity.client_key SET state = 'retiring', retiring_at = now() + interval '7 days'
+		    WHERE registration_id = $1`, caller.id.String()); err != nil {
+			return err
+		}
+		keyID, _ := id.NewV7()
+		_, err := tx.Exec(ctx, `INSERT INTO identity.client_key
+		    (key_id, registration_id, kid, thumbprint, public_jwk, state, registered_by, expires_at)
+		    VALUES ($1, $2, 'kid-next', $3, '{"kty":"RSA","kid":"kid-next","n":"n-next","e":"AQAB"}', 'active', $2,
+		            now() + interval '90 days')`, keyID.String(), caller.id.String(), "tp-"+keyID.String())
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h.kernel.ConsoleChange("", caller.client, func(c *keycloak.Client) {
+		c.Credential.Keys = []keycloak.JWK{next, caller.key}
+	})
+
+	confirmed, _, differs, err := h.reconciler.confirmKeyDrift(context.Background(), stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if differs || len(confirmed.keys) != 2 {
+		t.Errorf("a committed rotation was confirmed as drift: differs %v, keys %v", differs, confirmed.keys)
+	}
+	h.sweep()
+	if !h.live(caller.client).Enabled || len(h.findings(caller.client)) != 0 {
+		t.Error("the sweep blocked a client whose keys match what was committed")
+	}
+}
+
+// A public client and a resource hold no key, so they are never compared on it.
+func TestAKeylessClientIsNotComparedOnKeys(t *testing.T) {
+	h := newHarness(t)
+	web := h.register("keyless-web", "public", "", nil, []string{callbackURI})
+	h.kernel.Put(keycloak.Client{ID: web.client, ClientID: "keyless-web", Enabled: true,
+		RedirectURIs: []string{callbackURI}, AccessTokenLifespan: 240})
+	h.sweep()
+	if !h.live(web.client).Enabled || len(h.findings(web.client)) != 0 {
+		t.Error("a public client was compared on keys it does not hold")
 	}
 }

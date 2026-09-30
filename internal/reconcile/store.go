@@ -49,7 +49,68 @@ FROM identity.client_registration r
 WHERE r.realm = $1 AND r.state = 'active' AND r.kc_client_id IS NOT NULL
 ORDER BY r.client_key`
 
+// desiredKeysStatement is the active and retiring keys of every active registration in the realm:
+// the JWKS each confidential or workload client should hold (TDD-identity-control-003 §Client Key
+// Records).
+const desiredKeysStatement = `SELECT k.registration_id::text, k.kid, k.public_jwk->>'n', k.public_jwk->>'e'
+FROM identity.client_key k
+JOIN identity.client_registration r ON r.registration_id = k.registration_id
+WHERE r.realm = $1 AND r.state = 'active' AND k.state IN ('active', 'retiring')`
+
+// readDesired reads every active registration and the keys each should hold.
 func readDesired(ctx context.Context, tx db.Tx, realm keycloak.Realm) ([]registration, error) {
+	out, err := readRegistrations(ctx, tx, realm)
+	if err != nil {
+		return nil, err
+	}
+	keys, err := readDesiredKeys(ctx, tx, desiredKeysStatement, string(realm))
+	if err != nil {
+		return nil, err
+	}
+	for i := range out {
+		out[i].keys = keys[out[i].id]
+	}
+	return out, nil
+}
+
+func readDesiredKeys(ctx context.Context, tx db.Tx, statement string, args ...any) (map[id.UUID][]keycloak.JWK, error) {
+	rows, err := tx.Query(ctx, statement, args...)
+	if err != nil {
+		return nil, fmt.Errorf("reconcile: read desired keys: %w", err)
+	}
+	defer rows.Close()
+	out := map[id.UUID][]keycloak.JWK{}
+	for rows.Next() {
+		var (
+			raw string
+			key keycloak.JWK
+		)
+		if err := rows.Scan(&raw, &key.KID, &key.N, &key.E); err != nil {
+			return nil, fmt.Errorf("reconcile: scan desired key: %w", err)
+		}
+		registrationID, err := id.Parse(raw)
+		if err != nil {
+			return nil, fmt.Errorf("reconcile: registration_id: %w", err)
+		}
+		out[registrationID] = append(out[registrationID], key)
+	}
+	return out, rows.Err()
+}
+
+// lockedKeysStatement is one registration's keys, read under a share lock on its row. A key change
+// holds that row's update lock from before it writes the kernel until it commits, so this read waits
+// for one in flight and sees what it committed.
+const lockedKeysStatement = `SELECT k.registration_id::text, k.kid, k.public_jwk->>'n', k.public_jwk->>'e'
+FROM identity.client_registration r
+JOIN identity.client_key k ON k.registration_id = r.registration_id AND k.state IN ('active', 'retiring')
+WHERE r.registration_id = $1
+FOR SHARE OF r`
+
+// lockRegistrationStatement takes the same share lock when the registration holds no key at all,
+// which the join above would return no row, and so no lock, for.
+const lockRegistrationStatement = `SELECT 1 FROM identity.client_registration WHERE registration_id = $1 FOR SHARE`
+
+func readRegistrations(ctx context.Context, tx db.Tx, realm keycloak.Realm) ([]registration, error) {
 	rows, err := tx.Query(ctx, desiredStatement, string(realm))
 	if err != nil {
 		return nil, fmt.Errorf("reconcile: read desired state: %w", err)
