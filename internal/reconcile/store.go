@@ -137,6 +137,27 @@ func readRegistrations(ctx context.Context, tx db.Tx, realm keycloak.Realm) ([]r
 	return out, rows.Err()
 }
 
+// managedKeysStatement is the client_key of every registration this realm has not retired: a client
+// holding one is managed, pending its creation included.
+const managedKeysStatement = `SELECT client_key FROM identity.client_registration WHERE realm = $1 AND state <> 'retired'`
+
+func readManagedKeys(ctx context.Context, tx db.Tx, realm keycloak.Realm) (map[string]bool, error) {
+	rows, err := tx.Query(ctx, managedKeysStatement, string(realm))
+	if err != nil {
+		return nil, fmt.Errorf("reconcile: read registered client_keys: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			return nil, fmt.Errorf("reconcile: scan client_key: %w", err)
+		}
+		out[key] = true
+	}
+	return out, rows.Err()
+}
+
 // A finding with no field class, a missing client, is keyed by the empty field class.
 const openFindingsStatement = `SELECT finding_id::text, kc_client_id, coalesce(field_class, ''), finding_class,
        coalesce(actor, ''), changed_at
@@ -265,7 +286,11 @@ func writeFinding(ctx context.Context, tx db.Tx, w findingWrite) error {
 	if err != nil {
 		return fmt.Errorf("reconcile: mint finding_id: %w", err)
 	}
-	if _, err := tx.Exec(ctx, insertFindingStatement, findingID.String(), w.run.String(), w.registration.String(),
+	registration := any(nil)
+	if !w.registration.IsNil() {
+		registration = w.registration.String()
+	}
+	if _, err := tx.Exec(ctx, insertFindingStatement, findingID.String(), w.run.String(), registration,
 		string(w.client), field, string(w.class), string(desired), string(observed), actor,
 		w.changedAt, w.detectedAt, w.convergedAt); err != nil {
 		return fmt.Errorf("reconcile: insert finding: %w", err)

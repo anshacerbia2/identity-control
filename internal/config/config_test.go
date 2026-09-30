@@ -267,3 +267,30 @@ func TestTheClientKeyWindowsDefaultAndTheOverlapIsShorterThanTheLifetime(t *test
 		}
 	}
 }
+
+func TestUnmanagedClientsAreReportedUnlessDisablingIsAsked(t *testing.T) {
+	for _, c := range []struct {
+		value   string
+		disable bool
+		ok      bool
+	}{{"", false, true}, {"report", false, true}, {"disable", true, true}, {"delete", false, false}} {
+		t.Setenv("IDENTITY_DATABASE_URL", "postgres://runtime@localhost:5432/identity")
+		t.Setenv("IDENTITY_KEYCLOAK_REALM", "scnehaux")
+		t.Setenv("IDENTITY_KEYCLOAK_BASE_URL", "https://identity.example.com")
+		t.Setenv("IDENTITY_KEYCLOAK_CLIENT_ID", "identity-control")
+		t.Setenv("IDENTITY_KEYCLOAK_CLIENT_KEY_FILE", "/keys/identity-control.pem")
+		t.Setenv("IDENTITY_TOKEN_ISSUER", "https://identity.example.com/realms/scnehaux")
+		t.Setenv("IDENTITY_TOKEN_AUDIENCE", "identity-control")
+		t.Setenv("IDENTITY_JWKS_URL", "https://identity.example.com/realms/scnehaux/protocol/openid-connect/certs")
+		t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID", "identity-control-registration")
+		t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_KEY_FILE", "/keys/identity-control-registration.pem")
+		t.Setenv("IDENTITY_UNMANAGED_CLIENTS", c.value)
+		cfg, err := config.Load()
+		if c.ok && (err != nil || cfg.DisableUnmanagedClients != c.disable) {
+			t.Errorf("%q: disable %v, err %v", c.value, cfg.DisableUnmanagedClients, err)
+		}
+		if !c.ok && err == nil {
+			t.Errorf("%q was accepted", c.value)
+		}
+	}
+}

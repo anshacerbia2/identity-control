@@ -7,13 +7,12 @@
 // attributed through Keycloak's admin events before anything is done about it. A change an
 // unexpired drift exception covers is left in place, and a change nobody can be named for is
 // never repaired automatically. An unreachable Keycloak produces an 'unresolved' run that
-// changes nothing.
+// changes nothing. A client no registration describes is recorded 'unmanaged', and disabled when
+// the setting says to; the kernel's built-in clients and this service's own Admin API clients are
+// exempt.
 //
 // What this package does not do yet, and why:
 //
-//   - A client no registration describes is not disabled. The service's own clients are
-//     confidential clients that are not registered yet, so disabling unregistered clients would
-//     disable this service.
 //   - Audience scope, signing algorithm and profile are not compared yet.
 package reconcile
 
@@ -22,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/anshacerbia2/foundation-platform/db"
@@ -52,7 +52,14 @@ const (
 	Unattributed FindingClass = "unattributed"
 	Missing      FindingClass = "missing"
 	Recreated    FindingClass = "recreated"
+	Unmanaged    FindingClass = "unmanaged"
 )
+
+// BuiltInClients are the clients Keycloak creates in every realm. They are never unmanaged:
+// disabling realm-management or admin-cli would lock administration out of the realm, a worse
+// incident than any drift (TDD-identity-control-003 §Drift Reconciliation).
+var BuiltInClients = []string{"account", "account-console", "admin-cli", "broker", "realm-management",
+	"security-admin-console"}
 
 // Outcome is how a run ended.
 type Outcome string
@@ -95,6 +102,14 @@ type Config struct {
 
 	// CallTimeout bounds one Admin API call.
 	CallTimeout time.Duration
+
+	// ExemptClients are the clientIds never recorded unmanaged: the kernel's built-in clients and
+	// this service's own Admin API clients (ADR-IAM-001 §5.12).
+	ExemptClients []string
+
+	// DisableUnmanaged disables a client no registration describes, as well as recording it
+	// (IDENTITY_UNMANAGED_CLIENTS=disable). Off, the finding is recorded and the client left alone.
+	DisableUnmanaged bool
 
 	// Recreate builds a registration's client again from desired state and returns the new
 	// client's identifier. The registration service supplies it. Only an operator's reconcile
@@ -215,6 +230,7 @@ func (r *Reconciler) Sweep(ctx context.Context) (Run, error) {
 
 	var (
 		desired    []registration
+		managed    map[string]bool
 		open       map[findingKey]openFinding
 		exceptions map[exceptionKey]bool
 	)
@@ -222,6 +238,9 @@ func (r *Reconciler) Sweep(ctx context.Context) (Run, error) {
 	if err := r.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
 		var readErr error
 		if desired, readErr = readDesired(ctx, tx, r.cfg.Realm); readErr != nil {
+			return readErr
+		}
+		if managed, readErr = readManagedKeys(ctx, tx, r.cfg.Realm); readErr != nil {
 			return readErr
 		}
 		if open, readErr = readOpenFindings(ctx, tx); readErr != nil {
@@ -252,7 +271,24 @@ func (r *Reconciler) Sweep(ctx context.Context) (Run, error) {
 		}
 	}
 
-	written, diverged := 0, len(absent) > 0
+	// Every client in the realm, for the ones no registration describes. Read with the others, before
+	// anything is written.
+	all, err := call(ctx, r.cfg.CallTimeout, func(ctx context.Context) ([]keycloak.Client, error) {
+		return r.kernel.ListClients(ctx, r.cfg.Realm)
+	})
+	if err != nil {
+		r.logger.WarnContext(ctx, "registration sweep unresolved: the realm's clients could not be listed",
+			slog.String("error", err.Error()))
+		return finish(Unresolved, attribution, 0)
+	}
+	var unmanaged []keycloak.Client
+	for _, client := range all {
+		if !managed[client.ClientID] && !slices.Contains(r.cfg.ExemptClients, client.ClientID) {
+			unmanaged = append(unmanaged, client)
+		}
+	}
+
+	written, diverged := 0, len(absent) > 0 || len(unmanaged) > 0
 	for _, reg := range absent {
 		wrote, err := r.holdMissing(ctx, run.ID, reg, open, latest)
 		if err != nil {
@@ -276,6 +312,28 @@ func (r *Reconciler) Sweep(ctx context.Context) (Run, error) {
 				written++
 			}
 			diverged = diverged || differs
+		}
+	}
+
+	for _, client := range unmanaged {
+		if err := r.holdUnmanaged(ctx, run.ID, client, open, latest); err != nil {
+			return Run{}, err
+		}
+		written++
+	}
+	// An unmanaged finding converges once its client is registered, by adoption or otherwise, or gone.
+	still := map[keycloak.ClientUUID]bool{}
+	for _, client := range unmanaged {
+		still[client.ID] = true
+	}
+	for key, finding := range open {
+		if finding.class != Unmanaged || still[key.client] {
+			continue
+		}
+		if err := r.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+			return convergeFinding(ctx, tx, finding.id, r.now(), run.ID)
+		}); err != nil {
+			return Run{}, err
 		}
 	}
 
@@ -522,6 +580,39 @@ func call[T any](ctx context.Context, timeout time.Duration, fn func(context.Con
 	callCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	return fn(callCtx)
+}
+
+// holdUnmanaged records a client no registration describes as an open 'unmanaged' finding, naming
+// whoever its latest admin event names, and disables it when the setting says to. Disabled rather
+// than deleted: a false positive from a defect here is recoverable, and a deleted client some
+// running system depends on is not.
+func (r *Reconciler) holdUnmanaged(ctx context.Context, run id.UUID, client keycloak.Client,
+	open map[findingKey]openFinding, latest map[keycloak.ClientUUID]keycloak.AdminEvent) error {
+	existing, isOpen := open[findingKey{client.ID, ""}]
+	write := findingWrite{run: run, client: client.ID, class: Unmanaged, desired: nil,
+		observed: map[string]any{"client_id": client.ClientID, "enabled": client.Enabled}, detectedAt: r.now(), newID: r.newID}
+	if isOpen {
+		write.existing = &existing
+		write.actor, write.changedAt = existing.actor, existing.changedAt
+	}
+	if event, ok := latest[client.ID]; ok {
+		at := event.Time
+		write.actor, write.changedAt = event.UserID, &at
+	}
+	if !isOpen {
+		r.logger.ErrorContext(ctx, "a Keycloak client no registration describes",
+			slog.String("client_id", client.ClientID), slog.String("actor", write.actor),
+			slog.Bool("disabled", r.cfg.DisableUnmanaged))
+	}
+	if r.cfg.DisableUnmanaged && client.Enabled {
+		disabled := false
+		if _, err := call(ctx, r.cfg.CallTimeout, func(ctx context.Context) (struct{}, error) {
+			return struct{}{}, r.kernel.PatchClient(ctx, r.cfg.Realm, client.ID, keycloak.ClientPatch{Enabled: &disabled})
+		}); err != nil {
+			return fmt.Errorf("reconcile: disable unmanaged %s: %w", client.ClientID, err)
+		}
+	}
+	return r.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error { return writeFinding(ctx, tx, write) })
 }
 
 // holdMissing records a registered client absent from the kernel as an open 'missing' finding, and

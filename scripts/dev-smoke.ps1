@@ -11,6 +11,7 @@
 #   6. a workload is refused on the Principal path         its identity lives on its client's service account
 #   7. an unknown field is refused                         no client-supplied keycloak_user_id
 #   8. a missing Idempotency-Key is refused
+#  9b. the development caller is adopted          ADR-IAM-001 5.12, TDD-identity-control-003 Adoption
 #  10. the registration sweep runs and reports    TDD-identity-control-003, Proof B step 4
 #   9. clients are registered from desired state  TDD-identity-control-003, Proof B step 5
 #  11. a workload is created, and its own token names it    TDD-identity-control-004
@@ -169,6 +170,42 @@ $r = Send-Json "POST" "/v1/registrations" `
     '{"client_key":"smoke-wild","profile":"public","audience_class":"internal","application_ref":"smoke","redirect_uris":["https://*.example.com/cb"]}' `
     $token "smoke-register-wild"
 Expect "a wildcard redirect is refused" $r.code 400
+Write-Host ""
+Write-Host "9b. adopt the development caller"
+# identity-control-caller is created by create-kernel-clients.sh before this service can register it,
+# so it is adopted: a plan first, then the adoption, held to the key it already authenticates with. Its
+# declared audience is empty because its audience mapper names identity-control's own Admin API client,
+# which is exempt rather than registered; the lifespan an empty audience derives is its 240 seconds.
+$callerRsa = Read-ClientKey $env:IDENTITY_CALLER_KEY_FILE
+try {
+    $callerPublic = $callerRsa.ExportParameters($false)
+    $callerJwk = @{ kty = "RSA"; n = (ConvertTo-Base64Url $callerPublic.Modulus); e = (ConvertTo-Base64Url $callerPublic.Exponent) }
+} finally { $callerRsa.Dispose() }
+$declaration = @{ client_key = "identity-control-caller"; profile = "confidential"; audience_class = "privileged"
+    application_ref = "identity-control-dev"; redirect_uris = @("http://127.0.0.1:8099/callback"); public_keys = @($callerJwk) }
+$reasonHeader = "smoke: the development caller comes under registration"
+function Send-Adopt($body, $idempotencyKey) {
+    $request = New-Object System.Net.Http.HttpRequestMessage("POST", "$api/v1/registrations:adopt")
+    $request.Headers.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", $token)
+    $request.Headers.Add("X-Administrative-Reason", $reasonHeader)
+    if ($idempotencyKey) { $request.Headers.Add("Idempotency-Key", $idempotencyKey) }
+    $request.Content = New-Object System.Net.Http.StringContent($body, [System.Text.Encoding]::UTF8, "application/json")
+    $response = $client.SendAsync($request).Result
+    return @{ code = [int]$response.StatusCode; body = $response.Content.ReadAsStringAsync().Result }
+}
+$plan = Send-Adopt (($declaration + @{ dry_run = $true }) | ConvertTo-Json -Compress -Depth 5) $null
+if ($plan.code -eq 409) {
+    # A second run on the same server: the caller is registered already.
+    Write-Host "        already registered"
+} else {
+    Expect "planned" $plan.code 200
+    if ($plan.code -eq 200) {
+        Expect "adoptable as declared" ($plan.body | ConvertFrom-Json).plan.adoptable $true
+        $r = Send-Adopt ($declaration | ConvertTo-Json -Compress -Depth 5) "smoke-adopt-caller"
+        Expect "adopted" $r.code 201
+    }
+}
+
 Write-Host ""
 Write-Host "10. the registration sweep is observable"
 $r = Send-Json "GET" "/v1/registrations:drift" $null $null $null

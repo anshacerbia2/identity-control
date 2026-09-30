@@ -54,6 +54,8 @@ func newHarness(t *testing.T) *harness {
 			   (SELECT registration_id FROM identity.client_registration WHERE realm = $1)`,
 			`DELETE FROM identity.client_key WHERE registration_id IN
 			   (SELECT registration_id FROM identity.client_registration WHERE realm = $1)`,
+			`DELETE FROM identity.registration_adoption WHERE registration_id IN
+			   (SELECT registration_id FROM identity.client_registration WHERE realm = $1)`,
 			`DELETE FROM identity.client_registration WHERE realm = $1`,
 		} {
 			if _, err := tx.Exec(ctx, statement, string(testRealm)); err != nil {

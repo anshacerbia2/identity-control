@@ -1168,3 +1168,74 @@ table "workload_owner_change" {
     expr = "btrim(reason) <> ''"
   }
 }
+
+// How a client created before this service existed came under registration: who adopted it, when,
+// why, what it held at that moment, and which repairable differences the adoption converged
+// (ADR-IAM-001 §5.12). Insert-only, so the record outlives whoever adopted it.
+table "registration_adoption" {
+  schema  = schema.identity
+  comment = "An insert-only record of a client's adoption. TDD-identity-control-003."
+
+  column "adoption_id" {
+    null = false
+    type = uuid
+  }
+
+  column "registration_id" {
+    null = false
+    type = uuid
+  }
+
+  column "kc_client_id" {
+    null = false
+    type = text
+  }
+
+  column "adopted_by" {
+    null = false
+    type = uuid
+  }
+
+  column "reason" {
+    null = false
+    type = text
+  }
+
+  column "observed" {
+    null    = false
+    type    = jsonb
+    comment = "What the client held when it was adopted, per compared field class."
+  }
+
+  column "converged" {
+    null    = false
+    type    = sql("text[]")
+    default = sql("'{}'::text[]")
+  }
+
+  column "adopted_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+
+  primary_key {
+    columns = [column.adoption_id]
+  }
+
+  foreign_key "registration_adoption_registration_id_fkey" {
+    columns     = [column.registration_id]
+    ref_columns = [table.client_registration.column.registration_id]
+    on_update   = NO_ACTION
+    on_delete   = NO_ACTION
+  }
+
+  index "registration_adoption_registration" {
+    unique  = true
+    columns = [column.registration_id]
+  }
+
+  check "registration_adoption_reason_check" {
+    expr = "btrim(reason) <> ''"
+  }
+}

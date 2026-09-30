@@ -41,7 +41,7 @@ func (s *stubReconciler) FindingsFor(_ context.Context, registration id.UUID) ([
 	if s.statusErr != nil {
 		return nil, s.statusErr
 	}
-	return []reconcile.Finding{{Registration: registration, Class: reconcile.Repaired}}, nil
+	return []reconcile.Finding{{Registration: &registration, Class: reconcile.Repaired}}, nil
 }
 
 func (s *stubReconciler) Sweep(context.Context) (reconcile.Run, error) {
@@ -306,6 +306,9 @@ type stubRegistrar struct {
 	listed  *registration.ListQuery
 	page    registration.Page
 
+	adopted   *registration.AdoptRequest
+	adoptPlan registration.Plan
+
 	// The key surface's record of what it was asked.
 	addedKey   json.RawMessage
 	addedBy    id.UUID
@@ -313,6 +316,15 @@ type stubRegistrar struct {
 	revokedKey id.UUID
 	revokedBy  id.UUID
 	reason     string
+}
+
+func (s *stubRegistrar) Adopt(_ context.Context, req registration.AdoptRequest) (registration.AdoptResult, error) {
+	s.adopted = &req
+	result := registration.AdoptResult{Plan: s.adoptPlan}
+	if s.err == nil && !req.DryRun {
+		result.Registration = &registration.Registration{ClientKey: req.ClientKey, State: "active"}
+	}
+	return result, s.err
 }
 
 func (s *stubRegistrar) Keys(_ context.Context, registrationID id.UUID) ([]registration.Key, error) {
@@ -687,5 +699,87 @@ func TestEveryKeyRouteRequiresAnAuthenticatedPrincipal(t *testing.T) {
 	}
 	if registrar.addedKey != nil || !registrar.revokedKey.IsNil() {
 		t.Error("an unauthenticated request reached the registrar")
+	}
+}
+
+const adoptBody = `{"client_key":"identity-experience-bff","profile":"confidential","audience_class":"internal",
+  "application_ref":"identity-experience","redirect_uris":["http://127.0.0.1:8090/auth/callback"],
+  "public_keys":[{"kty":"RSA","n":"AQAB","e":"AQAB"}]%s}`
+
+// A dry run answers the plan and needs no Idempotency-Key; an adoption needs one, and both need the
+// caller's reason, which reaches the registrar with the caller as the adopting Principal.
+func TestAnAdoptionIsPlannedThenMade(t *testing.T) {
+	registrar := &stubRegistrar{adoptPlan: registration.Plan{ClientKey: "identity-experience-bff", Adoptable: true}}
+	r, principal := asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/registrations:adopt",
+		strings.NewReader(fmt.Sprintf(adoptBody, `,"dry_run":true`))))
+	r.Header.Set(httpapi.AdministrativeReasonHeader, "bring the BFF under registration")
+	w := serve(registrarHandler(t, registrar), r)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"adoptable":true`) {
+		t.Fatalf("a dry run answered %d: %s", w.Code, w.Body)
+	}
+	if got := registrar.adopted; !got.DryRun || got.RegisteredBy != principal || got.Reason != "bring the BFF under registration" ||
+		len(got.PublicKeys) != 1 {
+		t.Errorf("request = %+v", got)
+	}
+
+	r, _ = asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/registrations:adopt",
+		strings.NewReader(fmt.Sprintf(adoptBody, `,"converge":["token_lifespan"]`))))
+	r.Header.Set(httpapi.AdministrativeReasonHeader, "bring the BFF under registration")
+	if w := serve(registrarHandler(t, registrar), r); w.Code != http.StatusBadRequest {
+		t.Errorf("an adoption without an Idempotency-Key answered %d", w.Code)
+	}
+	r.Header.Set(httpapi.IdempotencyHeader, "adopt-bff")
+	r, _ = asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/registrations:adopt",
+		strings.NewReader(fmt.Sprintf(adoptBody, `,"converge":["token_lifespan"]`))))
+	r.Header.Set(httpapi.AdministrativeReasonHeader, "bring the BFF under registration")
+	r.Header.Set(httpapi.IdempotencyHeader, "adopt-bff")
+	if w := serve(registrarHandler(t, registrar), r); w.Code != http.StatusCreated ||
+		!strings.Contains(w.Body.String(), `"registration"`) {
+		t.Errorf("an adoption answered %d: %s", w.Code, w.Body)
+	}
+	if got := registrar.adopted; got.DryRun || got.IdempotencyKey != "adopt-bff" || len(got.Converge) != 1 {
+		t.Errorf("request = %+v", got)
+	}
+}
+
+func TestAnAdoptionRefusesWhatItCannotRead(t *testing.T) {
+	for name, c := range map[string]struct {
+		body, reason string
+		want         int
+	}{
+		"no reason":      {fmt.Sprintf(adoptBody, `,"dry_run":true`), "", http.StatusBadRequest},
+		"an unknown key": {`{"client_key":"x","client_secret":"s","dry_run":true}`, "r", http.StatusBadRequest},
+	} {
+		registrar := &stubRegistrar{}
+		r, _ := asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/registrations:adopt", strings.NewReader(c.body)))
+		if c.reason != "" {
+			r.Header.Set(httpapi.AdministrativeReasonHeader, c.reason)
+		}
+		if w := serve(registrarHandler(t, registrar), r); w.Code != c.want || registrar.adopted != nil {
+			t.Errorf("%s answered %d, want %d", name, w.Code, c.want)
+		}
+	}
+	for name, c := range map[string]struct {
+		err  error
+		want int
+	}{
+		"not adoptable":      {registration.ErrNotAdoptable, http.StatusConflict},
+		"no client":          {registration.ErrNoClient, http.StatusNotFound},
+		"already registered": {registration.ErrKeyTaken, http.StatusConflict},
+		"a registered key":   {registration.ErrKeyInUse, http.StatusConflict},
+		"a private key":      {registration.ErrPrivateKey, http.StatusBadRequest},
+		"kernel down":        {keycloak.ErrUnavailable, http.StatusServiceUnavailable},
+	} {
+		registrar := &stubRegistrar{err: c.err, adoptPlan: registration.Plan{Refusal: "client_keys differs from the declaration"}}
+		r, _ := asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/registrations:adopt",
+			strings.NewReader(fmt.Sprintf(adoptBody, `,"dry_run":true`))))
+		r.Header.Set(httpapi.AdministrativeReasonHeader, "r")
+		w := serve(registrarHandler(t, registrar), r)
+		if w.Code != c.want {
+			t.Errorf("%s answered %d, want %d", name, w.Code, c.want)
+		}
+		if c.err == registration.ErrNotAdoptable && !strings.Contains(w.Body.String(), "client_keys differs") {
+			t.Errorf("a refused adoption does not name what stopped it: %s", w.Body)
+		}
 	}
 }

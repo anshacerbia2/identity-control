@@ -525,3 +525,34 @@ func TestAClientsCredentialIsReadAndCompared(t *testing.T) {
 		}
 	}
 }
+
+func TestListClientsReadsEveryPage(t *testing.T) {
+	k := &kernel{adminBodyFor: func(query url.Values) string {
+		first, _ := strconv.Atoi(query.Get("first"))
+		if first >= 100 {
+			return `[{"id":"last","clientId":"z"}]`
+		}
+		var page []string
+		for i := range 100 {
+			page = append(page, fmt.Sprintf(`{"id":"c%d","clientId":"client-%d"}`, first+i, first+i))
+		}
+		return "[" + strings.Join(page, ",") + "]"
+	}}
+	admin, _ := newAdmin(t, k)
+	clients, err := admin.ListClients(context.Background(), testRealm)
+	if err != nil || len(clients) != 101 || clients[100].ID != "last" {
+		t.Errorf("ListClients read %d clients, %v", len(clients), err)
+	}
+}
+
+func TestDefaultClientScopesAreNamed(t *testing.T) {
+	k := &kernel{adminBody: `[{"id":"s1","name":"scnehaux-internal"},{"id":"s2","name":"acr"}]`}
+	admin, _ := newAdmin(t, k)
+	names, err := admin.DefaultClientScopes(context.Background(), testRealm, "c1")
+	if err != nil || len(names) != 2 || names[0] != "scnehaux-internal" {
+		t.Errorf("DefaultClientScopes = %v, %v", names, err)
+	}
+	if k.lastPath != "/admin/realms/scnehaux/clients/c1/default-client-scopes" {
+		t.Errorf("read %s", k.lastPath)
+	}
+}

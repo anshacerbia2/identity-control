@@ -278,6 +278,57 @@ func (r *Registry) createClient(ctx context.Context, _ keycloak.Realm, spec keyc
 	return client, serviceAccount, nil
 }
 
+func (r *Registry) ListClients(ctx context.Context, _ keycloak.Realm) ([]keycloak.Client, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.FailGet != nil {
+		return nil, r.FailGet
+	}
+	out := make([]keycloak.Client, 0, len(r.clients))
+	for _, client := range r.clients {
+		out = append(out, copyClient(client))
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ClientID < out[j].ClientID })
+	return out, nil
+}
+
+// DefaultClientScopes returns the names of the client's default scopes: the name each attached
+// scope identifier has in Scopes, or the identifier itself for one Scopes does not name.
+func (r *Registry) DefaultClientScopes(ctx context.Context, _ keycloak.Realm, client keycloak.ClientUUID) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.FailGet != nil {
+		return nil, r.FailGet
+	}
+	if _, ok := r.clients[client]; !ok {
+		return nil, keycloak.ErrNotFound
+	}
+	names := []string{}
+	for _, scopeID := range r.defaultScopes[client] {
+		name := scopeID
+		for scopeName, id := range r.Scopes {
+			if id == scopeID {
+				name = scopeName
+			}
+		}
+		names = append(names, name)
+	}
+	return names, nil
+}
+
+// AttachScope attaches a default scope to a client with no admin event: the state before a test.
+func (r *Registry) AttachScope(client keycloak.ClientUUID, scopeID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.defaultScopes[client] = append(r.defaultScopes[client], scopeID)
+}
+
 func (r *Registry) ServiceAccountUser(ctx context.Context, _ keycloak.Realm, client keycloak.ClientUUID) (keycloak.User, error) {
 	if err := ctx.Err(); err != nil {
 		return keycloak.User{}, err

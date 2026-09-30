@@ -150,11 +150,17 @@ func run() error {
 		return fmt.Errorf("registration service: %w", err)
 	}
 
+	// The service's own Admin API clients are exempt from the unmanaged rule beside the kernel's
+	// built-in ones: a controller's credentials are bootstrapped outside what it controls
+	// (ADR-IAM-001 §5.12).
+	exempt := append(append([]string{}, reconcile.BuiltInClients...), cfg.KeycloakClientID, cfg.RegistrationClientID)
 	reconciler, err := reconcile.New(pool, registry, reconcile.Config{
-		Realm:       keycloak.Realm(cfg.KeycloakRealm),
-		Interval:    cfg.RegistrationReconcileInterval,
-		CallTimeout: cfg.ProvisionTimeout,
-		Recreate:    registrar.Recreate,
+		Realm:            keycloak.Realm(cfg.KeycloakRealm),
+		Interval:         cfg.RegistrationReconcileInterval,
+		CallTimeout:      cfg.ProvisionTimeout,
+		Recreate:         registrar.Recreate,
+		ExemptClients:    exempt,
+		DisableUnmanaged: cfg.DisableUnmanagedClients,
 	}, logger)
 	if err != nil {
 		return fmt.Errorf("registration reconciler: %w", err)

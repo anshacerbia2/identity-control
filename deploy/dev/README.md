@@ -205,6 +205,33 @@ cd identity-control/deploy/dev
 It creates `identity-control-registration` and its key, and changes nothing else in the realm. Run
 it again and it refuses. A key is replaced by a rotation, below, never by a rerun.
 
+## Adopting the BFF
+
+`identity-experience-bff` was created by `identity-experience`'s `deploy/dev/create-bff-client.sh`
+before this service could register it, so it is **adopted** (`TDD-identity-control-003` §Adoption):
+a plan first, then the adoption, held to the key it already authenticates with. Until it is, the
+sweep reports it `unmanaged`, and the server must stay on `IDENTITY_UNMANAGED_CLIENTS=report`,
+the default, or the BFF is disabled with every open session.
+
+With a provider-scope token (`scripts/dev-token.ps1`), plan it:
+
+```http
+POST /v1/registrations:adopt
+X-Administrative-Reason: the BFF comes under registration
+Content-Type: application/json
+
+{"client_key":"identity-experience-bff","profile":"confidential","audience_class":"internal",
+ "application_ref":"identity-experience","redirect_uris":["<the BFF's callback URIs, exactly>"],
+ "public_keys":[<the public JWK of identity-experience-bff.pem>],"dry_run":true}
+```
+
+The answer is the plan. `adoptable: true` means the client runs as declared. A `token_lifespan`,
+`audience_scope` or `enabled` difference is converged only if named in `"converge": [...]`; a
+`redirect_uris` or `client_keys` difference means the declaration is wrong, and is fixed in the
+declaration, never in the console. Then send the same body without `dry_run` and with an
+`Idempotency-Key`. Once the BFF and the caller are adopted, set `IDENTITY_UNMANAGED_CLIENTS=disable`
+in `.env` and restart the service.
+
 ## Keys, and moving a server from secrets to keys
 
 Every client of this service authenticates with its own key by signed JWT. The private keys live
