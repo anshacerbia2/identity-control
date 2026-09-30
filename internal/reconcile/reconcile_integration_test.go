@@ -71,6 +71,9 @@ func newHarness(t *testing.T) *harness {
 			   (SELECT registration_id FROM identity.client_registration WHERE realm = $1)`,
 			`DELETE FROM identity.client_key WHERE registration_id IN
 			   (SELECT registration_id FROM identity.client_registration WHERE realm = $1)`,
+			`DELETE FROM identity.registration_adoption WHERE registration_id IN
+			   (SELECT registration_id FROM identity.client_registration WHERE realm = $1)`,
+			`DELETE FROM identity.registration_finding WHERE registration_id IS NULL AND $1 <> ''`,
 			`DELETE FROM identity.reconcile_run WHERE $1 <> ''`,
 			`DELETE FROM identity.client_registration WHERE realm = $1`,
 		} {
@@ -86,7 +89,7 @@ func newHarness(t *testing.T) *harness {
 	c := &clock{at: time.Now().UTC().Truncate(time.Millisecond)}
 	kernel := keycloakfake.NewRegistry(serviceAccount)
 	kernel.Now = c.now
-	reconciler, err := New(pool, kernel, Config{Realm: realm, Interval: time.Minute},
+	reconciler, err := New(pool, kernel, Config{Realm: realm, Interval: time.Minute, ExemptClients: BuiltInClients},
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
@@ -842,5 +845,85 @@ func TestAKeylessClientIsNotComparedOnKeys(t *testing.T) {
 	h.sweep()
 	if !h.live(web.client).Enabled || len(h.findings(web.client)) != 0 {
 		t.Error("a public client was compared on keys it does not hold")
+	}
+}
+
+// A client no registration describes is recorded on every sweep, attributed, and left alone in
+// report mode. The kernel's built-in clients are never recorded.
+func TestAClientNoRegistrationDescribesIsRecorded(t *testing.T) {
+	h := newHarness(t)
+	h.caller()
+	h.kernel.Put(keycloak.Client{ID: "kc-admin-cli", ClientID: "admin-cli", Enabled: true})
+	h.kernel.Put(keycloak.Client{ID: "kc-stray", ClientID: "stray-app", Enabled: true})
+	h.kernel.ConsoleChange(admin, "kc-stray", func(*keycloak.Client) {})
+	h.tick(time.Second)
+	run := h.sweep()
+
+	if run.Outcome != Drift {
+		t.Errorf("the run is %s, want drift", run.Outcome)
+	}
+	if !h.live("kc-stray").Enabled {
+		t.Error("report mode disabled the unmanaged client")
+	}
+	findings := h.findings("kc-stray")
+	if len(findings) != 1 || findings[0].class != string(Unmanaged) || findings[0].field != "" || findings[0].actor != admin {
+		t.Fatalf("findings = %+v, want one open unmanaged finding attributed to the administrator", findings)
+	}
+	if n := len(h.findings("kc-admin-cli")); n != 0 {
+		t.Errorf("a built-in client was recorded %d time(s)", n)
+	}
+	status, err := h.reconciler.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reported *Finding
+	for i := range status.Findings {
+		if status.Findings[i].Class == Unmanaged {
+			reported = &status.Findings[i]
+		}
+	}
+	if reported == nil || reported.ClientKey != "stray-app" || reported.Registration != nil {
+		t.Errorf("the drift status reports %+v, want the unmanaged client by its clientId and no registration", reported)
+	}
+
+	h.tick(time.Minute)
+	h.sweep()
+	if len(h.findings("kc-stray")) != 1 {
+		t.Error("a second sweep opened another finding")
+	}
+}
+
+// In disable mode the unmanaged client is also disabled, once.
+func TestAnUnmanagedClientIsDisabledWhenAsked(t *testing.T) {
+	h := newHarness(t)
+	h.caller()
+	h.reconciler.cfg.DisableUnmanaged = true
+	h.kernel.Put(keycloak.Client{ID: "kc-stray", ClientID: "stray-app", Enabled: true})
+	h.sweep()
+	if h.live("kc-stray").Enabled {
+		t.Fatal("disable mode left the unmanaged client enabled")
+	}
+	patches := h.kernel.Patches
+	h.tick(time.Minute)
+	h.sweep()
+	if h.kernel.Patches != patches {
+		t.Error("a second sweep disabled the client again")
+	}
+}
+
+// The finding converges once the client is registered, by adoption or otherwise.
+func TestAnUnmanagedFindingConvergesOnceTheClientIsRegistered(t *testing.T) {
+	h := newHarness(t)
+	h.caller()
+	h.kernel.Put(keycloak.Client{ID: "kc-stray-app", ClientID: "stray-app", Enabled: true})
+	h.sweep()
+	if f := h.findings("kc-stray-app"); len(f) != 1 || f[0].convergedAt != nil {
+		t.Fatalf("findings = %+v", f)
+	}
+	h.register("stray-app", "resource", "L1", nil, nil)
+	h.tick(time.Minute)
+	h.sweep()
+	if f := h.findings("kc-stray-app"); len(f) != 1 || f[0].convergedAt == nil {
+		t.Errorf("after the client was registered its finding is %+v, want converged", f)
 	}
 }

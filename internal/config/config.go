@@ -67,6 +67,11 @@ type Config struct {
 	ClientKeyLifetime        time.Duration
 	ClientKeyRotationOverlap time.Duration
 
+	// DisableUnmanagedClients is IDENTITY_UNMANAGED_CLIENTS=disable: a Keycloak client no
+	// registration describes is disabled, as well as recorded. The default, report, records it only,
+	// for an estate whose bootstrap clients are not adopted yet (TDD-identity-control-003).
+	DisableUnmanagedClients bool
+
 	// TokenIssuer and TokenAudience are the verifier's contract. The issuer is compared for
 	// exact equality, so a value with a stray trailing slash rejects every token rather than
 	// accepting a wrong one.
@@ -159,6 +164,14 @@ func Load() (Config, error) {
 		problems = append(problems, errors.New("IDENTITY_CLIENT_KEY_LIFETIME and IDENTITY_CLIENT_KEY_ROTATION_OVERLAP must be positive"))
 	case cfg.ClientKeyRotationOverlap >= cfg.ClientKeyLifetime:
 		problems = append(problems, errors.New("IDENTITY_CLIENT_KEY_ROTATION_OVERLAP must be shorter than IDENTITY_CLIENT_KEY_LIFETIME, or a key would retire after it expired"))
+	}
+
+	switch mode := stringOr("IDENTITY_UNMANAGED_CLIENTS", "report"); mode {
+	case "report":
+	case "disable":
+		cfg.DisableUnmanagedClients = true
+	default:
+		problems = append(problems, fmt.Errorf("IDENTITY_UNMANAGED_CLIENTS is %q; it is report or disable", mode))
 	}
 
 	cfg.DBMaxConns = int32(intOr("DB_MAX_CONNS", 20, &problems))

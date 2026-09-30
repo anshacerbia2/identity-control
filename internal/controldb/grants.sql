@@ -37,6 +37,7 @@ BEGIN
               ('identity.client_key'),
               ('identity.workload'),
               ('identity.workload_owner_change'),
+              ('identity.registration_adoption'),
               ('identity.principal_relink'),
               ('identity.principal_finding'),
               ('platform.outbox'),
@@ -117,6 +118,10 @@ GRANT UPDATE (state, retiring_at, revoked_at, revoked_by, revocation_reason) ON 
 -- answerable at a given time cannot be rewritten by whoever holds the workload now.
 REVOKE DELETE, TRUNCATE ON identity.workload FROM identity_runtime;
 REVOKE UPDATE, DELETE, TRUNCATE ON identity.workload_owner_change FROM identity_runtime;
+
+-- An adoption record says who brought a client created outside this service under registration,
+-- why, and what the client held then. Insert-only (ADR-IAM-001 §5.12 rule 5).
+REVOKE UPDATE, DELETE, TRUNCATE ON identity.registration_adoption FROM identity_runtime;
 
 -- A relink record says who moved a Principal to a new Keycloak user and why, so it is insert-only.
 -- A dangling-mapping finding is evidence that a user disappeared, kept after it is resolved.

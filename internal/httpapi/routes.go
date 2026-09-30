@@ -112,6 +112,7 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	api.HandleFunc("GET /v1/registrations/{registration_id}/findings", cfg.Registrations.Findings)
 	api.HandleFunc("GET /v1/registrations:drift", cfg.Registrations.Drift)
 	api.HandleFunc("POST /v1/registrations:reconcile", cfg.Registrations.Reconcile)
+	api.HandleFunc("POST /v1/registrations:adopt", cfg.Registrations.Adopt)
 	api.HandleFunc("POST /v1/registrations/{registration_id}/drift-exceptions", cfg.Registrations.GrantException)
 	api.HandleFunc("GET /v1/registrations/{registration_id}/drift-exceptions", cfg.Registrations.Exceptions)
 	api.HandleFunc("POST /v1/registrations/{registration_id}/keys", cfg.Registrations.AddKey)

@@ -22,8 +22,10 @@ import (
 
 // Finding is one divergence, as the drift route reports it.
 type Finding struct {
-	ID           id.UUID         `json:"finding_id"`
-	Registration id.UUID         `json:"registration_id"`
+	ID id.UUID `json:"finding_id"`
+
+	// Registration is null for an unmanaged client, which no registration describes.
+	Registration *id.UUID        `json:"registration_id"`
 	ClientKey    string          `json:"client_key"`
 	FieldClass   FieldClass      `json:"field_class,omitempty"`
 	Class        FindingClass    `json:"finding_class"`
@@ -53,11 +55,13 @@ const lastRunStatement = `SELECT run_id::text, started_at, finished_at, coalesce
 FROM identity.reconcile_run WHERE sweep = 'registration'
 ORDER BY started_at DESC LIMIT 1`
 
-const findingColumns = `SELECT f.finding_id::text, f.registration_id::text, r.client_key, coalesce(f.field_class, ''),
+// An unmanaged client's finding has no registration, so its client_key is the clientId it recorded.
+const findingColumns = `SELECT f.finding_id::text, coalesce(f.registration_id::text, ''),
+       coalesce(r.client_key, f.observed->>'client_id', ''), coalesce(f.field_class, ''),
        f.finding_class, coalesce(f.desired, 'null'::jsonb)::text, coalesce(f.observed, 'null'::jsonb)::text,
        coalesce(f.actor, ''), f.changed_at, f.detected_at, f.converged_at
 FROM identity.registration_finding f
-JOIN identity.client_registration r ON r.registration_id = f.registration_id`
+LEFT JOIN identity.client_registration r ON r.registration_id = f.registration_id`
 
 const openFindingDetailStatement = findingColumns + `
 WHERE f.converged_at IS NULL
@@ -144,8 +148,12 @@ func readFindings(ctx context.Context, tx db.Tx, statement string, args ...any) 
 		if finding.ID, err = id.Parse(rawFinding); err != nil {
 			return nil, err
 		}
-		if finding.Registration, err = id.Parse(rawRegistration); err != nil {
-			return nil, err
+		if rawRegistration != "" {
+			registration, err := id.Parse(rawRegistration)
+			if err != nil {
+				return nil, err
+			}
+			finding.Registration = &registration
 		}
 		finding.FieldClass, finding.Class = FieldClass(field), FindingClass(class)
 		finding.Desired, finding.Observed = json.RawMessage(desired), json.RawMessage(observed)

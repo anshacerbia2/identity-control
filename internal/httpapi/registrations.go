@@ -42,6 +42,10 @@ type Registrar interface {
 	Keys(ctx context.Context, registrationID id.UUID) ([]registration.Key, error)
 	AddKey(ctx context.Context, registrationID id.UUID, publicKey json.RawMessage, by id.UUID) ([]registration.Key, bool, error)
 	RevokeKey(ctx context.Context, registrationID, keyID, by id.UUID, reason string) ([]registration.Key, error)
+
+	// Adopt brings a client created before this service existed under registration (ADR-IAM-001
+	// §5.12, TDD-identity-control-003 §Adoption).
+	Adopt(ctx context.Context, req registration.AdoptRequest) (registration.AdoptResult, error)
 }
 
 // Registrations serves the registration and drift routes.
@@ -107,6 +111,75 @@ func (h *Registrations) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, created)
+}
+
+// adoptRequest is the registration document with the keys the client already holds, a plan-only
+// switch, and the repairable field classes the caller accepts converging.
+type adoptRequest struct {
+	ClientKey      string            `json:"client_key"`
+	Profile        string            `json:"profile"`
+	AudienceClass  string            `json:"audience_class"`
+	ApplicationRef string            `json:"application_ref"`
+	LifetimeClass  string            `json:"lifetime_class"`
+	Audience       []string          `json:"audience"`
+	RedirectURIs   []string          `json:"redirect_uris"`
+	PublicKeys     []json.RawMessage `json:"public_keys"`
+	DryRun         bool              `json:"dry_run"`
+	Converge       []string          `json:"converge"`
+}
+
+// Adopt handles POST /v1/registrations:adopt. A dry run answers 200 with the plan and changes
+// nothing; an adoption answers 201 with the plan and the registration. A refusal names the field
+// class that stopped it, and a dry run shows the whole plan.
+func (h *Registrations) Adopt(w http.ResponseWriter, r *http.Request) {
+	principal, ok := callerPrincipal(r)
+	if !ok {
+		httpapi.Problem(w, r, httpapi.AuthenticationRequired, "The request carries no authenticated caller")
+		return
+	}
+	reason := strings.TrimSpace(r.Header.Get(AdministrativeReasonHeader))
+	if reason == "" {
+		httpapi.Problem(w, r, httpapi.ValidationFailed, "An adoption requires an X-Administrative-Reason header")
+		return
+	}
+	var body adoptRequest
+	decoder := json.NewDecoder(io.LimitReader(r.Body, maxBodyBytes))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&body); err != nil {
+		httpapi.Problem(w, r, httpapi.ValidationFailed, "The request body is not a valid adoption document")
+		return
+	}
+	key := ""
+	if !body.DryRun {
+		var ok bool
+		if key, ok = idempotencyKey(r); !ok {
+			httpapi.Problem(w, r, httpapi.ValidationFailed,
+				"An adoption requires a non-empty Idempotency-Key header of at most 255 characters")
+			return
+		}
+	}
+	scope, _ := CallerScope(r.Context())
+	result, err := h.registrar.Adopt(r.Context(), registration.AdoptRequest{
+		Request: registration.Request{CallerScope: scope, IdempotencyKey: key, RegisteredBy: principal,
+			ClientKey: body.ClientKey, Profile: body.Profile, AudienceClass: body.AudienceClass,
+			ApplicationRef: body.ApplicationRef, LifetimeClass: body.LifetimeClass, Audience: body.Audience,
+			RedirectURIs: body.RedirectURIs},
+		PublicKeys: body.PublicKeys, Reason: reason, DryRun: body.DryRun, Converge: body.Converge,
+	})
+	switch {
+	case errors.Is(err, registration.ErrNotAdoptable):
+		httpapi.Problem(w, r, httpapi.StateTransitionRefused, "Not adopted: "+result.Plan.Refusal)
+	case errors.Is(err, registration.ErrNoClient):
+		httpapi.Problem(w, r, httpapi.NotFound, "No Keycloak client holds that client_key")
+	case errors.Is(err, registration.ErrKeyTaken):
+		httpapi.Problem(w, r, httpapi.StateTransitionRefused, "The client_key is already registered")
+	case err != nil:
+		writeRegistrationError(w, r, err)
+	case body.DryRun:
+		writeJSON(w, http.StatusOK, result)
+	default:
+		writeJSON(w, http.StatusCreated, result)
+	}
 }
 
 // GetRegistration handles GET /v1/registrations/{registration_id}.

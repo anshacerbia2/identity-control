@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-003
   title: Protocol Client and Protected-Resource Registration
   owner: Core Platform Team
-  version: 1.14.0
+  version: 1.15.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -300,6 +300,28 @@ A change it covers is left in place and recorded `sanctioned`. When it expires, 
 change is drift like any other. Keeping the change means changing desired state
 through this API.
 
+### Adoption Records
+
+```sql
+CREATE TABLE identity.registration_adoption (
+    adoption_id      UUID        PRIMARY KEY,
+    registration_id  UUID        NOT NULL UNIQUE REFERENCES identity.client_registration(registration_id),
+    kc_client_id     TEXT        NOT NULL,
+    adopted_by       UUID        NOT NULL,
+    reason           TEXT        NOT NULL,
+    observed         JSONB       NOT NULL,
+    converged        TEXT[]      NOT NULL DEFAULT '{}',
+    adopted_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT registration_adoption_reason_check CHECK (btrim(reason) <> '')
+);
+```
+
+One row per adopted client: who adopted it, when, why, what the client held when it was adopted
+(`observed`: its authenticator, key ids, redirect URIs, lifespan, default scopes and whether it
+was enabled), and which repairable differences the adoption converged. The runtime role inserts
+and reads it, and can neither update nor delete it (`grants.sql`), so the record of how a client
+came under management outlives whoever adopted it (`ADR-IAM-001 §5.12` rule 5).
+
 ### Client Key Records
 
 A confidential or workload client authenticates with `private_key_jwt` (`ADR-IAM-001 §5.12`,
@@ -367,6 +389,7 @@ holds, and the next rebuild of the kernel's JWKS would install it.
 
 ```text
 POST   /v1/registrations
+POST   /v1/registrations:adopt
 GET    /v1/registrations
 GET    /v1/registrations/{registration_id}
 POST   /v1/registrations/{registration_id}:suspend
@@ -522,6 +545,57 @@ delegates to whoever controls any matching host.
 An audience naming an unregistered resource is refused because a token issued for an
 audience nobody registered has no verifier that would reject it correctly.
 
+### Adoption
+
+A client created before this service existed, by a bootstrap script, is refused by
+`POST /v1/registrations` (the rule above). It comes under registration by
+`POST /v1/registrations:adopt`, held to the five rules of `ADR-IAM-001 §5.12`:
+
+```text
+adopt(request):
+    validate the declaration as a registration, with one or two public keys, and a reason
+    reject a profile other than 'confidential'
+    unless dry_run: an Idempotency-Key that completed an adoption returns its stored answer
+    reject a client_key a registration already holds
+    read the one Keycloak client with that client_key; none is not found
+    compare it with the declaration, per field class:
+        token_lifespan   repairable
+        audience_scope   repairable   the managed scope attached as a default scope
+        enabled          repairable   the client is enabled
+        redirect_uris    blocking
+        client_keys      blocking     client-jwt, the held JWKS, exactly the declared keys
+    if dry_run: return the plan, change nothing
+    reject if a blocking class differs, or a repairable one differs and the request does not name it
+    reject a declared key already registered to any client
+    converge the named repairable differences on the kernel
+    record the registration active, its keys, and the adoption, in one transaction
+    return the registration and the plan it was adopted under
+```
+
+The request is the registration document with `public_keys` in place of `public_key`, a list of one
+or two JWKs, because a client may be adopted in the middle of a rotation, and with `dry_run` and
+`converge`, the repairable field classes the caller accepts converging. It carries an
+`X-Administrative-Reason`, and an `Idempotency-Key` unless it is a dry run. The answer is the plan:
+each field class with its policy, the declared and observed value, and whether it differs; and, when
+it was adopted, the registration. The first declared key is recorded `active` and a second
+`retiring`, with the rotation overlap starting at the adoption.
+
+- **Only `confidential` is adopted.** A workload's client carries its Principal on its
+  service-account user and is created through the workload path (`TDD-identity-control-004`); a
+  `public` client and a resource hold no key to prove anything with (`ADR-IAM-001 §5.12` rule 4).
+- **A replay answers before the checks.** Once adopted, the client_key is registered, so the
+  checks would refuse the retry of the request that registered it. The retry with the same
+  `Idempotency-Key` returns the first answer instead; a key not yet completed is claimed only to
+  look, and rolled back.
+- **The plan changes nothing.** It is what an operator reads before adopting, and what the
+  refusal of an adoption returns, so a refused adoption says which class stopped it.
+- **Convergence happens before the record.** A converged difference left behind by a failed commit
+  is a change to a client that is still unmanaged, and the adoption retried finds nothing left to
+  converge. A record written before a failed convergence would describe a registration whose
+  client does not match it.
+- **A client the unmanaged branch disabled is adopted disabled** unless `enabled` is named: whether
+  it runs again is the operator's decision, not a side effect of adopting it.
+
 ### Client Key Rotation
 
 ```text
@@ -607,8 +681,10 @@ sweep():
                 apply desired state, record 'repaired'
         read the client back; set converged_at on every finding it now satisfies
 
-    for each Keycloak client with no registration:
-        disable it, record 'unmanaged', raise an alert
+    for each Keycloak client with no registration, except the exempt ones:
+        record 'unmanaged', raise an alert
+        disable it, when IDENTITY_UNMANAGED_CLIENTS is 'disable'
+    converge an open 'unmanaged' finding whose client is now registered or gone
 
     finish the run 'converged' when nothing differs, 'drift' otherwise
 ```
@@ -695,14 +771,24 @@ above and not compared yet.
   built. A sweep that recreated the client would undo that containment within one
   interval. When the lifecycle exists, this can be revisited; until then, holding is the
   conservative reading (RESPONSE-27, D5).
-- **No client is treated as unmanaged yet.** This service's own clients are confidential
-  clients that development scripts create, each with its own key. They can now be registered
-  through this API with those keys, and until they are, disabling every unregistered client would
-  disable this service. When the
-  branch is built, it must also exempt the clients Keycloak itself creates in every
-  realm (`account`, `account-console`, `admin-cli`, `broker`, `realm-management`,
-  `security-admin-console`). Disabling `realm-management` or `admin-cli` would lock
-  administration out of the realm, a worse incident than any drift.
+- **A client no registration describes is found on every sweep.** Its finding is `unmanaged`, with
+  no registration and no field class, attributed to whoever its latest admin event names. Two
+  groups are exempt, by `clientId`:
+  - the clients Keycloak creates in every realm: `account`, `account-console`, `admin-cli`,
+    `broker`, `realm-management` and `security-admin-console`. Disabling `realm-management` or
+    `admin-cli` would lock administration out of the realm, a worse incident than any drift;
+  - this service's own Admin API clients, named by `IDENTITY_KEYCLOAK_CLIENT_ID` and
+    `IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID` (`ADR-IAM-001 §5.12`). A controller's credentials
+    are bootstrapped outside what it controls.
+
+  The finding converges when a later sweep finds the client registered, by adoption or otherwise,
+  or deleted.
+- **Disabling is a setting, for the rollout.** `IDENTITY_UNMANAGED_CLIENTS` is `report` or
+  `disable`. In `report` the finding is recorded and alerted and the client is left alone; in
+  `disable` it is also disabled, once. An estate whose bootstrap clients are not adopted yet would
+  lose them to its first sweep in `disable`, and the first sweep runs at startup, so an estate
+  moves to `disable` after adopting them, and production runs `disable`. It is the observe-first
+  rollout Crossplane's `Observe` management policy gives an import.
 
 An unmanaged client is disabled rather than deleted, on the same reasoning as
 `TDD-identity-control-001`: a false positive caused by a reconciler defect is
@@ -736,6 +822,7 @@ becomes available.
 | `IDENTITY_CLIENT_KEY_LIFETIME` | `2160h` (90 days) | How long a registered client key is valid before it is removed. A Go duration, which has no day unit |
 | `IDENTITY_CLIENT_KEY_ROTATION_OVERLAP` | `168h` (7 days) | Window during which the new and the retiring key are both accepted. Shorter than the lifetime, or startup is refused |
 | `IDENTITY_REGISTRATION_RECONCILE_INTERVAL` | `1h` | Drift sweep cadence. Admin-event retention in `identity-kernel` (7 days) must exceed it, or a change would lose its attribution before a sweep reads it |
+| `IDENTITY_UNMANAGED_CLIENTS` | `report` | `report` records and alerts a Keycloak client no registration describes; `disable` also disables it. Production runs `disable`, once its bootstrap clients are adopted |
 | `IDENTITY_APPLICATION_AUTHORITY` | `manual` | Becomes the Software Catalog authority name once chartered |
 | `IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID` | none, required | The registration path's own Admin API client, `identity-control-registration` |
 | `IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_KEY_FILE` | none, required | Its PEM private key, from the secret manager as a file; never the Principal path's |
@@ -814,6 +901,27 @@ becomes available.
   desired state.
 - A Keycloak client with no registration is disabled and alerted, not deleted.
 - Reconciliation is idempotent against a consistent state.
+
+### Adoption
+
+- A dry run returns the plan per field class and changes neither the kernel nor the Control
+  Database.
+- A client whose redirect URIs or keys differ from the declaration is refused, and so is one that
+  authenticates with a secret or a JWKS URL, and the refusal carries the plan.
+- A repairable difference is refused unless named, and converged when named.
+- A client that does not exist, a client_key already registered, a profile other than
+  `confidential`, and a declared key already registered are refused.
+- An adopted client is an active registration with its keys, compared by the next sweep, which
+  converges its open `unmanaged` finding.
+- The adoption record is written with the adopting Principal, the reason and the observed state,
+  and the runtime role can neither update nor delete it.
+
+### Unmanaged Clients
+
+- A Keycloak client no registration describes is recorded `unmanaged`, left enabled in `report`,
+  and disabled in `disable`.
+- The kernel's built-in clients and this service's own Admin API clients are never recorded.
+- The finding converges once the client is registered or deleted.
 
 ### Lifecycle
 
@@ -901,6 +1009,8 @@ compromised client key, expired client key recovery, and registration drift repa
 | Realizes capability | PAD-PLT-001 — Identity & Access Platform |
 | Governed by | ADR-IAM-001 §5.2, §5.7 — supported interfaces only; no unmanaged console change |
 | Governed by | ADR-IAM-001 §5.12 — confidential and workload clients authenticate with registered keys |
+| Governed by | ADR-IAM-001 §5.12 — a bootstrap client comes under registration by explicit adoption; the service's own Admin API clients are exempt from the unmanaged rule |
+| Evidence | Terraform `import` blocks, CloudFormation resource import, Crossplane `external-name` and its `Observe` management policy: explicit per-resource adoption, planned first |
 | Conforms to | STD-IAM-001 §3.2 — PKCE, exact redirect URIs, no secret in a public client, `private_key_jwt` for confidential and workload clients |
 | Evidence | `identity-kernel` `compat/client_keys_test.go` — key overlap, immediate removal, replay refusal |
 | Conforms to | STD-IAM-002 §3.3 — every protected resource carries exactly one lifetime class |

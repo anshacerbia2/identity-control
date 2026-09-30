@@ -203,6 +203,12 @@ type ClientRegistry interface {
 	// ErrNotFound for a client without one. A workload's claim-source attributes live on this user
 	// (TDD-identity-kernel-001 §Claim Projection).
 	ServiceAccountUser(ctx context.Context, realm Realm, client ClientUUID) (User, error)
+
+	// ListClients returns every client in the realm, reading every page.
+	ListClients(ctx context.Context, realm Realm) ([]Client, error)
+
+	// DefaultClientScopes returns the names of the client's default client scopes.
+	DefaultClientScopes(ctx context.Context, realm Realm, client ClientUUID) ([]string, error)
 }
 
 // ClientSpec is a client built from desired state (TDD-identity-control-003 §Profiles). Exactly one
@@ -644,6 +650,72 @@ func (a *Admin) ClientScopeID(ctx context.Context, realm Realm, name string) (st
 		}
 	}
 	return "", fmt.Errorf("keycloak: the realm declares no client scope %q: %w", name, ErrNotFound)
+}
+
+// clientPage is the client enumeration's page, and clientPages bounds it: ten thousand clients in one
+// realm is an estate this service was not sized for, and reading on would make a sweep's cost a
+// function of it.
+const (
+	clientPage  = 100
+	clientPages = 100
+)
+
+// ErrTooManyClients means the realm holds more clients than one enumeration reads.
+var ErrTooManyClients = errors.New("keycloak: more clients than one enumeration reads")
+
+// ListClients reads every client in the realm, page by page.
+func (a *Admin) ListClients(ctx context.Context, realm Realm) ([]Client, error) {
+	var out []Client
+	path := fmt.Sprintf("/admin/realms/%s/clients", url.PathEscape(string(realm)))
+	for page := 0; page < clientPages; page++ {
+		query := url.Values{}
+		query.Set("first", strconv.Itoa(page*clientPage))
+		query.Set("max", strconv.Itoa(clientPage))
+		response, err := a.do(ctx, http.MethodGet, path, query, nil, false)
+		if err != nil {
+			return nil, err
+		}
+		var representations []map[string]any
+		decodeErr := json.Unmarshal(response.body, &representations)
+		response.Close()
+		if decodeErr != nil {
+			return nil, fmt.Errorf("keycloak: decode clients: %w", decodeErr)
+		}
+		for _, representation := range representations {
+			client, err := clientFrom(representation)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, client)
+		}
+		if len(representations) < clientPage {
+			return out, nil
+		}
+	}
+	return nil, ErrTooManyClients
+}
+
+// DefaultClientScopes reads the names of a client's default client scopes.
+func (a *Admin) DefaultClientScopes(ctx context.Context, realm Realm, client ClientUUID) ([]string, error) {
+	if client == "" {
+		return nil, errors.New("keycloak: a client identifier is required")
+	}
+	response, err := a.do(ctx, http.MethodGet, a.clientPath(realm, client)+"/default-client-scopes", nil, nil, false)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Close()
+	var scopes []struct {
+		Name string `json:"name"`
+	}
+	if err := json.Unmarshal(response.body, &scopes); err != nil {
+		return nil, fmt.Errorf("keycloak: decode default client scopes: %w", err)
+	}
+	names := make([]string, 0, len(scopes))
+	for _, scope := range scopes {
+		names = append(names, scope.Name)
+	}
+	return names, nil
 }
 
 // ServiceAccountUser reads the client's service-account user.

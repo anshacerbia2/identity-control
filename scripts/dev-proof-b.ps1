@@ -18,7 +18,9 @@
 #      :relink provisions a new user carrying the same principal_id
 #   7. a workload's keys rotate with an overlap and revoke at once, and a key added in the console
 #      blocks the client until an operator's reconcile puts back exactly the registered keys
-#   8. an unreachable Keycloak is 'unresolved', and the sweep converges once it is back
+#   8. a client created in the console, which no registration describes, is recorded unmanaged and
+#      left alone in report mode, and its finding converges once it is gone
+#   9. an unreachable Keycloak is 'unresolved', and the sweep converges once it is back
 #
 # SECRETS: read from the environment.
 #   IDENTITY_CALLER_KEY_FILE, IDENTITY_CALLER_PASSWORD  a provider-scope token, as dev-smoke.ps1
@@ -377,7 +379,31 @@ if ($PSVersionTable.PSEdition -ne 'Core') {
 }
 
 Write-Host ""
-Write-Host "8. Keycloak unreachable: unresolved, then converged"
+Write-Host "8. a client no registration describes"
+$at = [datetimeoffset]::UtcNow
+$stray = "proofb-stray-$([Guid]::NewGuid().ToString('N').Substring(0, 8))"
+$r = Kc "POST" "/clients" "{`"clientId`":`"$stray`",`"enabled`":true,`"publicClient`":true,`"redirectUris`":[`"$callback`"]}"
+Expect "the console administrator creates a client" $r.code 201
+$strayUuid = (Kc "GET" "/clients?clientId=$stray&search=false" $null).json[0].id
+$f = $null
+$deadline = (Get-Date).AddSeconds(90)
+while ((Get-Date) -lt $deadline -and -not $f) {
+    [void](Sweep)
+    $open = (Api "GET" "/v1/registrations:drift" $null $null).json.findings
+    $f = @($open | Where-Object { $_.finding_class -eq "unmanaged" -and $_.client_key -eq $stray })[0]
+    if (-not $f) { Start-Sleep -Seconds 2 }
+}
+Expect "recorded unmanaged" ([bool]$f) $true
+if ($f) { Expect "attributed to the console administrator" (Get-Prop $f "actor") $actor }
+Expect "left enabled in report mode" (Live $strayUuid).enabled $true
+Expect "the console administrator deletes it" (Kc "DELETE" "/clients/$strayUuid" $null).code 204
+[void](Sweep)
+$open = (Api "GET" "/v1/registrations:drift" $null $null).json.findings
+Expect "its finding converged once it was gone" @($open | Where-Object { $_.finding_class -eq "unmanaged" -and $_.client_key -eq $stray }).Count 0
+Record "Client created in the console" "recorded unmanaged, left alone in report mode" "converged once deleted"
+
+Write-Host ""
+Write-Host "9. Keycloak unreachable: unresolved, then converged"
 # A fresh token first: none can be issued while the kernel is down, and the service verifies this
 # one against the key set it already holds.
 $script:apiTokenAt = [datetime]::MinValue
