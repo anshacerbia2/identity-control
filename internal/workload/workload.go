@@ -307,7 +307,14 @@ func (s *Service) Create(ctx context.Context, req CreateRequest) (Workload, erro
 			slog.String("principal_id", created.PrincipalID.String()), slog.String("error", err.Error()))
 		return Workload{}, err
 	}
-	return s.bind(ctx, pending, client)
+	bound, err := s.bind(ctx, pending, client)
+	if err != nil {
+		// Left pending on purpose: recovery binds it, and completes the caller's key.
+		s.logger.WarnContext(ctx, "the workload's identity was not bound; the workload is left pending for recovery",
+			slog.String("principal_id", created.PrincipalID.String()), slog.String("error", err.Error()))
+		return Workload{}, err
+	}
+	return bound, nil
 }
 
 const ownerStatement = `SELECT subject_type, state FROM identity.principal_mapping
@@ -361,9 +368,13 @@ func (s *Service) bind(ctx context.Context, pending pendingWorkload, client keyc
 
 	var active Workload
 	err = s.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
-		mapping, err := s.repo.Find(ctx, tx, pending.PrincipalID)
-		switch {
-		case errors.Is(err, provisioning.ErrNotFound):
+		// Counted first, as the Principal path does: Repository.Find reads one row and has no
+		// not-found answer of its own. A mapping already written is a bind that ran before.
+		var mapped int
+		if err := tx.QueryRow(ctx, mappingCountStatement, pending.PrincipalID.String()).Scan(&mapped); err != nil {
+			return fmt.Errorf("workload: read the mapping: %w", err)
+		}
+		if mapped == 0 {
 			if err := s.repo.InsertPending(ctx, tx, provisioning.Mapping{
 				PrincipalID: pending.PrincipalID, Realm: s.cfg.Realm, Username: serviceAccount.Username,
 				SubjectType: keycloak.SubjectWorkload, WorkloadOwner: pending.Owner,
@@ -373,10 +384,14 @@ func (s *Service) bind(ctx context.Context, pending pendingWorkload, client keyc
 			if err := s.repo.Activate(ctx, tx, pending.PrincipalID, serviceAccount.ID); err != nil {
 				return err
 			}
-		case err != nil:
-			return err
-		case mapping.KeycloakUserID != serviceAccount.ID:
-			return fmt.Errorf("workload: %s is mapped to another Keycloak user", pending.PrincipalID)
+		} else {
+			mapping, err := s.repo.Find(ctx, tx, pending.PrincipalID)
+			if err != nil {
+				return err
+			}
+			if mapping.KeycloakUserID != serviceAccount.ID {
+				return fmt.Errorf("workload: %s is mapped to another Keycloak user", pending.PrincipalID)
+			}
 		}
 		tag, err := tx.Exec(ctx, activateStatement, pending.PrincipalID.String(), s.now())
 		if err != nil {

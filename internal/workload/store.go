@@ -26,6 +26,8 @@ func insertPending(ctx context.Context, tx db.Tx, w Workload, scope, key, digest
 	return nil
 }
 
+const mappingCountStatement = `SELECT count(*) FROM identity.principal_mapping WHERE principal_id = $1`
+
 const activateStatement = `UPDATE identity.workload
 SET state = 'active', activated_at = $2, version = version + 1
 WHERE principal_id = $1 AND state = 'pending'`
