@@ -376,9 +376,10 @@ const (
 	lifetimeEnded = "the key's lifetime ended"
 )
 
+// The reasons are parameters, never spliced into the statement: one of them carries an apostrophe.
 const expireKeysStatement = `UPDATE identity.client_key
 SET state = 'revoked', revoked_at = $2,
-    revocation_reason = CASE WHEN expires_at <= $2 THEN '` + lifetimeEnded + `' ELSE '` + overlapEnded + `' END
+    revocation_reason = CASE WHEN expires_at <= $2 THEN $3::text ELSE $4::text END
 WHERE registration_id = $1
   AND ((state = 'retiring' AND retiring_at <= $2) OR (state IN ('active', 'retiring') AND expires_at <= $2))`
 
@@ -420,7 +421,7 @@ func (s *Service) ExpireKeys(ctx context.Context) (int, error) {
 			if err != nil {
 				return err
 			}
-			tag, err := tx.Exec(ctx, expireKeysStatement, registrationID.String(), now)
+			tag, err := tx.Exec(ctx, expireKeysStatement, registrationID.String(), now, lifetimeEnded, overlapEnded)
 			if err != nil {
 				return fmt.Errorf("registration: expire keys: %w", err)
 			}
