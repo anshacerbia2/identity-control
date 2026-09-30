@@ -734,7 +734,7 @@ table "registration_finding" {
   }
 
   check "registration_finding_field_check" {
-    expr = "field_class IS NULL OR field_class IN ('redirect_uris', 'token_lifespan', 'audience_scope', 'signing_algorithm', 'profile', 'client_keys')"
+    expr = "field_class IS NULL OR field_class IN ('redirect_uris', 'token_lifespan', 'audience_scope', 'signing_algorithm', 'profile', 'client_keys', 'suspension')"
   }
 
   check "registration_finding_class_check" {
@@ -1237,5 +1237,71 @@ table "registration_adoption" {
 
   check "registration_adoption_reason_check" {
     expr = "btrim(reason) <> ''"
+  }
+}
+
+// One row per suspension, restoration and retirement (ADR-IAM-001 §5.13). Insert-only: grants.sql
+// revokes UPDATE and DELETE from the runtime role.
+table "registration_state_change" {
+  schema  = schema.identity
+  comment = "An insert-only record of each suspension, restoration and retirement. TDD-identity-control-003."
+
+  column "change_id" {
+    null = false
+    type = uuid
+  }
+
+  column "registration_id" {
+    null = false
+    type = uuid
+  }
+
+  column "from_state" {
+    null = false
+    type = text
+  }
+
+  column "to_state" {
+    null = false
+    type = text
+  }
+
+  column "changed_by" {
+    null = false
+    type = uuid
+  }
+
+  column "reason" {
+    null = false
+    type = text
+  }
+
+  column "changed_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+
+  primary_key {
+    columns = [column.change_id]
+  }
+
+  foreign_key "registration_state_change_registration_id_fkey" {
+    columns     = [column.registration_id]
+    ref_columns = [table.client_registration.column.registration_id]
+    on_update   = NO_ACTION
+    on_delete   = NO_ACTION
+  }
+
+  index "registration_state_change_registration" {
+    columns = [column.registration_id, column.changed_at]
+  }
+
+  check "registration_state_change_reason_check" {
+    expr = "btrim(reason) <> ''"
+  }
+
+  check "registration_state_change_transition_check" {
+    expr = "(from_state = 'active' AND to_state IN ('suspended', 'retired')) OR (from_state = 'suspended' AND to_state IN ('active', 'retired'))"
   }
 }

@@ -98,6 +98,50 @@ func TestPatchClientKeepsWhatItDoesNotPatch(t *testing.T) {
 	}
 }
 
+// A suspension writes the client's not-before, the Unix second before which the kernel refuses its
+// refresh tokens, and reads it back as the reconciler compares it.
+func TestPatchClientWritesTheNotBefore(t *testing.T) {
+	k := &kernel{adminBody: clientRepresentation}
+	admin, _ := newAdmin(t, k)
+	notBefore, enabled := int64(1790800001), false
+	if err := admin.PatchClient(context.Background(), testRealm, "0b1c2d3e", keycloak.ClientPatch{
+		NotBefore: &notBefore, Enabled: &enabled}); err != nil {
+		t.Fatal(err)
+	}
+	var written map[string]any
+	if err := json.Unmarshal(k.lastBody, &written); err != nil {
+		t.Fatal(err)
+	}
+	if written["notBefore"] != float64(1790800001) || written["enabled"] != false || written["clientId"] != "identity-control-caller" {
+		t.Errorf("representation written = %v", written)
+	}
+
+	read, _ := newAdmin(t, &kernel{adminBody: `{"id":"0b1c2d3e","clientId":"c","enabled":false,"notBefore":1790800001}`})
+	client, err := read.GetClient(context.Background(), testRealm, "0b1c2d3e")
+	if err != nil || client.NotBefore != 1790800001 {
+		t.Errorf("read the not-before as %d, %v", client.NotBefore, err)
+	}
+}
+
+// A retirement deletes the client by its identifier; a client already gone is not found.
+func TestDeleteClientDeletesByIdentifier(t *testing.T) {
+	k := &kernel{adminStatus: http.StatusNoContent}
+	admin, _ := newAdmin(t, k)
+	if err := admin.DeleteClient(context.Background(), testRealm, "0b1c2d3e"); err != nil {
+		t.Fatal(err)
+	}
+	if k.lastMethod != http.MethodDelete || !strings.HasSuffix(k.lastPath, "/clients/0b1c2d3e") {
+		t.Errorf("sent %s %s", k.lastMethod, k.lastPath)
+	}
+	gone, _ := newAdmin(t, &kernel{adminStatus: http.StatusNotFound})
+	if err := gone.DeleteClient(context.Background(), testRealm, "0b1c2d3e"); !errors.Is(err, keycloak.ErrNotFound) {
+		t.Errorf("deleting an absent client answered %v, want ErrNotFound", err)
+	}
+	if err := admin.DeleteClient(context.Background(), testRealm, ""); err == nil {
+		t.Error("an empty client identifier was sent")
+	}
+}
+
 // Replacing a client's keys writes its JWKS and the attributes that make the keys its only
 // credential, and keeps everything else the representation carried.
 func TestPatchClientReplacesTheKeysAndNothingElse(t *testing.T) {

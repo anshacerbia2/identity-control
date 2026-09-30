@@ -28,6 +28,7 @@ import (
 	"github.com/anshacerbia2/foundation-platform/id"
 
 	"github.com/anshacerbia2/identity-control/internal/keycloak"
+	registrations "github.com/anshacerbia2/identity-control/internal/registration"
 )
 
 // FieldClass names what diverged. Each has one policy.
@@ -40,6 +41,10 @@ const (
 	// ClientKeys is a confidential or workload client's credential: its authenticator, its held
 	// JWKS, and the keys in it.
 	ClientKeys FieldClass = "client_keys"
+
+	// Suspension is a suspended registration's client: disabled, with the not-before that ends the
+	// refresh tokens it was issued (ADR-IAM-001 §5.13).
+	Suspension FieldClass = "suspension"
 )
 
 // FindingClass is what the sweep did about a divergence.
@@ -169,6 +174,18 @@ type registration struct {
 
 	// keys are the active and retiring keys a confidential or workload client should hold.
 	keys []keycloak.JWK
+
+	// state is active or suspended, and suspendedAt the latest suspension.
+	state       string
+	suspendedAt *time.Time
+}
+
+// suspended reports whether the registration is suspended, and so compared for its suspension only.
+func (r registration) suspended() bool { return r.state == "suspended" && r.suspendedAt != nil }
+
+// notBefore is the not-before a suspended registration's client holds.
+func (r registration) notBefore() int64 {
+	return registrations.SuspensionNotBefore(*r.suspendedAt)
 }
 
 // comparesKeys reports whether the profile authenticates with a registered key.
@@ -303,6 +320,17 @@ func (r *Reconciler) Sweep(ctx context.Context) (Run, error) {
 		if !ok {
 			continue
 		}
+		if reg.suspended() {
+			wrote, differs, err := r.reconcileSuspension(ctx, run.ID, reg, client, open, latest)
+			if err != nil {
+				return Run{}, err
+			}
+			if wrote {
+				written++
+			}
+			diverged = diverged || differs
+			continue
+		}
 		for _, field := range []FieldClass{TokenLifespan, RedirectURIs, ClientKeys} {
 			wrote, differs, err := r.reconcileField(ctx, run.ID, reg, client, field, open, exceptions, latest, attribution)
 			if err != nil {
@@ -335,6 +363,13 @@ func (r *Reconciler) Sweep(ctx context.Context) (Run, error) {
 		}); err != nil {
 			return Run{}, err
 		}
+	}
+
+	if err := r.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		_, err := tx.Exec(ctx, convergeRetiredStatement, string(r.cfg.Realm), r.now(), run.ID.String())
+		return err
+	}); err != nil {
+		return Run{}, fmt.Errorf("reconcile: converge the findings of retired registrations: %w", err)
 	}
 
 	outcome := Converged
@@ -469,6 +504,49 @@ func (r *Reconciler) reconcileField(
 	})
 }
 
+// reconcileSuspension holds a suspended registration's client disabled with its not-before. The
+// repair needs no attribution and no exception covers it: it removes access and never grants it,
+// and the supported way to enable the client is a restore.
+func (r *Reconciler) reconcileSuspension(ctx context.Context, run id.UUID, reg registration, client keycloak.Client,
+	open map[findingKey]openFinding, latest map[keycloak.ClientUUID]keycloak.AdminEvent) (bool, bool, error) {
+	key := findingKey{reg.client, Suspension}
+	existing, isOpen := open[key]
+	now := r.now()
+	if !client.Enabled && client.NotBefore >= reg.notBefore() {
+		if isOpen {
+			return false, false, r.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+				return convergeFinding(ctx, tx, existing.id, now, run)
+			})
+		}
+		return false, false, nil
+	}
+
+	write := findingWrite{run: run, registration: reg.id, client: reg.client, field: Suspension, class: Repaired,
+		desired:    map[string]any{"enabled": false, "not_before": reg.notBefore()},
+		observed:   map[string]any{"enabled": client.Enabled, "not_before": client.NotBefore},
+		detectedAt: now, newID: r.newID}
+	if isOpen {
+		write.existing = &existing
+		write.actor, write.changedAt = existing.actor, existing.changedAt
+	}
+	if event, ok := latest[reg.client]; ok {
+		at := event.Time
+		write.actor, write.changedAt = event.UserID, &at
+	}
+	disabled, notBefore := false, reg.notBefore()
+	converged, err := r.apply(ctx, reg, Suspension, keycloak.ClientPatch{Enabled: &disabled, NotBefore: &notBefore})
+	if err != nil {
+		return false, true, err
+	}
+	if converged {
+		at := r.now()
+		write.convergedAt = &at
+	}
+	r.logger.ErrorContext(ctx, "a suspended client was enabled or lost its not-before; it is disabled again",
+		slog.String("client_key", reg.clientKey), slog.String("actor", write.actor))
+	return true, true, r.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error { return writeFinding(ctx, tx, write) })
+}
+
 // apply writes desired state for one field and reads the client back, reporting whether it now
 // matches. A repair is recorded converged only when the kernel says so.
 func (r *Reconciler) apply(ctx context.Context, reg registration, field FieldClass, patch keycloak.ClientPatch) (bool, error) {
@@ -490,6 +568,8 @@ func (r *Reconciler) apply(ctx context.Context, reg registration, field FieldCla
 		return sameSet(after.RedirectURIs, reg.redirectURIs) && after.Enabled, nil
 	case ClientKeys:
 		return after.Credential.ByKeys(reg.keys) && after.Enabled, nil
+	case Suspension:
+		return !after.Enabled && after.NotBefore >= reg.notBefore(), nil
 	}
 	return false, nil
 }

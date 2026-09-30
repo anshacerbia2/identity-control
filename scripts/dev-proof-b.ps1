@@ -20,15 +20,18 @@
 #      blocks the client until an operator's reconcile puts back exactly the registered keys
 #   8. a client created in the console, which no registration describes, is recorded unmanaged and
 #      left alone in report mode, and its finding converges once it is gone
-#   9. an unreachable Keycloak is 'unresolved', and the sweep converges once it is back
+#   9. a suspended client stays disabled with its not-before, a console re-enable is repaired, a
+#      restore enables it, and a retirement follows a suspension, deletes the client, and frees
+#      its client_key (ADR-IAM-001 5.13)
+#  10. an unreachable Keycloak is 'unresolved', and the sweep converges once it is back
 #
 # SECRETS: read from the environment.
 #   IDENTITY_CALLER_KEY_FILE, IDENTITY_CALLER_PASSWORD  a provider-scope token, as dev-smoke.ps1
 #   KC_BOOTSTRAP_ADMIN_USERNAME, KC_BOOTSTRAP_ADMIN_PASSWORD   the console administrator
 #
 # KC_BASE_URL is where the login form is served, KC_ADMIN_URL the kernel's private address where
-# /admin is reachable, and KERNEL_KEYCLOAK_CONTAINER the container scenario 7 stops. It is for a
-# kernel that exists for the length of a CI job. Scenario 7 stops Keycloak: never run it against a
+# /admin is reachable, and KERNEL_KEYCLOAK_CONTAINER the container scenario 10 stops. It is for a
+# kernel that exists for the length of a CI job. Scenario 10 stops Keycloak: never run it against a
 # shared server.
 #
 # Usage: pwsh ./scripts/dev-proof-b.ps1
@@ -403,7 +406,47 @@ Expect "its finding converged once it was gone" @($open | Where-Object { $_.find
 Record "Client created in the console" "recorded unmanaged, left alone in report mode" "converged once deleted"
 
 Write-Host ""
-Write-Host "9. Keycloak unreachable: unresolved, then converged"
+Write-Host "9. suspension, restoration, and retirement"
+$life = "proofb-life-$([Guid]::NewGuid().ToString('N').Substring(0, 8))"
+$r = Api "POST" "/v1/registrations" "{`"client_key`":`"$life`",`"profile`":`"public`",`"audience_class`":`"internal`",`"application_ref`":`"proof-b`",`"redirect_uris`":[`"$callback`"]}" @{ "Idempotency-Key" = "proofb-register-$life" }
+Expect "a public client registered" $r.code 201
+$lifeRegistration = $r.json.registration_id
+$lifeUuid = (Kc "GET" "/clients?clientId=$life&search=false" $null).json[0].id
+function Lifecycle($action) {
+    return Api "POST" "/v1/registrations/${lifeRegistration}:$action" $null @{ "X-Administrative-Reason" = "proof-b: $action" }
+}
+$r = Lifecycle "suspend"
+Expect "suspended" $r.code 200
+Expect "state" (Get-Prop $r.json "state") "suspended"
+$client = Live $lifeUuid
+$notBefore = [long](Get-Prop $client "notBefore")
+Expect "the client is disabled" $client.enabled $false
+Expect "the client carries a not-before" ($notBefore -gt 0) $true
+
+$at = [datetimeoffset]::UtcNow
+Console-Change $lifeUuid { param($c) $c.enabled = $true; $c.notBefore = 0 }
+$f = Wait-Finding $lifeRegistration { param($f) (Get-Prop $f "field_class") -eq "suspension" -and (Since $f $at) }
+Expect "a console re-enable is repaired" $f.finding_class "repaired"
+Expect "attributed to the console administrator" (Get-Prop $f "actor") $actor
+$client = Live $lifeUuid
+Expect "disabled again" $client.enabled $false
+Expect "with its not-before back" ([long](Get-Prop $client "notBefore")) $notBefore
+
+$r = Lifecycle "restore"
+Expect "restored" $r.code 200
+Expect "the restored client is enabled" (Live $lifeUuid).enabled $true
+Expect "an active client is not retired" (Lifecycle "retire").code 409
+Expect "suspended again" (Lifecycle "suspend").code 200
+$r = Lifecycle "retire"
+Expect "retired" $r.code 200
+Expect "state" (Get-Prop $r.json "state") "retired"
+Expect "the kernel client is deleted" (Kc "GET" "/clients/$lifeUuid" $null).code 404
+$r = Api "POST" "/v1/registrations" "{`"client_key`":`"$life`",`"profile`":`"public`",`"audience_class`":`"internal`",`"application_ref`":`"proof-b`",`"redirect_uris`":[`"$callback`"]}" @{ "Idempotency-Key" = "proofb-reregister-$life" }
+Expect "its client_key registers again" $r.code 201
+Record "Suspend, restore, retire" "held disabled with its not-before, restored, deleted" "re-enable repaired $(Seconds $at ([datetimeoffset]$f.detected_at)) s after it"
+
+Write-Host ""
+Write-Host "10. Keycloak unreachable: unresolved, then converged"
 # A fresh token first: none can be issued while the kernel is down, and the service verifies this
 # one against the key set it already holds.
 $script:apiTokenAt = [datetime]::MinValue

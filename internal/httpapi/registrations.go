@@ -46,6 +46,12 @@ type Registrar interface {
 	// Adopt brings a client created before this service existed under registration (ADR-IAM-001
 	// §5.12, TDD-identity-control-003 §Adoption).
 	Adopt(ctx context.Context, req registration.AdoptRequest) (registration.AdoptResult, error)
+
+	// The lifecycle (ADR-IAM-001 §5.13, TDD-identity-control-003 §Suspension, Restoration, and
+	// Retirement).
+	Suspend(ctx context.Context, change registration.StateChange) (registration.Registration, error)
+	Restore(ctx context.Context, change registration.StateChange) (registration.Registration, error)
+	Retire(ctx context.Context, change registration.StateChange) (registration.Registration, error)
 }
 
 // Registrations serves the registration and drift routes.
@@ -352,6 +358,68 @@ func (h *Registrations) AddKey(w http.ResponseWriter, r *http.Request) {
 		status = http.StatusCreated
 	}
 	writeJSON(w, status, map[string]any{"keys": keys})
+}
+
+// RegistrationAction handles POST /v1/registrations/{registration_id}:suspend, :restore and :retire.
+// The action is part of the last segment, because the mux matches whole segments.
+func (h *Registrations) RegistrationAction(w http.ResponseWriter, r *http.Request) {
+	principal, ok := callerPrincipal(r)
+	if !ok {
+		httpapi.Problem(w, r, httpapi.AuthenticationRequired, "The request carries no authenticated caller")
+		return
+	}
+	raw, action, _ := strings.Cut(r.PathValue("registration_id"), ":")
+	var apply func(context.Context, registration.StateChange) (registration.Registration, error)
+	switch action {
+	case "suspend":
+		apply = h.registrar.Suspend
+	case "restore":
+		apply = h.registrar.Restore
+	case "retire":
+		apply = h.registrar.Retire
+	default:
+		httpapi.Problem(w, r, httpapi.NotFound, "No such registration action")
+		return
+	}
+	registrationID, err := id.Parse(raw)
+	if err != nil {
+		httpapi.Problem(w, r, httpapi.ValidationFailed, "registration_id is not a valid identifier")
+		return
+	}
+	reason := strings.TrimSpace(r.Header.Get(AdministrativeReasonHeader))
+	if reason == "" {
+		httpapi.Problem(w, r, httpapi.ValidationFailed, "A lifecycle action requires an X-Administrative-Reason header")
+		return
+	}
+	changed, err := apply(r.Context(), registration.StateChange{RegistrationID: registrationID, ChangedBy: principal,
+		Reason: reason})
+	if err != nil {
+		writeLifecycleError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, changed)
+}
+
+func writeLifecycleError(w http.ResponseWriter, r *http.Request, err error) {
+	var inUse *registration.ResourceInUseError
+	switch {
+	case errors.As(err, &inUse):
+		httpapi.Problem(w, r, httpapi.StateTransitionRefused,
+			"The resource is in the audience of other registrations: "+strings.Join(inUse.Dependents, ", "))
+	case errors.Is(err, registration.ErrWorkloadLifecycle):
+		httpapi.Problem(w, r, httpapi.StateTransitionRefused,
+			"A workload's client is suspended, restored or retired through its workload")
+	case errors.Is(err, registration.ErrInvalidTransition):
+		// The message names the rule and the state, never a stored value.
+		httpapi.Problem(w, r, httpapi.StateTransitionRefused, err.Error())
+	case errors.Is(err, registration.ErrInvalid):
+		httpapi.Problem(w, r, httpapi.ValidationFailed, err.Error())
+	case errors.Is(err, registration.ErrNotFound):
+		httpapi.Problem(w, r, httpapi.NotFound, "No such registration")
+	default:
+		httpapi.Problem(w, r, httpapi.DependencyUnavailable,
+			"The identity kernel did not confirm the change; retry the same action")
+	}
 }
 
 // KeyAction handles POST /v1/registrations/{registration_id}/keys/{key_id}:revoke. The action is
