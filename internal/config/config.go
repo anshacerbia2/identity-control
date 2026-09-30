@@ -61,6 +61,12 @@ type Config struct {
 	// admin events for 7 days, and a change must still carry its event when a sweep reads it.
 	RegistrationReconcileInterval time.Duration
 
+	// ClientKeyLifetime is how long a registered client key is valid before it is removed, and
+	// ClientKeyRotationOverlap how long the previous key keeps authenticating after the next is
+	// registered (TDD-identity-control-003 §Configuration). The overlap is shorter than the lifetime.
+	ClientKeyLifetime        time.Duration
+	ClientKeyRotationOverlap time.Duration
+
 	// TokenIssuer and TokenAudience are the verifier's contract. The issuer is compared for
 	// exact equality, so a value with a stray trailing slash rejects every token rather than
 	// accepting a wrong one.
@@ -143,6 +149,16 @@ func Load() (Config, error) {
 	cfg.RegistrationReconcileInterval = durationOr("IDENTITY_REGISTRATION_RECONCILE_INTERVAL", time.Hour, &problems)
 	if cfg.RegistrationReconcileInterval >= 7*24*time.Hour {
 		problems = append(problems, errors.New("IDENTITY_REGISTRATION_RECONCILE_INTERVAL must be shorter than the kernel's 7-day admin-event retention, or a change loses its attribution before a sweep reads it"))
+	}
+
+	// Go durations have no day unit, so the 90-day and 7-day defaults are written in hours.
+	cfg.ClientKeyLifetime = durationOr("IDENTITY_CLIENT_KEY_LIFETIME", 2160*time.Hour, &problems)
+	cfg.ClientKeyRotationOverlap = durationOr("IDENTITY_CLIENT_KEY_ROTATION_OVERLAP", 168*time.Hour, &problems)
+	switch {
+	case cfg.ClientKeyLifetime <= 0 || cfg.ClientKeyRotationOverlap <= 0:
+		problems = append(problems, errors.New("IDENTITY_CLIENT_KEY_LIFETIME and IDENTITY_CLIENT_KEY_ROTATION_OVERLAP must be positive"))
+	case cfg.ClientKeyRotationOverlap >= cfg.ClientKeyLifetime:
+		problems = append(problems, errors.New("IDENTITY_CLIENT_KEY_ROTATION_OVERLAP must be shorter than IDENTITY_CLIENT_KEY_LIFETIME, or a key would retire after it expired"))
 	}
 
 	cfg.DBMaxConns = int32(intOr("DB_MAX_CONNS", 20, &problems))

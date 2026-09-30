@@ -142,6 +142,8 @@ func run() error {
 		Realm:                keycloak.Realm(cfg.KeycloakRealm),
 		CallTimeout:          cfg.ProvisionTimeout,
 		PendingRecoveryAfter: cfg.PendingRecoveryAfter,
+		KeyLifetime:          cfg.ClientKeyLifetime,
+		RotationOverlap:      cfg.ClientKeyRotationOverlap,
 	}, logger)
 	if err != nil {
 		return fmt.Errorf("registration service: %w", err)
@@ -294,6 +296,13 @@ func scheduleSweeps(ctx context.Context, provisioner *provisioning.Provisioner, 
 			logger.Error("pending registration recovery failed", slog.String("error", err.Error()))
 		} else if resolved > 0 {
 			logger.Info("pending registrations recovered", slog.Int("resolved", resolved))
+		}
+		// Client keys whose rotation overlap or lifetime ended are removed before the sweep reads the
+		// clients, so a retiring key is gone within one interval of its overlap ending.
+		if removed, err := registrar.ExpireKeys(ctx); err != nil {
+			logger.Error("client key expiry failed", slog.String("error", err.Error()))
+		} else if removed > 0 {
+			logger.Info("expired client keys removed", slog.Int("keys", removed))
 		}
 		run, err := reconciler.Sweep(ctx)
 		switch {

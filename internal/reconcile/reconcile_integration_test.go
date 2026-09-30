@@ -69,6 +69,8 @@ func newHarness(t *testing.T) *harness {
 			   (SELECT registration_id FROM identity.client_registration WHERE realm = $1)`,
 			`DELETE FROM identity.drift_exception WHERE registration_id IN
 			   (SELECT registration_id FROM identity.client_registration WHERE realm = $1)`,
+			`DELETE FROM identity.client_key WHERE registration_id IN
+			   (SELECT registration_id FROM identity.client_registration WHERE realm = $1)`,
 			`DELETE FROM identity.reconcile_run WHERE $1 <> ''`,
 			`DELETE FROM identity.client_registration WHERE realm = $1`,
 		} {

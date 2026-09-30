@@ -2,6 +2,7 @@ package keycloakfake
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"sync"
 	"time"
@@ -145,6 +146,17 @@ func (r *Registry) PatchClient(ctx context.Context, _ keycloak.Realm, client key
 	if patch.AccessTokenLifespan != nil {
 		stored.AccessTokenLifespan = *patch.AccessTokenLifespan
 	}
+	if patch.Keys != nil {
+		spec := r.specs[client]
+		if spec.Public {
+			return errors.New("keycloakfake: a public client holds no key")
+		}
+		if len(*patch.Keys) > keycloak.MaxClientKeys {
+			return errors.New("keycloakfake: too many keys")
+		}
+		spec.Keys = append([]keycloak.JWK{}, *patch.Keys...)
+		r.specs[client] = spec
+	}
 	r.clients[client] = stored
 	r.Patches++
 	r.events = append(r.events, keycloak.AdminEvent{Time: r.now(), OperationType: "UPDATE",
@@ -178,6 +190,14 @@ func (r *Registry) ServiceAccountUserID(context.Context) (string, error) {
 func copyClient(client keycloak.Client) keycloak.Client {
 	client.RedirectURIs = append([]string(nil), client.RedirectURIs...)
 	return client
+}
+
+// Keys returns the public keys the client holds now: what CreateClient was given, as later patches
+// left it.
+func (r *Registry) Keys(client keycloak.ClientUUID) []keycloak.JWK {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]keycloak.JWK(nil), r.specs[client].Keys...)
 }
 
 // Spec returns what CreateClient was given for a client, and its default scopes.

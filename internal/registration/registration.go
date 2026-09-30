@@ -5,11 +5,11 @@
 // call, so a crash between the call and the commit leaves a row recovery can resolve, not a client
 // nobody owns. The pending row is then activated with the kernel's identifier.
 //
-// Two profiles are built: public, a browser or native client holding no secret, and resource, a
-// protected resource that is only an audience. Confidential and workload profiles authenticate
-// with a registered public key (private_key_jwt, ADR-IAM-001 §5.12). Registering, rotating and
-// revoking those keys (TDD-identity-control-003 §Client Key Rotation) is not built, so they are
-// refused rather than created with a credential nobody tracks.
+// Four profiles are built: public, a browser or native client holding no secret; confidential, a
+// browser-facing backend; workload, a service acting as itself; and resource, a protected resource
+// that is only an audience. Confidential and workload clients authenticate with a registered public
+// key (private_key_jwt, ADR-IAM-001 §5.12): the client keeps its private key, and this service
+// records and registers the public half only (keys.go).
 package registration
 
 import (
@@ -53,10 +53,6 @@ var (
 	// ErrInvalid is a request a validation rule refuses. Its message names the rule.
 	ErrInvalid = errors.New("registration: invalid request")
 
-	// ErrProfileNotBuilt is a confidential or workload registration, which needs client key
-	// registration.
-	ErrProfileNotBuilt = errors.New("registration: confidential and workload clients need client key registration, which is not built")
-
 	// ErrScopeUndeclared is an audience class whose managed scope the realm does not declare.
 	ErrScopeUndeclared = errors.New("registration: the realm declares no managed scope for this audience class")
 
@@ -90,10 +86,14 @@ type Request struct {
 	LifetimeClass  string   `json:"lifetime_class"`
 	Audience       []string `json:"audience"`
 	RedirectURIs   []string `json:"redirect_uris"`
+
+	// PublicKey is a confidential or workload client's first public key, as a JWK. The client
+	// generated the pair and keeps the private half.
+	PublicKey json.RawMessage `json:"public_key,omitempty"`
 }
 
-// Registration is desired state as the API reports it. It carries no secret: the two profiles
-// built hold none.
+// Registration is desired state as the API reports it. It carries no secret, because none exists:
+// a confidential or workload client's keys are listed on their own route, and they are public.
 type Registration struct {
 	ID                   id.UUID   `json:"registration_id"`
 	Realm                string    `json:"realm"`
@@ -123,7 +123,21 @@ type Config struct {
 	// PendingRecoveryAfter is the age at which a pending registration enters recovery. It must
 	// exceed CallTimeout, or recovery searches for a client the original request is still creating.
 	PendingRecoveryAfter time.Duration
+
+	// KeyLifetime is how long a registered client key is valid before it is removed
+	// (IDENTITY_CLIENT_KEY_LIFETIME).
+	KeyLifetime time.Duration
+
+	// RotationOverlap is how long the previous key keeps authenticating after the next is
+	// registered (IDENTITY_CLIENT_KEY_ROTATION_OVERLAP). It is shorter than KeyLifetime.
+	RotationOverlap time.Duration
 }
+
+// The defaults TDD-identity-control-003 §Configuration names.
+const (
+	DefaultKeyLifetime     = 90 * 24 * time.Hour
+	DefaultRotationOverlap = 7 * 24 * time.Hour
+)
 
 // Service registers clients.
 type Service struct {
@@ -132,6 +146,7 @@ type Service struct {
 	cfg    Config
 	logger *slog.Logger
 	newID  func() (id.UUID, error)
+	now    func() time.Time
 }
 
 // New constructs the service.
@@ -156,7 +171,18 @@ func New(tx Transactor, kernel keycloak.ClientRegistry, cfg Config, logger *slog
 		return nil, fmt.Errorf("registration: PendingRecoveryAfter (%s) must exceed CallTimeout (%s)",
 			cfg.PendingRecoveryAfter, cfg.CallTimeout)
 	}
-	return &Service{tx: tx, kernel: kernel, cfg: cfg, logger: logger, newID: id.NewV7}, nil
+	if cfg.KeyLifetime <= 0 {
+		cfg.KeyLifetime = DefaultKeyLifetime
+	}
+	if cfg.RotationOverlap <= 0 {
+		cfg.RotationOverlap = DefaultRotationOverlap
+	}
+	if cfg.RotationOverlap >= cfg.KeyLifetime {
+		return nil, fmt.Errorf("registration: RotationOverlap (%s) must be shorter than KeyLifetime (%s)",
+			cfg.RotationOverlap, cfg.KeyLifetime)
+	}
+	return &Service{tx: tx, kernel: kernel, cfg: cfg, logger: logger, newID: id.NewV7,
+		now: func() time.Time { return time.Now().UTC() }}, nil
 }
 
 // LifespanSQL is the derived access token lifespan, in seconds, of a client in realm with the given
@@ -197,14 +223,23 @@ func validate(req Request) error {
 		return invalid("an Application reference is required: every client traces to an Application (PAD-PLT-001 §7.3)")
 	}
 	switch req.Profile {
-	case ProfilePublic, ProfileResource:
-	case ProfileConfidential, ProfileWorkload:
-		return ErrProfileNotBuilt
+	case ProfilePublic, ProfileResource, ProfileConfidential, ProfileWorkload:
 	default:
-		return invalid("profile must be public or resource")
+		return invalid("profile must be public, confidential, workload or resource")
 	}
 	if _, ok := managedScopes[req.AudienceClass]; !ok {
 		return invalid("audience_class must be internal, privileged, workload or external")
+	}
+	switch {
+	case req.Profile == ProfileWorkload && req.AudienceClass != "workload":
+		return invalid("a workload registers the workload audience class")
+	case !keyed(req.Profile) && submitted(req.PublicKey):
+		return invalid("a public client or a resource holds no key")
+	}
+	for _, resource := range req.Audience {
+		if !clientKeyPattern.MatchString(resource) {
+			return invalid("an audience entry is not a client_key")
+		}
 	}
 
 	if req.Profile == ProfileResource {
@@ -220,17 +255,14 @@ func validate(req Request) error {
 	switch {
 	case req.LifetimeClass != "":
 		return invalid("a client's lifetime is derived from its audience, not declared")
-	case len(req.RedirectURIs) == 0:
-		return invalid("a public client needs at least one redirect URI")
+	case req.Profile == ProfileWorkload && len(req.RedirectURIs) > 0:
+		return invalid("a workload logs nobody in, so it has no redirect URIs")
+	case req.Profile != ProfileWorkload && len(req.RedirectURIs) == 0:
+		return invalid("a public or confidential client needs at least one redirect URI")
 	}
 	for _, uri := range req.RedirectURIs {
 		if err := validateRedirect(uri); err != nil {
 			return invalid("%v", err)
-		}
-	}
-	for _, resource := range req.Audience {
-		if !clientKeyPattern.MatchString(resource) {
-			return invalid("an audience entry is not a client_key")
 		}
 	}
 	return nil
@@ -290,6 +322,14 @@ func (s *Service) Register(ctx context.Context, req Request) (Registration, erro
 	if err := validate(req); err != nil {
 		return Registration{}, err
 	}
+	var key *PublicKey
+	if keyed(req.Profile) {
+		parsed, err := parsePublicKey(req.PublicKey)
+		if err != nil {
+			return Registration{}, err
+		}
+		key = &parsed
+	}
 
 	// Kernel reads before anything is written: a class whose scope the realm lacks, and a
 	// client_key a Keycloak client already holds, are refused with nothing recorded.
@@ -320,7 +360,7 @@ func (s *Service) Register(ctx context.Context, req Request) (Registration, erro
 			}
 			return json.Unmarshal(claim.Body, &registration)
 		}
-		registration, err = s.insertPending(ctx, tx, req)
+		registration, err = s.insertPending(ctx, tx, req, key)
 		return err
 	})
 	if err != nil || replay {
@@ -335,8 +375,12 @@ func (s *Service) Register(ctx context.Context, req Request) (Registration, erro
 	}
 	var client keycloak.ClientUUID
 	if err == nil {
+		var keys []keycloak.JWK
+		if key != nil {
+			keys = []keycloak.JWK{key.JWK}
+		}
 		client, err = call(ctx, s.cfg.CallTimeout, func(ctx context.Context) (keycloak.ClientUUID, error) {
-			return s.kernel.CreateClient(ctx, s.cfg.Realm, spec(registration))
+			return s.kernel.CreateClient(ctx, s.cfg.Realm, spec(registration, keys))
 		})
 	}
 	if errors.Is(err, keycloak.ErrConflict) {
@@ -345,6 +389,9 @@ func (s *Service) Register(ctx context.Context, req Request) (Registration, erro
 		// the same thing instead of waiting on a request that will never finish.
 		if retireErr := s.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
 			if _, err := tx.Exec(ctx, retirePendingStatement, registration.ID.String()); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, revokeRefusedKeysStatement, registration.ID.String(), s.now()); err != nil {
 				return err
 			}
 			return idempotency.Complete(ctx, tx, req.CallerScope, req.IdempotencyKey, requestDigest, 409,
@@ -403,13 +450,42 @@ func (s *Service) finish(ctx context.Context, registration Registration, client 
 	})
 }
 
-// spec is the Keycloak client desired state describes.
-func spec(r Registration) keycloak.ClientSpec {
+// spec is the Keycloak client desired state describes, holding the given keys when its profile
+// authenticates with one.
+func spec(r Registration, keys []keycloak.JWK) keycloak.ClientSpec {
 	if r.Profile == ProfileResource {
 		return keycloak.ClientSpec{ClientID: r.ClientKey, Resource: true}
 	}
-	return keycloak.ClientSpec{ClientID: r.ClientKey, Public: true, RedirectURIs: r.RedirectURIs,
+	out := keycloak.ClientSpec{ClientID: r.ClientKey, RedirectURIs: r.RedirectURIs,
 		AccessTokenLifespan: r.AccessTokenLifespan, Audience: r.Audience}
+	switch r.Profile {
+	case ProfilePublic:
+		out.Public = true
+	case ProfileConfidential:
+		out.Confidential, out.Keys = true, keys
+	case ProfileWorkload:
+		out.Workload, out.Keys = true, keys
+	}
+	return out
+}
+
+// desired reads a registration and the keys its client holds, for building that client again.
+func (s *Service) desired(ctx context.Context, registrationID id.UUID) (Registration, []keycloak.JWK, error) {
+	var (
+		registration Registration
+		keys         []keycloak.JWK
+	)
+	err := s.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		var err error
+		if registration, err = s.read(ctx, tx, registrationID); err != nil {
+			return err
+		}
+		if keyed(registration.Profile) {
+			keys, err = liveKeys(ctx, tx, registrationID)
+		}
+		return err
+	})
+	return registration, keys, err
 }
 
 // RecoverPending resolves registrations whose creation was interrupted: a client that exists
@@ -480,8 +556,12 @@ func (s *Service) recoverOne(ctx context.Context, registration Registration) err
 	var client keycloak.ClientUUID
 	switch len(found) {
 	case 0:
+		_, keys, err := s.desired(ctx, registration.ID)
+		if err != nil {
+			return err
+		}
 		if client, err = call(ctx, s.cfg.CallTimeout, func(ctx context.Context) (keycloak.ClientUUID, error) {
-			return s.kernel.CreateClient(ctx, s.cfg.Realm, spec(registration))
+			return s.kernel.CreateClient(ctx, s.cfg.Realm, spec(registration, keys))
 		}); err != nil {
 			return err
 		}
@@ -495,13 +575,12 @@ func (s *Service) recoverOne(ctx context.Context, registration Registration) err
 
 // Recreate builds an active registration's client again from desired state, for a client deleted
 // in the console. It records the new client's identifier and returns it.
+//
+// A confidential or workload client is recreated holding its active and retiring keys, so the key
+// pairs that authenticated it before the deletion authenticate it again, and no other.
 func (s *Service) Recreate(ctx context.Context, registrationID id.UUID) (keycloak.ClientUUID, error) {
-	var registration Registration
-	if err := s.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
-		var err error
-		registration, err = s.read(ctx, tx, registrationID)
-		return err
-	}); err != nil {
+	registration, keys, err := s.desired(ctx, registrationID)
+	if err != nil {
 		return "", err
 	}
 	if registration.State != "active" {
@@ -514,7 +593,7 @@ func (s *Service) Recreate(ctx context.Context, registrationID id.UUID) (keycloa
 		return "", err
 	}
 	client, err := call(ctx, s.cfg.CallTimeout, func(ctx context.Context) (keycloak.ClientUUID, error) {
-		return s.kernel.CreateClient(ctx, s.cfg.Realm, spec(registration))
+		return s.kernel.CreateClient(ctx, s.cfg.Realm, spec(registration, keys))
 	})
 	if err != nil {
 		return "", fmt.Errorf("registration: recreate %s: %w", registration.ClientKey, err)

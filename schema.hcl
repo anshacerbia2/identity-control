@@ -819,3 +819,135 @@ table "drift_exception" {
     expr = "expires_at > granted_at AND expires_at <= granted_at + interval '24 hours'"
   }
 }
+
+// A confidential or workload client's public keys (ADR-IAM-001 §5.12). The client generated the
+// pair and keeps the private half; this table holds the public half only, and refuses anything
+// else. The kernel client's JWKS is rebuilt from the active and retiring rows, so this table is
+// desired state for the keys. A key is never rewritten or deleted: a new key is a new row, and a
+// revoked one stays the record of which key pair stopped authenticating the client.
+table "client_key" {
+  schema  = schema.identity
+  comment = "A registered public key of a confidential or workload client. TDD-identity-control-003."
+
+  column "key_id" {
+    null = false
+    type = uuid
+  }
+
+  column "registration_id" {
+    null = false
+    type = uuid
+  }
+
+  column "kid" {
+    null    = false
+    type    = text
+    comment = "The key identifier the client's assertions name. Defaults to the thumbprint."
+  }
+
+  column "thumbprint" {
+    null    = false
+    type    = text
+    comment = "RFC 7638 SHA-256 thumbprint. Unique across every client, revoked keys included."
+  }
+
+  column "public_jwk" {
+    null = false
+    type = jsonb
+  }
+
+  column "state" {
+    null = false
+    type = text
+  }
+
+  column "registered_by" {
+    null = false
+    type = uuid
+  }
+
+  column "registered_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+
+  column "expires_at" {
+    null = false
+    type = timestamptz
+  }
+
+  column "retiring_at" {
+    null    = true
+    type    = timestamptz
+    comment = "When a retiring key's rotation overlap ends and it is removed."
+  }
+
+  column "revoked_at" {
+    null = true
+    type = timestamptz
+  }
+
+  column "revoked_by" {
+    null    = true
+    type    = uuid
+    comment = "The Principal who revoked the key. Null for a removal the schedule made."
+  }
+
+  column "revocation_reason" {
+    null = true
+    type = text
+  }
+
+  primary_key {
+    columns = [column.key_id]
+  }
+
+  foreign_key "client_key_registration_id_fkey" {
+    columns     = [column.registration_id]
+    ref_columns = [table.client_registration.column.registration_id]
+    on_update   = NO_ACTION
+    on_delete   = NO_ACTION
+  }
+
+  index "client_key_kid" {
+    unique  = true
+    columns = [column.registration_id, column.kid]
+  }
+
+  // One key pair authenticates one client only, so a leaked key compromises one client. A revoked
+  // key keeps its thumbprint taken: a key revoked because it leaked can never come back.
+  index "client_key_thumbprint" {
+    unique  = true
+    columns = [column.thumbprint]
+  }
+
+  // At most one active and one retiring key: the overlap the pinned kernel was proven to accept.
+  index "client_key_one_active" {
+    unique  = true
+    columns = [column.registration_id]
+    where   = "state = 'active'"
+  }
+
+  index "client_key_one_retiring" {
+    unique  = true
+    columns = [column.registration_id]
+    where   = "state = 'retiring'"
+  }
+
+  check "client_key_state_check" {
+    expr = "state IN ('active', 'retiring', 'revoked')"
+  }
+
+  // The database refuses private material even if validation missed it: RSA's private exponent and
+  // CRT values, the other-primes list, and a symmetric key's value.
+  check "client_key_public_only" {
+    expr = "NOT (public_jwk ?| ARRAY['d', 'p', 'q', 'dp', 'dq', 'qi', 'oth', 'k'])"
+  }
+
+  // A revoked key says when; a retiring key says when its overlap ends; neither date appears on a
+  // key in another state.
+  check "client_key_dates_check" {
+    expr = "((state = 'revoked') = (revoked_at IS NOT NULL)) AND ((state = 'retiring') = (retiring_at IS NOT NULL) OR state = 'revoked') AND expires_at > registered_at"
+  }
+}
