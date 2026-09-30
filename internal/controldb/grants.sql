@@ -34,6 +34,7 @@ BEGIN
               ('identity.reconcile_run'),
               ('identity.registration_finding'),
               ('identity.drift_exception'),
+              ('identity.client_key'),
               ('identity.principal_relink'),
               ('identity.principal_finding'),
               ('platform.outbox'),
@@ -96,6 +97,18 @@ REVOKE DELETE, TRUNCATE ON identity.client_registration FROM identity_runtime;
 REVOKE DELETE, TRUNCATE ON identity.reconcile_run FROM identity_runtime;
 REVOKE DELETE, TRUNCATE ON identity.registration_finding FROM identity_runtime;
 REVOKE UPDATE, DELETE, TRUNCATE ON identity.drift_exception FROM identity_runtime;
+
+-- A client key is evidence too: a revoked key is the record of which key pair stopped
+-- authenticating a client, and when. So nothing deletes one. A key is also never rewritten. The key
+-- material, its kid, its owner and its dates are fixed at registration, and the runtime may change
+-- only what a rotation, a revocation or an expiry changes. A runtime that could rewrite public_jwk
+-- could swap a client's registered key for one whose private half it holds, and the next rebuild of
+-- the kernel's JWKS would install it.
+--
+-- The table-level UPDATE is revoked before the column-level one is granted, because revoking a table
+-- privilege also revokes it on every column.
+REVOKE UPDATE, DELETE, TRUNCATE ON identity.client_key FROM identity_runtime;
+GRANT UPDATE (state, retiring_at, revoked_at, revoked_by, revocation_reason) ON identity.client_key TO identity_runtime;
 
 -- A relink record says who moved a Principal to a new Keycloak user and why, so it is insert-only.
 -- A dangling-mapping finding is evidence that a user disappeared, kept after it is resolved.

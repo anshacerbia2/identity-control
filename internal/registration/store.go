@@ -25,7 +25,10 @@ const insertPendingStatement = `INSERT INTO identity.client_registration
      audience_class, lifetime_class, audience, redirect_uris, state)
 VALUES ($1, $2, $3, $4, 'manual', $5, $6, $7, $8, $9, $10, 'pending')`
 
-func (s *Service) insertPending(ctx context.Context, tx db.Tx, req Request) (Registration, error) {
+// insertPending records the registration pending and, for a confidential or workload client, its
+// first key as the active key: the key is desired state from the start, so recovery creates the
+// client holding it.
+func (s *Service) insertPending(ctx context.Context, tx db.Tx, req Request, key *PublicKey) (Registration, error) {
 	var inUse int
 	if err := tx.QueryRow(ctx, keyInUseStatement, string(s.cfg.Realm), req.ClientKey).Scan(&inUse); err != nil {
 		return Registration{}, fmt.Errorf("registration: check client_key: %w", err)
@@ -41,6 +44,15 @@ func (s *Service) insertPending(ctx context.Context, tx db.Tx, req Request) (Reg
 	if unregistered > 0 {
 		return Registration{}, fmt.Errorf("%w: every audience entry must be an active resource registration", ErrInvalid)
 	}
+	if key != nil {
+		owner, _, err := thumbprintOwner(ctx, tx, key.Thumbprint)
+		if err != nil {
+			return Registration{}, err
+		}
+		if !owner.IsNil() {
+			return Registration{}, ErrKeyInUse
+		}
+	}
 
 	registrationID, err := s.newID()
 	if err != nil {
@@ -55,6 +67,11 @@ func (s *Service) insertPending(ctx context.Context, tx db.Tx, req Request) (Reg
 		req.Profile, req.ApplicationRef, req.RegisteredBy.String(), req.AudienceClass, lifetime, audience,
 		redirects); err != nil {
 		return Registration{}, fmt.Errorf("registration: insert pending registration: %w", err)
+	}
+	if key != nil {
+		if err := s.insertKey(ctx, tx, registrationID, *key, req.RegisteredBy, s.now()); err != nil {
+			return Registration{}, err
+		}
 	}
 	return s.read(ctx, tx, registrationID)
 }
@@ -183,6 +200,13 @@ WHERE registration_id = $1 AND state = 'pending'`
 const retirePendingStatement = `UPDATE identity.client_registration
 SET state = 'retired', retired_at = now(), version = version + 1
 WHERE registration_id = $1 AND state = 'pending'`
+
+// revokeRefusedKeysStatement closes the keys of a registration refused before it became active.
+// They never reached the kernel, and are kept as the record of what was submitted; the thumbprint
+// stays taken, as every registered key's does, so the refused client registers with a new key pair.
+const revokeRefusedKeysStatement = `UPDATE identity.client_key
+SET state = 'revoked', revoked_at = $2, revocation_reason = 'the registration was refused before it became active'
+WHERE registration_id = $1 AND state <> 'revoked'`
 
 const pendingStatement = `SELECT registration_id::text FROM identity.client_registration
 WHERE realm = $1 AND state = 'pending' AND created_at < $2

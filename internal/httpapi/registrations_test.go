@@ -305,6 +305,37 @@ type stubRegistrar struct {
 	err     error
 	listed  *registration.ListQuery
 	page    registration.Page
+
+	// The key surface's record of what it was asked.
+	addedKey   json.RawMessage
+	addedBy    id.UUID
+	notAdded   bool
+	revokedKey id.UUID
+	revokedBy  id.UUID
+	reason     string
+}
+
+func (s *stubRegistrar) Keys(_ context.Context, registrationID id.UUID) ([]registration.Key, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return []registration.Key{{Registration: registrationID, KID: "k1", State: registration.KeyActive}}, nil
+}
+
+func (s *stubRegistrar) AddKey(_ context.Context, registrationID id.UUID, publicKey json.RawMessage, by id.UUID) ([]registration.Key, bool, error) {
+	s.addedKey, s.addedBy = publicKey, by
+	if s.err != nil {
+		return nil, false, s.err
+	}
+	return []registration.Key{{Registration: registrationID, KID: "k2", State: registration.KeyActive}}, !s.notAdded, nil
+}
+
+func (s *stubRegistrar) RevokeKey(_ context.Context, registrationID, keyID, by id.UUID, reason string) ([]registration.Key, error) {
+	s.revokedKey, s.revokedBy, s.reason = keyID, by, reason
+	if s.err != nil {
+		return nil, s.err
+	}
+	return []registration.Key{{Registration: registrationID, ID: keyID, State: registration.KeyRevoked}}, nil
 }
 
 func (s *stubRegistrar) List(_ context.Context, query registration.ListQuery) (registration.Page, error) {
@@ -445,7 +476,8 @@ func TestARegistrationMapsTheRegistrarsErrors(t *testing.T) {
 		want int
 	}{
 		"invalid":           {registration.ErrInvalid, http.StatusBadRequest},
-		"profile not built": {registration.ErrProfileNotBuilt, http.StatusBadRequest},
+		"a private key":     {registration.ErrPrivateKey, http.StatusBadRequest},
+		"public key reused": {registration.ErrKeyInUse, http.StatusConflict},
 		"scope undeclared":  {registration.ErrScopeUndeclared, http.StatusBadRequest},
 		"key taken":         {registration.ErrKeyTaken, http.StatusConflict},
 		"key reused":        {idempotency.ErrConflict, http.StatusConflict},
@@ -515,5 +547,145 @@ func TestARegistrationsFindingsAreReported(t *testing.T) {
 		if w := serve(registrationsHandler(t, c.stub), r); w.Code != c.want {
 			t.Errorf("%s answered %d, want %d", name, w.Code, c.want)
 		}
+	}
+}
+
+const keyBody = `{"public_key":{"kty":"RSA","kid":"k2","n":"AQAB","e":"AQAB"}}`
+
+// A registration carries the confidential client's first public key through to the registrar.
+func TestARegistrationCarriesItsPublicKey(t *testing.T) {
+	registrar := &stubRegistrar{created: registration.Registration{ClientKey: "bff", State: "active"}}
+	body := `{"client_key":"bff","profile":"confidential","audience_class":"internal","application_ref":"app",
+	  "redirect_uris":["https://app.example.com/cb"],"public_key":{"kty":"RSA","n":"AQAB","e":"AQAB"}}`
+	r, _ := asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/registrations", strings.NewReader(body)))
+	r.Header.Set(httpapi.IdempotencyHeader, "register-bff")
+	if w := serve(registrarHandler(t, registrar), r); w.Code != http.StatusCreated {
+		t.Fatalf("status %d: %s", w.Code, w.Body)
+	}
+	if got := registrar.req; got == nil || !strings.Contains(string(got.PublicKey), `"kty":"RSA"`) {
+		t.Errorf("request = %+v", got)
+	}
+}
+
+// The next key is added under the caller. A key that was added answers 201, and one that already
+// was the client's active key answers 200: a retry after a lost response.
+func TestTheNextKeyIsAddedUnderTheCaller(t *testing.T) {
+	registrationID := mustUUID(t)
+	path := "/v1/registrations/" + registrationID.String() + "/keys"
+	for _, c := range []struct {
+		notAdded bool
+		want     int
+	}{{false, http.StatusCreated}, {true, http.StatusOK}} {
+		registrar := &stubRegistrar{notAdded: c.notAdded}
+		r, principal := asPrincipal(t, httptest.NewRequest(http.MethodPost, path, strings.NewReader(keyBody)))
+		w := serve(registrarHandler(t, registrar), r)
+		if w.Code != c.want || !strings.Contains(w.Body.String(), `"kid":"k2"`) {
+			t.Errorf("status %d, want %d: %s", w.Code, c.want, w.Body)
+		}
+		if registrar.addedBy != principal || !strings.Contains(string(registrar.addedKey), `"kid":"k2"`) {
+			t.Errorf("added %s by %s", registrar.addedKey, registrar.addedBy)
+		}
+	}
+}
+
+func TestTheKeysAreListed(t *testing.T) {
+	registrationID := mustUUID(t)
+	path := "/v1/registrations/" + registrationID.String() + "/keys"
+	r, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, path, nil))
+	if w := serve(registrarHandler(t, &stubRegistrar{}), r); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"kid":"k1"`) {
+		t.Errorf("status %d: %s", w.Code, w.Body)
+	}
+	r, _ = asPrincipal(t, httptest.NewRequest(http.MethodGet, path, nil))
+	if w := serve(registrarHandler(t, &stubRegistrar{err: registration.ErrNotFound}), r); w.Code != http.StatusNotFound {
+		t.Errorf("an unknown registration's keys answered %d", w.Code)
+	}
+}
+
+// Revocation names the key and carries the caller's reason, which it cannot do without.
+func TestAKeyIsRevokedWithAReason(t *testing.T) {
+	registrationID, keyID := mustUUID(t), mustUUID(t)
+	path := "/v1/registrations/" + registrationID.String() + "/keys/" + keyID.String() + ":revoke"
+	registrar := &stubRegistrar{}
+	r, principal := asPrincipal(t, httptest.NewRequest(http.MethodPost, path, nil))
+	r.Header.Set(httpapi.AdministrativeReasonHeader, "the laptop holding it was lost")
+	if w := serve(registrarHandler(t, registrar), r); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"state":"revoked"`) {
+		t.Fatalf("status %d: %s", w.Code, w.Body)
+	}
+	if registrar.revokedKey != keyID || registrar.revokedBy != principal || registrar.reason != "the laptop holding it was lost" {
+		t.Errorf("revoked %s by %s for %q", registrar.revokedKey, registrar.revokedBy, registrar.reason)
+	}
+
+	for name, c := range map[string]struct {
+		path   string
+		reason string
+		want   int
+	}{
+		"no reason":          {path, "", http.StatusBadRequest},
+		"an unknown action":  {"/v1/registrations/" + registrationID.String() + "/keys/" + keyID.String() + ":rotate", "r", http.StatusNotFound},
+		"no action":          {"/v1/registrations/" + registrationID.String() + "/keys/" + keyID.String(), "r", http.StatusNotFound},
+		"a malformed key id": {"/v1/registrations/" + registrationID.String() + "/keys/nope:revoke", "r", http.StatusBadRequest},
+		"a malformed registration": {"/v1/registrations/nope/keys/" + keyID.String() + ":revoke", "r",
+			http.StatusBadRequest},
+	} {
+		registrar := &stubRegistrar{}
+		r, _ := asPrincipal(t, httptest.NewRequest(http.MethodPost, c.path, nil))
+		if c.reason != "" {
+			r.Header.Set(httpapi.AdministrativeReasonHeader, c.reason)
+		}
+		if w := serve(registrarHandler(t, registrar), r); w.Code != c.want || !registrar.revokedKey.IsNil() {
+			t.Errorf("%s answered %d, want %d", name, w.Code, c.want)
+		}
+	}
+}
+
+func TestTheKeyRoutesMapTheRegistrarsErrors(t *testing.T) {
+	registrationID, keyID := mustUUID(t), mustUUID(t)
+	add := "/v1/registrations/" + registrationID.String() + "/keys"
+	revoke := add + "/" + keyID.String() + ":revoke"
+	for name, c := range map[string]struct {
+		err  error
+		want int
+	}{
+		"a private key":         {registration.ErrPrivateKey, http.StatusBadRequest},
+		"an invalid key":        {registration.ErrInvalid, http.StatusBadRequest},
+		"a key in use":          {registration.ErrKeyInUse, http.StatusConflict},
+		"a rotation underway":   {registration.ErrRotationInProgress, http.StatusConflict},
+		"a keyless profile":     {registration.ErrNotKeyed, http.StatusConflict},
+		"an inactive client":    {registration.ErrNotActive, http.StatusConflict},
+		"a key already revoked": {registration.ErrKeyNotLive, http.StatusConflict},
+		"an unknown client":     {registration.ErrNotFound, http.StatusNotFound},
+		"kernel down":           {keycloak.ErrUnavailable, http.StatusServiceUnavailable},
+	} {
+		r, _ := asPrincipal(t, httptest.NewRequest(http.MethodPost, add, strings.NewReader(keyBody)))
+		if w := serve(registrarHandler(t, &stubRegistrar{err: c.err}), r); w.Code != c.want {
+			t.Errorf("adding: %s answered %d, want %d", name, w.Code, c.want)
+		}
+		r, _ = asPrincipal(t, httptest.NewRequest(http.MethodPost, revoke, nil))
+		r.Header.Set(httpapi.AdministrativeReasonHeader, "leaked")
+		if w := serve(registrarHandler(t, &stubRegistrar{err: c.err}), r); w.Code != c.want {
+			t.Errorf("revoking: %s answered %d, want %d", name, w.Code, c.want)
+		}
+	}
+	r, _ := asPrincipal(t, httptest.NewRequest(http.MethodPost, add, strings.NewReader(`{"public_key":{},"secret":"x"}`)))
+	if w := serve(registrarHandler(t, &stubRegistrar{}), r); w.Code != http.StatusBadRequest {
+		t.Errorf("a key document with an unknown field answered %d", w.Code)
+	}
+}
+
+func TestEveryKeyRouteRequiresAnAuthenticatedPrincipal(t *testing.T) {
+	registrationID, keyID := mustUUID(t), mustUUID(t)
+	registrar := &stubRegistrar{}
+	handler := registrarHandler(t, registrar)
+	for _, r := range []*http.Request{
+		httptest.NewRequest(http.MethodGet, "/v1/registrations/"+registrationID.String()+"/keys", nil),
+		httptest.NewRequest(http.MethodPost, "/v1/registrations/"+registrationID.String()+"/keys", strings.NewReader(keyBody)),
+		httptest.NewRequest(http.MethodPost, "/v1/registrations/"+registrationID.String()+"/keys/"+keyID.String()+":revoke", nil),
+	} {
+		if w := serve(handler, r); w.Code != http.StatusUnauthorized {
+			t.Errorf("%s %s answered %d without a caller, want 401", r.Method, r.URL.Path, w.Code)
+		}
+	}
+	if registrar.addedKey != nil || !registrar.revokedKey.IsNil() {
+		t.Error("an unauthenticated request reached the registrar")
 	}
 }

@@ -75,15 +75,17 @@ existing SAD document. Root artifacts never link downward into this repository.
 | `cmd/identity-migrate/` | Schema stages: roles, then the platform schema and privileges |
 | `cmd/identity-bootstrap/` | The one-time bootstrap ceremony |
 | `internal/identity/provisioning/` | Principal minting, the Keycloak creation path, and pending-state recovery |
-| `internal/keycloak/` | Typed client over the supported Admin REST API (users only, today) |
+| `internal/registration/` | Client and protected-resource registration, and client public keys: registration, rotation, revocation, expiry |
+| `internal/reconcile/` | The registration drift sweep and what an operator does with its findings |
+| `internal/keycloak/` | Typed client over the supported Admin REST API: users, and clients through a second credential |
 | `internal/httpapi/` | Routing, request decoding, and the error-to-problem mapping |
 | `internal/controldb/` | Roles, grants, and the privilege assertions |
 | `internal/config/` | Environment configuration, read once at startup |
 | `docs/designs/` | Technical Design Documents |
 
-Not built yet, and designed: client registration and its drift reconciliation (TDD-003),
-the Membership projection and session removal (TDD-002), and the principal reconciler
-(TDD-001). ROADMAP.md says what each is waiting on, and §Proof B covers the reconciler.
+Not built yet, and designed: the rest of the registration drift classes and the unmanaged-client
+branch (TDD-003), the Membership projection and session removal (TDD-002), and the rest of the
+principal reconciler (TDD-001). ROADMAP.md says what each is waiting on.
 
 The shared substrate — outbox, dispatcher, event envelope, idempotency, HTTP problem
 details, telemetry — is imported from `foundation-platform` rather than reimplemented

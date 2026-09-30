@@ -12,9 +12,9 @@
 // What this package does not do yet, and why:
 //
 //   - A client no registration describes is not disabled. The service's own clients are
-//     confidential clients, which cannot be registered until client key registration is built,
-//     so disabling unregistered clients would disable this service.
-//   - Audience scope, signing algorithm and profile are not compared yet.
+//     confidential clients that are not registered yet, so disabling unregistered clients would
+//     disable this service.
+//   - Audience scope, signing algorithm, profile and client keys are not compared yet.
 package reconcile
 
 import (

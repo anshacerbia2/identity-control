@@ -52,6 +52,8 @@ func newHarness(t *testing.T) *harness {
 			   (SELECT registration_id FROM identity.client_registration WHERE realm = $1)`,
 			`DELETE FROM identity.drift_exception WHERE registration_id IN
 			   (SELECT registration_id FROM identity.client_registration WHERE realm = $1)`,
+			`DELETE FROM identity.client_key WHERE registration_id IN
+			   (SELECT registration_id FROM identity.client_registration WHERE realm = $1)`,
 			`DELETE FROM identity.client_registration WHERE realm = $1`,
 		} {
 			if _, err := tx.Exec(ctx, statement, string(testRealm)); err != nil {
@@ -228,23 +230,25 @@ func TestTheValidationRulesRefuse(t *testing.T) {
 		change func(*Request)
 		want   error
 	}{
-		"a wildcard redirect":        {func(r *Request) { r.RedirectURIs = []string{"https://*.example.com/cb"} }, ErrInvalid},
-		"plain http off loopback":    {func(r *Request) { r.RedirectURIs = []string{"http://app.example.com/cb"} }, ErrInvalid},
-		"a fragment":                 {func(r *Request) { r.RedirectURIs = []string{"https://app.example.com/cb#x"} }, ErrInvalid},
-		"a traversal":                {func(r *Request) { r.RedirectURIs = []string{"https://app.example.com/a/../cb"} }, ErrInvalid},
-		"credentials in the URI":     {func(r *Request) { r.RedirectURIs = []string{"https://u:p@app.example.com/cb"} }, ErrInvalid},
-		"a relative redirect":        {func(r *Request) { r.RedirectURIs = []string{"/callback"} }, ErrInvalid},
-		"no redirect":                {func(r *Request) { r.RedirectURIs = nil }, ErrInvalid},
-		"no Application reference":   {func(r *Request) { r.ApplicationRef = " " }, ErrInvalid},
-		"a confidential client":      {func(r *Request) { r.Profile = ProfileConfidential }, ErrProfileNotBuilt},
-		"an unknown profile":         {func(r *Request) { r.Profile = "native" }, ErrInvalid},
-		"a declared client lifetime": {func(r *Request) { r.LifetimeClass = "L2" }, ErrInvalid},
-		"an unknown audience class":  {func(r *Request) { r.AudienceClass = "everyone" }, ErrInvalid},
-		"an undeclared scope":        {func(r *Request) { r.AudienceClass = "workload" }, ErrScopeUndeclared},
-		"a malformed client_key":     {func(r *Request) { r.ClientKey = "Web App" }, ErrInvalid},
-		"an unregistered audience":   {func(r *Request) { r.Audience = []string{"orders", "nobody"} }, ErrInvalid},
-		"no caller":                  {func(r *Request) { r.RegisteredBy = id.UUID{} }, ErrInvalid},
-		"no Idempotency-Key":         {func(r *Request) { r.IdempotencyKey = "" }, ErrInvalid},
+		"a wildcard redirect":           {func(r *Request) { r.RedirectURIs = []string{"https://*.example.com/cb"} }, ErrInvalid},
+		"plain http off loopback":       {func(r *Request) { r.RedirectURIs = []string{"http://app.example.com/cb"} }, ErrInvalid},
+		"a fragment":                    {func(r *Request) { r.RedirectURIs = []string{"https://app.example.com/cb#x"} }, ErrInvalid},
+		"a traversal":                   {func(r *Request) { r.RedirectURIs = []string{"https://app.example.com/a/../cb"} }, ErrInvalid},
+		"credentials in the URI":        {func(r *Request) { r.RedirectURIs = []string{"https://u:p@app.example.com/cb"} }, ErrInvalid},
+		"a relative redirect":           {func(r *Request) { r.RedirectURIs = []string{"/callback"} }, ErrInvalid},
+		"no redirect":                   {func(r *Request) { r.RedirectURIs = nil }, ErrInvalid},
+		"no Application reference":      {func(r *Request) { r.ApplicationRef = " " }, ErrInvalid},
+		"a confidential client, no key": {func(r *Request) { r.Profile = ProfileConfidential }, ErrInvalid},
+		"a public client with a key":    {func(r *Request) { r.PublicKey = testKey(h.t).public }, ErrInvalid},
+		"a workload in another class":   {func(r *Request) { r.Profile, r.RedirectURIs, r.PublicKey = ProfileWorkload, nil, testKey(h.t).public }, ErrInvalid},
+		"an unknown profile":            {func(r *Request) { r.Profile = "native" }, ErrInvalid},
+		"a declared client lifetime":    {func(r *Request) { r.LifetimeClass = "L2" }, ErrInvalid},
+		"an unknown audience class":     {func(r *Request) { r.AudienceClass = "everyone" }, ErrInvalid},
+		"an undeclared scope":           {func(r *Request) { r.AudienceClass = "workload" }, ErrScopeUndeclared},
+		"a malformed client_key":        {func(r *Request) { r.ClientKey = "Web App" }, ErrInvalid},
+		"an unregistered audience":      {func(r *Request) { r.Audience = []string{"orders", "nobody"} }, ErrInvalid},
+		"no caller":                     {func(r *Request) { r.RegisteredBy = id.UUID{} }, ErrInvalid},
+		"no Idempotency-Key":            {func(r *Request) { r.IdempotencyKey = "" }, ErrInvalid},
 	} {
 		req := h.request("checked", ProfilePublic)
 		c.change(&req)

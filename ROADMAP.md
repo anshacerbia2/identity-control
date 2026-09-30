@@ -16,15 +16,14 @@ Week numbers are relative to the first build week, not calendar dates.
 | `TDD-identity-control-004` | Workload and bounded agent identity | approved |
 | `TDD-identity-control-005` | Account-security and investigation API mediation | approved |
 
-Two documents inherited from the former monorepo still sit in `docs/designs` under
-their old names and old premises. They are removed once their content has landed in
-its new home:
+Three documents were inherited from the former monorepo. All three are gone from `docs/designs`,
+and their content lives here:
 
 | Inherited file | Disposition |
 | :-- | :-- |
-| `TDD-001-principal-identifier-and-creation.md` | Done. Renamed to `TDD-identity-control-001`; realm configuration became a stated dependency on `identity-kernel` rather than an instruction issued from here |
-| `TDD-002-control-plane-module-boundaries.md` | Awaiting removal. Its premise was two deployables sharing one repository, which no longer holds. Database separation, runtime roles, and credential containment survive inside the designs that own them |
-| `TDD-003-membership-projection-and-revocation.md` | Awaiting removal. Authority, versions, and the revocation transaction landed in `TDD-organization-control-002`; the projector, session removal, and reconciler landed in `TDD-identity-control-002` |
+| `TDD-001-principal-identifier-and-creation.md` | Renamed to `TDD-identity-control-001`; realm configuration became a stated dependency on `identity-kernel` rather than an instruction issued from here |
+| `TDD-002-control-plane-module-boundaries.md` | Removed. Its premise was two deployables sharing one repository, which no longer holds. Database separation, runtime roles, and credential containment survive inside the designs that own them |
+| `TDD-003-membership-projection-and-revocation.md` | Removed. Authority, versions, and the revocation transaction landed in `TDD-organization-control-002`; the projector, session removal, and reconciler landed in `TDD-identity-control-002` |
 
 ## Cross-repository dependency
 
@@ -412,13 +411,13 @@ Acceptance criteria, also from RESPONSE-4 §4:
    recreated only by an operator's reconcile (RESPONSE-27, D5). Found while building
    step 4: the drift proof needs a registered client, and nothing wrote one. Scope, and what it
    leaves (TDD-003 §Validation, §Drift Reconciliation):
-   - Only the `public` and `resource` profiles are built, which are enough for the drift proof.
-     `confidential` and `workload` are refused until client key registration exists.
+   - Only the `public` and `resource` profiles were built at first, which are enough for the
+     drift proof. `confidential` and `workload` followed with client key registration, below.
    - The kernel declares no `scnehaux-workload` or tenant-scope privileged scope. Registrations
      of those classes are refused, and TDD-003's scope names now follow the kernel's.
    - A key an unregistered Keycloak client holds is refused, never adopted.
    - Disabling unmanaged clients is still not built. This service's own clients are
-     confidential clients, created by scripts with their own keys, that cannot be registered yet.
+     confidential clients, created by scripts with their own keys, and are not registered yet.
 6. ✅ Add a Proof B end-to-end job in `deploy-dev.yml` against a real Keycloak: both scenarios, the
    exception, Keycloak down, and convergence time. `scripts/dev-proof-b.ps1` registers a public
    client, then changes it through the Admin API as the console administrator, so every change
@@ -460,11 +459,13 @@ Acceptance criteria, also from RESPONSE-4 §4:
      it.
 **Found while building, and not part of Proof B:**
 
-- **Client key registration:** confidential and workload registration by public key (`private_key_jwt`). It covers `identity.client_key`, rotation with an overlap, revocation, and the `client_keys` drift class (TDD-003 §Client Key Records, §Client Key Rotation). It is **designed and proven, not built**:
-  - Client secrets were the first design. On 2026-09-29 they were replaced, because the pinned Keycloak can overlap two secrets only through a preview feature.
+- ✅ **Client key registration:** confidential and workload registration by public key (`private_key_jwt`), TDD-003 1.11.0 §Client Key Records, §Client Key Rotation.
+  - Client secrets were the first design. On 2026-09-29 they were replaced, because the pinned Keycloak can overlap two secrets only through a preview feature. `ADR-IAM-001 §5.12` and `STD-IAM-001 §3.2` record the decision.
   - `identity-kernel`'s compat suite proved the key mechanism against 26.7.4 (identity-kernel#18): two keys overlap, a removed key is refused on the next request, and a replayed assertion is refused.
-  - `ADR-IAM-001 §5.12` and `STD-IAM-001 §3.2` record the decision.
-- **Disabling unmanaged clients:** it needs this service's own clients registered first, and it must exempt the clients Keycloak creates in every realm. `identity-experience-bff`, the BFF's confidential client, is in the same position: `identity-experience`'s `deploy/dev/create-bff-client.sh` creates it on the dev server, because client key registration is not built. It must be registered before this runs, or it is disabled with every open session. Registering it moves the BFF to `private_key_jwt`.
+  - Built: `identity.client_key`, whose rows the runtime can neither delete nor rewrite beyond a key's state and dates; `POST /v1/registrations` with `public_key` for the `confidential` and `workload` profiles; `POST|GET /v1/registrations/{id}/keys` and `.../keys/{key_id}:revoke`; and scheduled removal of a retiring key when its overlap ends and of any key when its lifetime ends, before each sweep. A private key is refused by validation and by the database, and never echoed.
+  - A `workload` registration is still refused, because the kernel declares no `scnehaux-workload` scope (below).
+  - Not built yet: the `client_keys` drift class, which blocks a JWKS or authenticator changed in the console and restores the registered keys on an operator's reconcile; a `deploy-dev` job proving registration, rotation and revocation against the real kernel; and the alert for a key expiring within 14 days with no successor (TDD-003 §Operational Notes).
+- **Disabling unmanaged clients:** it needs this service's own clients registered first, and it must exempt the clients Keycloak creates in every realm. `identity-experience-bff`, the BFF's confidential client, is in the same position: `identity-experience`'s `deploy/dev/create-bff-client.sh` created it on the dev server before client key registration existed. It already authenticates with `private_key_jwt`. It must be registered before this runs, or it is disabled with every open session. Client key registration now exists, so registering these clients, with the keys they already hold, is the next step.
 - **The rest of the Principal sweep:** its unmapped, orphan and duplicate branches (TDD-001 §Reconciliation Sweep) are not built. Only the dangling branch and pending recovery run.
 - **Kernel scopes:** `identity-kernel` must declare `scnehaux-workload` and a tenant-scope privileged scope before registrations of those classes can exist.
 

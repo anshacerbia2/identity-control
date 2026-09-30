@@ -50,6 +50,54 @@ type ClientPatch struct {
 	Enabled             *bool
 	RedirectURIs        *[]string
 	AccessTokenLifespan *int
+
+	// Keys replaces the client's JWKS, and sets the attributes that make the kernel authenticate the
+	// client by those keys alone (TDD-identity-control-003 §Client Key Rotation). An empty list is a
+	// client with no key, which authenticates as nothing: what revoking its last key means.
+	Keys *[]JWK
+}
+
+// JWK is one public key a confidential or workload client authenticates with: RSA, for signatures,
+// PS256 (STD-IAM-001 §3.2). It has no field for private material, so none can be sent.
+type JWK struct {
+	KID string `json:"kid"`
+	N   string `json:"n"`
+	E   string `json:"e"`
+}
+
+func (k JWK) representation() map[string]string {
+	return map[string]string{"kty": "RSA", "kid": k.KID, "use": "sig", "alg": "PS256", "n": k.N, "e": k.E}
+}
+
+// The client attributes that hold a client's keys, in the shape identity-kernel's
+// compat/client_keys_test.go proved against the pinned kernel: a JWKS held on the client rather
+// than fetched from a URL, so no application has to serve a key endpoint to be a client.
+const (
+	AttrJWKS            = "jwks.string"
+	attrUseJWKSString   = "use.jwks.string"
+	attrUseJWKSURL      = "use.jwks.url"
+	attrAssertionAlg    = "token.endpoint.auth.signing.alg"
+	clientJWTAuthorizer = "client-jwt"
+)
+
+// jwksString is the JWKS the kernel holds for a client.
+func jwksString(keys []JWK) string {
+	set := struct {
+		Keys []map[string]string `json:"keys"`
+	}{Keys: []map[string]string{}}
+	for _, key := range keys {
+		set.Keys = append(set.Keys, key.representation())
+	}
+	raw, _ := json.Marshal(set)
+	return string(raw)
+}
+
+// keyAttributes writes a client's keys and the attributes that make them its only credential.
+func keyAttributes(attributes map[string]any, keys []JWK) {
+	attributes[attrAssertionAlg] = "PS256"
+	attributes[attrUseJWKSURL] = "false"
+	attributes[attrUseJWKSString] = "true"
+	attributes[AttrJWKS] = jwksString(keys)
 }
 
 // AdminEvent is one admin event on a client: who changed it, and when.
@@ -107,13 +155,23 @@ type ClientRegistry interface {
 	AddDefaultClientScope(ctx context.Context, realm Realm, client ClientUUID, scopeID string) error
 }
 
-// ClientSpec is a client built from desired state (TDD-identity-control-003 §Profiles).
+// ClientSpec is a client built from desired state (TDD-identity-control-003 §Profiles). Exactly one
+// of Public, Confidential, Workload and Resource is set.
 type ClientSpec struct {
 	ClientID string
 
-	// Public is a client that holds no secret. It authenticates with PKCE S256 and is issued no
-	// refresh token.
+	// Public is a client that holds no secret and no key. It authenticates with PKCE S256 and is
+	// issued no refresh token.
 	Public bool
+
+	// Confidential is a browser-facing backend. It logs users in with the authorization code flow
+	// and PKCE, and authenticates itself with a signed assertion by one of Keys.
+	Confidential bool
+
+	// Workload is a service acting as itself. It authenticates with a signed assertion by one of
+	// Keys on every token request, through the client credentials grant, and is issued no refresh
+	// token.
+	Workload bool
 
 	// Resource is a protected resource: an audience only, through which no one logs in.
 	Resource bool
@@ -124,19 +182,39 @@ type ClientSpec struct {
 	// Audience names the resources a token issued to this client is for, each through an audience
 	// mapper. Which API a token is for belongs to the client relationship, not to the claim profile.
 	Audience []string
+
+	// Keys are a confidential or workload client's public keys: one, or two during a rotation.
+	Keys []JWK
 }
+
+// MaxClientKeys is how many keys a client holds at once: the active one, and during a rotation the
+// one retiring. It is the overlap the pinned kernel was proven to accept.
+const MaxClientKeys = 2
 
 // Validate refuses a specification the kernel would accept and the profiles would not.
 func (s ClientSpec) Validate() error {
+	kinds := 0
+	for _, set := range []bool{s.Public, s.Confidential, s.Workload, s.Resource} {
+		if set {
+			kinds++
+		}
+	}
+	keyed := s.Confidential || s.Workload
 	switch {
 	case strings.TrimSpace(s.ClientID) == "":
 		return errors.New("keycloak: a clientId is required")
-	case s.Public == s.Resource:
-		return errors.New("keycloak: a client is either public or a resource")
-	case s.Public && (len(s.RedirectURIs) == 0 || s.AccessTokenLifespan <= 0):
-		return errors.New("keycloak: a public client needs redirect URIs and an access token lifespan")
+	case kinds != 1:
+		return errors.New("keycloak: a client is exactly one of public, confidential, workload or resource")
+	case (s.Public || s.Confidential) && (len(s.RedirectURIs) == 0 || s.AccessTokenLifespan <= 0):
+		return errors.New("keycloak: a public or confidential client needs redirect URIs and an access token lifespan")
+	case s.Workload && (len(s.RedirectURIs) > 0 || s.AccessTokenLifespan <= 0):
+		return errors.New("keycloak: a workload has no redirect URIs and needs an access token lifespan")
 	case s.Resource && (len(s.RedirectURIs) > 0 || len(s.Audience) > 0):
 		return errors.New("keycloak: a resource has no redirect URIs and no audience")
+	case keyed && (len(s.Keys) == 0 || len(s.Keys) > MaxClientKeys):
+		return fmt.Errorf("keycloak: a confidential or workload client holds 1 to %d keys", MaxClientKeys)
+	case !keyed && len(s.Keys) > 0:
+		return errors.New("keycloak: only a confidential or workload client holds keys")
 	}
 	return nil
 }
@@ -156,16 +234,37 @@ func (s ClientSpec) representation() map[string]any {
 		representation["standardFlowEnabled"] = false
 		return representation
 	}
-	representation["publicClient"] = true
-	representation["standardFlowEnabled"] = true
-	representation["redirectUris"] = append([]string{}, s.RedirectURIs...)
-	representation["attributes"] = map[string]any{
-		"pkce.code.challenge.method":       "S256",
+	attributes := map[string]any{
 		"access.token.signed.response.alg": "PS256",
 		AttrAccessTokenLifespan:            strconv.Itoa(s.AccessTokenLifespan),
-		// STD-IAM-001 §3.2: a public client holds no refresh token.
-		"use.refresh.tokens": "false",
 	}
+	switch {
+	case s.Public:
+		representation["publicClient"] = true
+		representation["standardFlowEnabled"] = true
+		representation["redirectUris"] = append([]string{}, s.RedirectURIs...)
+		attributes["pkce.code.challenge.method"] = "S256"
+		// STD-IAM-001 §3.2: a public client holds no refresh token.
+		attributes["use.refresh.tokens"] = "false"
+	case s.Confidential:
+		// The kernel still generates a secret for a confidential client, and the client-jwt
+		// authenticator never accepts it: the client proves itself by its key or not at all.
+		representation["publicClient"] = false
+		representation["clientAuthenticatorType"] = clientJWTAuthorizer
+		representation["standardFlowEnabled"] = true
+		representation["redirectUris"] = append([]string{}, s.RedirectURIs...)
+		attributes["pkce.code.challenge.method"] = "S256"
+		keyAttributes(attributes, s.Keys)
+	case s.Workload:
+		representation["publicClient"] = false
+		representation["clientAuthenticatorType"] = clientJWTAuthorizer
+		representation["standardFlowEnabled"] = false
+		representation["serviceAccountsEnabled"] = true
+		// A workload re-authenticates with its own key rather than continuing a session.
+		attributes["use.refresh.tokens"] = "false"
+		keyAttributes(attributes, s.Keys)
+	}
+	representation["attributes"] = attributes
 	var mappers []map[string]any
 	for _, resource := range s.Audience {
 		mappers = append(mappers, map[string]any{
@@ -230,6 +329,21 @@ func (a *Admin) PatchClient(ctx context.Context, realm Realm, client ClientUUID,
 		}
 		attributes[AttrAccessTokenLifespan] = strconv.Itoa(*patch.AccessTokenLifespan)
 		representation["attributes"] = attributes
+	}
+	if patch.Keys != nil {
+		if len(*patch.Keys) > MaxClientKeys {
+			return fmt.Errorf("keycloak: a client holds at most %d keys", MaxClientKeys)
+		}
+		if public, _ := representation["publicClient"].(bool); public {
+			return errors.New("keycloak: a public client holds no key")
+		}
+		attributes, _ := representation["attributes"].(map[string]any)
+		if attributes == nil {
+			attributes = map[string]any{}
+		}
+		keyAttributes(attributes, *patch.Keys)
+		representation["attributes"] = attributes
+		representation["clientAuthenticatorType"] = clientJWTAuthorizer
 	}
 	// Not marked mutating: a PUT of a whole representation is idempotent, so a lost response costs
 	// a repeated call rather than a duplicated effect.

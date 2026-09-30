@@ -398,6 +398,7 @@ func TestRegistrationRecordsAreNeverDeleted(t *testing.T) {
 		{"identity.drift_exception", []string{"SELECT", "INSERT"}, []string{"UPDATE", "DELETE", "TRUNCATE"}},
 		{"identity.principal_relink", []string{"SELECT", "INSERT"}, []string{"UPDATE", "DELETE", "TRUNCATE"}},
 		{"identity.principal_finding", []string{"SELECT", "INSERT", "UPDATE"}, []string{"DELETE", "TRUNCATE"}},
+		{"identity.client_key", []string{"SELECT", "INSERT"}, []string{"UPDATE", "DELETE", "TRUNCATE"}},
 	} {
 		for _, privilege := range want.held {
 			if !queryBool(t, pool, ctx,
@@ -410,6 +411,24 @@ func TestRegistrationRecordsAreNeverDeleted(t *testing.T) {
 				`SELECT has_table_privilege($1, $2, $3)`, runtimeRole, want.table, privilege) {
 				t.Errorf("%s holds %s on %s; the record must outlive the runtime's intent", runtimeRole, privilege, want.table)
 			}
+		}
+	}
+}
+
+// TestAClientKeyIsNeverRewritten is the privilege half of the client key record: the runtime changes
+// what a rotation, a revocation or an expiry changes, and nothing else. A runtime that could rewrite
+// public_jwk could swap a registered key for one whose private half it holds.
+func TestAClientKeyIsNeverRewritten(t *testing.T) {
+	pool, ctx := openPool(t)
+	for _, column := range []string{"state", "retiring_at", "revoked_at", "revoked_by", "revocation_reason"} {
+		if !queryBool(t, pool, ctx, `SELECT has_column_privilege($1, 'identity.client_key', $2, 'UPDATE')`, runtimeRole, column) {
+			t.Errorf("%s cannot update client_key.%s; rotation and revocation need it", runtimeRole, column)
+		}
+	}
+	for _, column := range []string{"key_id", "registration_id", "kid", "thumbprint", "public_jwk", "registered_by",
+		"registered_at", "expires_at"} {
+		if queryBool(t, pool, ctx, `SELECT has_column_privilege($1, 'identity.client_key', $2, 'UPDATE')`, runtimeRole, column) {
+			t.Errorf("%s can update client_key.%s; a registered key must never be rewritten", runtimeRole, column)
 		}
 	}
 }
@@ -453,6 +472,19 @@ func TestRegistrationConstraintsHold(t *testing.T) {
 	    SELECT '01a0e7a0-0000-7000-8000-000000000003', registration_id, 'token_lifespan', 'admin-user',
 	           'emergency', '01a0e7a0-0000-7000-8000-000000000002', now() + interval '25 hours' FROM r`,
 		"confidential", "L1")
+	// The database refuses private material even where validation missed it.
+	key := `
+	    WITH r AS (` + registration + ` RETURNING registration_id)
+	    INSERT INTO identity.client_key
+	        (key_id, registration_id, kid, thumbprint, public_jwk, state, registered_by, expires_at, retiring_at)
+	    SELECT '01a0e7a0-0000-7000-8000-000000000006', registration_id, 'k1', 'probe-thumbprint', $3::jsonb, $4,
+	           '01a0e7a0-0000-7000-8000-000000000002', now() + interval '1 day', $5 FROM r`
+	refused("client_key_public_only", key, "confidential", nil,
+		`{"kty":"RSA","kid":"k1","n":"AQAB","e":"AQAB","d":"private"}`, "active", nil)
+	refused("client_key_public_only", key, "confidential", nil, `{"kty":"oct","k":"c2VjcmV0"}`, "active", nil)
+	refused("client_key_state_check", key, "confidential", nil, `{"kty":"RSA"}`, "lost", nil)
+	refused("client_key_dates_check", key, "confidential", nil, `{"kty":"RSA"}`, "retiring", nil)
+	refused("client_key_dates_check", key, "confidential", nil, `{"kty":"RSA"}`, "active", time.Now())
 	refused("principal_mapping_active_linked_check", `INSERT INTO identity.principal_mapping
 	    (principal_id, realm, username, subject_type, state)
 	    VALUES ('01a0e7a0-0000-7000-8000-000000000005', 'scnehaux', 'probe', 'human', 'active')`)

@@ -98,6 +98,70 @@ func TestPatchClientKeepsWhatItDoesNotPatch(t *testing.T) {
 	}
 }
 
+// Replacing a client's keys writes its JWKS and the attributes that make the keys its only
+// credential, and keeps everything else the representation carried.
+func TestPatchClientReplacesTheKeysAndNothingElse(t *testing.T) {
+	k := &kernel{adminBody: clientRepresentation}
+	admin, _ := newAdmin(t, k)
+
+	keys := []keycloak.JWK{{KID: "new", N: "bmV3", E: "AQAB"}, {KID: "old", N: "b2xk", E: "AQAB"}}
+	if err := admin.PatchClient(context.Background(), testRealm, "0b1c2d3e", keycloak.ClientPatch{Keys: &keys}); err != nil {
+		t.Fatal(err)
+	}
+	var written map[string]any
+	if err := json.Unmarshal(k.lastBody, &written); err != nil {
+		t.Fatal(err)
+	}
+	attributes := written["attributes"].(map[string]any)
+	if written["clientAuthenticatorType"] != "client-jwt" || attributes["use.jwks.string"] != "true" ||
+		attributes["use.jwks.url"] != "false" || attributes["token.endpoint.auth.signing.alg"] != "PS256" ||
+		attributes["pkce.code.challenge.method"] != "S256" || attributes["access.token.lifespan"] != "240" {
+		t.Errorf("representation written = %v", written)
+	}
+	var jwks struct {
+		Keys []map[string]string `json:"keys"`
+	}
+	if err := json.Unmarshal([]byte(attributes["jwks.string"].(string)), &jwks); err != nil {
+		t.Fatal(err)
+	}
+	if len(jwks.Keys) != 2 || jwks.Keys[0]["kid"] != "new" || jwks.Keys[0]["alg"] != "PS256" ||
+		jwks.Keys[0]["kty"] != "RSA" || jwks.Keys[0]["use"] != "sig" || jwks.Keys[1]["kid"] != "old" {
+		t.Errorf("jwks written = %v", jwks.Keys)
+	}
+	for _, key := range jwks.Keys {
+		if _, private := key["d"]; private || len(key) != 6 {
+			t.Errorf("a written key carries more than its public members: %v", key)
+		}
+	}
+
+	// No keys at all is a client that authenticates as nothing: revoking the last key.
+	none := []keycloak.JWK{}
+	if err := admin.PatchClient(context.Background(), testRealm, "0b1c2d3e", keycloak.ClientPatch{Keys: &none}); err != nil {
+		t.Fatal(err)
+	}
+	_ = json.Unmarshal(k.lastBody, &written)
+	if got := written["attributes"].(map[string]any)["jwks.string"]; got != `{"keys":[]}` {
+		t.Errorf("an emptied JWKS was written as %v", got)
+	}
+}
+
+func TestPatchClientRefusesKeysForAPublicClientOrTooMany(t *testing.T) {
+	public, _ := newAdmin(t, &kernel{adminBody: `{"id":"p","clientId":"web","publicClient":true,"attributes":{}}`})
+	one := []keycloak.JWK{{KID: "a", N: "YQ", E: "AQAB"}}
+	if err := public.PatchClient(context.Background(), testRealm, "p", keycloak.ClientPatch{Keys: &one}); err == nil {
+		t.Error("a public client was given a key")
+	}
+	k := &kernel{adminBody: clientRepresentation}
+	admin, _ := newAdmin(t, k)
+	three := append(one, one[0], one[0])
+	if err := admin.PatchClient(context.Background(), testRealm, "0b1c2d3e", keycloak.ClientPatch{Keys: &three}); err == nil {
+		t.Error("three keys were written to one client")
+	}
+	if k.lastMethod == http.MethodPut {
+		t.Error("a refused key change reached the kernel")
+	}
+}
+
 func TestPatchClientSendsNothingForAnEmptyIdentifier(t *testing.T) {
 	k := &kernel{}
 	admin, _ := newAdmin(t, k)
@@ -255,15 +319,77 @@ func TestCreateClientSendsAResourceThatNobodyLogsInThrough(t *testing.T) {
 	}
 }
 
+// A confidential client logs users in with the code flow and PKCE, and proves itself by its key: a
+// JWKS held on the client, and no secret it could be asked for.
+func TestCreateClientSendsAConfidentialClientThatAuthenticatesByKey(t *testing.T) {
+	k := &kernel{adminStatus: http.StatusCreated, adminLocation: "http://kc/admin/realms/scnehaux/clients/bff"}
+	admin, _ := newAdmin(t, k)
+	if _, err := admin.CreateClient(context.Background(), testRealm, keycloak.ClientSpec{ClientID: "bff", Confidential: true,
+		RedirectURIs: []string{"https://app.example.com/cb"}, AccessTokenLifespan: 540,
+		Keys: []keycloak.JWK{{KID: "k1", N: "bg", E: "AQAB"}}}); err != nil {
+		t.Fatal(err)
+	}
+	var sent map[string]any
+	if err := json.Unmarshal(k.lastBody, &sent); err != nil {
+		t.Fatal(err)
+	}
+	attributes := sent["attributes"].(map[string]any)
+	if sent["publicClient"] != false || sent["clientAuthenticatorType"] != "client-jwt" || sent["standardFlowEnabled"] != true ||
+		sent["serviceAccountsEnabled"] != false || sent["directAccessGrantsEnabled"] != false ||
+		attributes["pkce.code.challenge.method"] != "S256" || attributes["use.jwks.string"] != "true" ||
+		attributes["use.jwks.url"] != "false" || attributes["token.endpoint.auth.signing.alg"] != "PS256" ||
+		attributes["access.token.signed.response.alg"] != "PS256" || attributes["access.token.lifespan"] != "540" {
+		t.Errorf("sent %v", sent)
+	}
+	if _, refusesRefresh := attributes["use.refresh.tokens"]; refusesRefresh {
+		t.Error("a confidential client was refused refresh tokens, which its profile permits")
+	}
+	if !strings.Contains(attributes["jwks.string"].(string), `"kid":"k1"`) {
+		t.Errorf("jwks = %v", attributes["jwks.string"])
+	}
+	if _, secret := sent["secret"]; secret {
+		t.Error("a secret was sent")
+	}
+}
+
+// A workload authenticates as itself with its key on every token request, and is issued no refresh
+// token and no login.
+func TestCreateClientSendsAWorkloadThatAuthenticatesByKey(t *testing.T) {
+	k := &kernel{adminStatus: http.StatusCreated, adminLocation: "http://kc/admin/realms/scnehaux/clients/job"}
+	admin, _ := newAdmin(t, k)
+	if _, err := admin.CreateClient(context.Background(), testRealm, keycloak.ClientSpec{ClientID: "job", Workload: true,
+		AccessTokenLifespan: 540, Keys: []keycloak.JWK{{KID: "k1", N: "bg", E: "AQAB"}}}); err != nil {
+		t.Fatal(err)
+	}
+	var sent map[string]any
+	_ = json.Unmarshal(k.lastBody, &sent)
+	attributes := sent["attributes"].(map[string]any)
+	if sent["serviceAccountsEnabled"] != true || sent["standardFlowEnabled"] != false || sent["publicClient"] != false ||
+		sent["clientAuthenticatorType"] != "client-jwt" || sent["redirectUris"] != nil ||
+		attributes["use.refresh.tokens"] != "false" || attributes["use.jwks.string"] != "true" {
+		t.Errorf("sent %v", sent)
+	}
+}
+
 func TestCreateClientRefusesAnIncoherentSpec(t *testing.T) {
 	k := &kernel{}
 	admin, _ := newAdmin(t, k)
+	key := []keycloak.JWK{{KID: "k", N: "bg", E: "AQAB"}}
 	for name, spec := range map[string]keycloak.ClientSpec{
-		"no clientId":                 {Public: true, RedirectURIs: []string{"https://a"}, AccessTokenLifespan: 1},
-		"neither public nor resource": {ClientID: "x"},
-		"both":                        {ClientID: "x", Public: true, Resource: true},
-		"public without redirects":    {ClientID: "x", Public: true, AccessTokenLifespan: 1},
-		"a resource with an audience": {ClientID: "x", Resource: true, Audience: []string{"y"}},
+		"no clientId":                   {Public: true, RedirectURIs: []string{"https://a"}, AccessTokenLifespan: 1},
+		"neither public nor resource":   {ClientID: "x"},
+		"both":                          {ClientID: "x", Public: true, Resource: true},
+		"public and confidential":       {ClientID: "x", Public: true, Confidential: true},
+		"public without redirects":      {ClientID: "x", Public: true, AccessTokenLifespan: 1},
+		"a resource with an audience":   {ClientID: "x", Resource: true, Audience: []string{"y"}},
+		"a public client with a key":    {ClientID: "x", Public: true, RedirectURIs: []string{"https://a"}, AccessTokenLifespan: 1, Keys: key},
+		"a resource with a key":         {ClientID: "x", Resource: true, Keys: key},
+		"a confidential client, no key": {ClientID: "x", Confidential: true, RedirectURIs: []string{"https://a"}, AccessTokenLifespan: 1},
+		"a confidential, no redirects":  {ClientID: "x", Confidential: true, AccessTokenLifespan: 1, Keys: key},
+		"a workload with redirects":     {ClientID: "x", Workload: true, RedirectURIs: []string{"https://a"}, AccessTokenLifespan: 1, Keys: key},
+		"a workload without a lifespan": {ClientID: "x", Workload: true, Keys: key},
+		"a workload holding three keys": {ClientID: "x", Workload: true, AccessTokenLifespan: 1, Keys: append(key, key[0], key[0])},
+		"a workload holding no key":     {ClientID: "x", Workload: true, AccessTokenLifespan: 1},
 	} {
 		if _, err := admin.CreateClient(context.Background(), testRealm, spec); err == nil {
 			t.Errorf("%s was sent", name)

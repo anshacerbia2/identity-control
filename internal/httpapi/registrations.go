@@ -37,6 +37,11 @@ type Registrar interface {
 	Register(ctx context.Context, req registration.Request) (registration.Registration, error)
 	Get(ctx context.Context, registrationID id.UUID) (registration.Registration, error)
 	List(ctx context.Context, query registration.ListQuery) (registration.Page, error)
+
+	// The client key surface (TDD-identity-control-003 §Client Key Rotation).
+	Keys(ctx context.Context, registrationID id.UUID) ([]registration.Key, error)
+	AddKey(ctx context.Context, registrationID id.UUID, publicKey json.RawMessage, by id.UUID) ([]registration.Key, bool, error)
+	RevokeKey(ctx context.Context, registrationID, keyID, by id.UUID, reason string) ([]registration.Key, error)
 }
 
 // Registrations serves the registration and drift routes.
@@ -60,13 +65,14 @@ func NewRegistrations(registrar Registrar, reconciler Reconciler) (*Registration
 // and the registering Principal are absent on purpose: configuration, the interim manual
 // authority, the PS256 baseline, and the authenticated caller decide them.
 type registerRequest struct {
-	ClientKey      string   `json:"client_key"`
-	Profile        string   `json:"profile"`
-	AudienceClass  string   `json:"audience_class"`
-	ApplicationRef string   `json:"application_ref"`
-	LifetimeClass  string   `json:"lifetime_class"`
-	Audience       []string `json:"audience"`
-	RedirectURIs   []string `json:"redirect_uris"`
+	ClientKey      string          `json:"client_key"`
+	Profile        string          `json:"profile"`
+	AudienceClass  string          `json:"audience_class"`
+	ApplicationRef string          `json:"application_ref"`
+	LifetimeClass  string          `json:"lifetime_class"`
+	Audience       []string        `json:"audience"`
+	RedirectURIs   []string        `json:"redirect_uris"`
+	PublicKey      json.RawMessage `json:"public_key"`
 }
 
 // Register handles POST /v1/registrations.
@@ -94,7 +100,7 @@ func (h *Registrations) Register(w http.ResponseWriter, r *http.Request) {
 		CallerScope: scope, IdempotencyKey: key, RegisteredBy: principal,
 		ClientKey: body.ClientKey, Profile: body.Profile, AudienceClass: body.AudienceClass,
 		ApplicationRef: body.ApplicationRef, LifetimeClass: body.LifetimeClass,
-		Audience: body.Audience, RedirectURIs: body.RedirectURIs,
+		Audience: body.Audience, RedirectURIs: body.RedirectURIs, PublicKey: body.PublicKey,
 	})
 	if err != nil {
 		writeRegistrationError(w, r, err)
@@ -184,13 +190,27 @@ func (h *Registrations) Findings(w http.ResponseWriter, r *http.Request) {
 
 func writeRegistrationError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
-	case errors.Is(err, registration.ErrInvalid), errors.Is(err, registration.ErrProfileNotBuilt),
-		errors.Is(err, registration.ErrScopeUndeclared):
-		// Each message names a rule, never a stored value.
+	case errors.Is(err, registration.ErrInvalid), errors.Is(err, registration.ErrScopeUndeclared),
+		errors.Is(err, registration.ErrPrivateKey):
+		// Each message names a rule, never a stored or submitted value: a refused key is never
+		// echoed, and a private one least of all.
 		httpapi.Problem(w, r, httpapi.ValidationFailed, err.Error())
 	case errors.Is(err, registration.ErrKeyTaken):
 		httpapi.Problem(w, r, httpapi.StateTransitionRefused,
 			"The client_key is registered, or held by a Keycloak client no registration describes")
+	case errors.Is(err, registration.ErrKeyInUse):
+		httpapi.Problem(w, r, httpapi.StateTransitionRefused,
+			"The public key is already registered, to this client or another; a revoked key is never registered again")
+	case errors.Is(err, registration.ErrRotationInProgress):
+		httpapi.Problem(w, r, httpapi.StateTransitionRefused,
+			"A key is still retiring; register the next key after its overlap ends, or revoke it first")
+	case errors.Is(err, registration.ErrNotKeyed):
+		httpapi.Problem(w, r, httpapi.StateTransitionRefused, "A public client or a resource holds no key")
+	case errors.Is(err, registration.ErrNotActive):
+		httpapi.Problem(w, r, httpapi.StateTransitionRefused, "The registration is not active")
+	case errors.Is(err, registration.ErrKeyNotLive):
+		httpapi.Problem(w, r, httpapi.StateTransitionRefused,
+			"The key is not an active or retiring key of this registration")
 	case errors.Is(err, registration.ErrNotFound):
 		httpapi.Problem(w, r, httpapi.NotFound, "No such registration")
 	case errors.Is(err, idempotency.ErrConflict):
@@ -202,6 +222,99 @@ func writeRegistrationError(w http.ResponseWriter, r *http.Request, err error) {
 		httpapi.Problem(w, r, httpapi.DependencyUnavailable,
 			"The identity kernel did not confirm the registration; retry with the same Idempotency-Key")
 	}
+}
+
+// Keys handles GET /v1/registrations/{registration_id}/keys: the client's public keys, newest first,
+// revoked ones included.
+func (h *Registrations) Keys(w http.ResponseWriter, r *http.Request) {
+	if _, ok := callerPrincipal(r); !ok {
+		httpapi.Problem(w, r, httpapi.AuthenticationRequired, "The request carries no authenticated caller")
+		return
+	}
+	registrationID, err := id.Parse(r.PathValue("registration_id"))
+	if err != nil {
+		httpapi.Problem(w, r, httpapi.ValidationFailed, "registration_id is not a valid identifier")
+		return
+	}
+	keys, err := h.registrar.Keys(r.Context(), registrationID)
+	if err != nil {
+		writeRegistrationError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"keys": keys})
+}
+
+type addKeyRequest struct {
+	PublicKey json.RawMessage `json:"public_key"`
+}
+
+// AddKey handles POST /v1/registrations/{registration_id}/keys: the next public key, which starts a
+// rotation. It answers 201 when the key was added, and 200 when it already was the client's active
+// key, which is how a retry after a lost response is told the rotation happened.
+func (h *Registrations) AddKey(w http.ResponseWriter, r *http.Request) {
+	principal, ok := callerPrincipal(r)
+	if !ok {
+		httpapi.Problem(w, r, httpapi.AuthenticationRequired, "The request carries no authenticated caller")
+		return
+	}
+	registrationID, err := id.Parse(r.PathValue("registration_id"))
+	if err != nil {
+		httpapi.Problem(w, r, httpapi.ValidationFailed, "registration_id is not a valid identifier")
+		return
+	}
+	var body addKeyRequest
+	decoder := json.NewDecoder(io.LimitReader(r.Body, maxBodyBytes))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&body); err != nil {
+		httpapi.Problem(w, r, httpapi.ValidationFailed, "The request body is not a valid key document")
+		return
+	}
+	keys, added, err := h.registrar.AddKey(r.Context(), registrationID, body.PublicKey, principal)
+	if err != nil {
+		writeRegistrationError(w, r, err)
+		return
+	}
+	status := http.StatusOK
+	if added {
+		status = http.StatusCreated
+	}
+	writeJSON(w, status, map[string]any{"keys": keys})
+}
+
+// KeyAction handles POST /v1/registrations/{registration_id}/keys/{key_id}:revoke. The action is
+// part of the last segment, as it is for Principals, because the mux matches whole segments.
+func (h *Registrations) KeyAction(w http.ResponseWriter, r *http.Request) {
+	principal, ok := callerPrincipal(r)
+	if !ok {
+		httpapi.Problem(w, r, httpapi.AuthenticationRequired, "The request carries no authenticated caller")
+		return
+	}
+	registrationID, err := id.Parse(r.PathValue("registration_id"))
+	if err != nil {
+		httpapi.Problem(w, r, httpapi.ValidationFailed, "registration_id is not a valid identifier")
+		return
+	}
+	rawKey, action, _ := strings.Cut(r.PathValue("key_action"), ":")
+	if action != "revoke" {
+		httpapi.Problem(w, r, httpapi.NotFound, "No such key action")
+		return
+	}
+	keyID, err := id.Parse(rawKey)
+	if err != nil {
+		httpapi.Problem(w, r, httpapi.ValidationFailed, "key_id is not a valid identifier")
+		return
+	}
+	reason := strings.TrimSpace(r.Header.Get(AdministrativeReasonHeader))
+	if reason == "" {
+		httpapi.Problem(w, r, httpapi.ValidationFailed, "Revoking a key requires an X-Administrative-Reason header")
+		return
+	}
+	keys, err := h.registrar.RevokeKey(r.Context(), registrationID, keyID, principal, reason)
+	if err != nil {
+		writeRegistrationError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"keys": keys})
 }
 
 // callerPrincipal is the authenticated Principal, which a resolution and an exception record.

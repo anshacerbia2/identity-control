@@ -110,6 +110,9 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	api.HandleFunc("POST /v1/registrations:reconcile", cfg.Registrations.Reconcile)
 	api.HandleFunc("POST /v1/registrations/{registration_id}/drift-exceptions", cfg.Registrations.GrantException)
 	api.HandleFunc("GET /v1/registrations/{registration_id}/drift-exceptions", cfg.Registrations.Exceptions)
+	api.HandleFunc("POST /v1/registrations/{registration_id}/keys", cfg.Registrations.AddKey)
+	api.HandleFunc("GET /v1/registrations/{registration_id}/keys", cfg.Registrations.Keys)
+	api.HandleFunc("POST /v1/registrations/{registration_id}/keys/{key_action}", cfg.Registrations.KeyAction)
 
 	return Surface{Probes: probes, API: api}, nil
 }

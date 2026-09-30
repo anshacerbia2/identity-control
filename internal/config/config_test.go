@@ -230,3 +230,40 @@ func TestTheRegistrationSweepIntervalDefaultsAndIsBoundedByEventRetention(t *tes
 		}
 	}
 }
+
+func TestTheClientKeyWindowsDefaultAndTheOverlapIsShorterThanTheLifetime(t *testing.T) {
+	for _, c := range []struct {
+		lifetime, overlap         string
+		wantLifetime, wantOverlap time.Duration
+		ok                        bool
+	}{
+		{"", "", 90 * 24 * time.Hour, 7 * 24 * time.Hour, true},
+		{"720h", "24h", 720 * time.Hour, 24 * time.Hour, true},
+		{"24h", "24h", 0, 0, false},
+		{"24h", "48h", 0, 0, false},
+		{"-1h", "", 0, 0, false},
+		{"90d", "", 0, 0, false},
+	} {
+		t.Setenv("IDENTITY_DATABASE_URL", "postgres://runtime@localhost:5432/identity")
+		t.Setenv("IDENTITY_KEYCLOAK_REALM", "scnehaux")
+		t.Setenv("IDENTITY_KEYCLOAK_BASE_URL", "https://identity.example.com")
+		t.Setenv("IDENTITY_KEYCLOAK_CLIENT_ID", "identity-control")
+		t.Setenv("IDENTITY_KEYCLOAK_CLIENT_KEY_FILE", "/keys/identity-control.pem")
+		t.Setenv("IDENTITY_TOKEN_ISSUER", "https://identity.example.com/realms/scnehaux")
+		t.Setenv("IDENTITY_TOKEN_AUDIENCE", "identity-control")
+		t.Setenv("IDENTITY_JWKS_URL", "https://identity.example.com/realms/scnehaux/protocol/openid-connect/certs")
+		t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID", "identity-control-registration")
+		t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_KEY_FILE", "/keys/identity-control-registration.pem")
+		t.Setenv("IDENTITY_CLIENT_KEY_LIFETIME", c.lifetime)
+		t.Setenv("IDENTITY_CLIENT_KEY_ROTATION_OVERLAP", c.overlap)
+
+		cfg, err := config.Load()
+		if c.ok && (err != nil || cfg.ClientKeyLifetime != c.wantLifetime || cfg.ClientKeyRotationOverlap != c.wantOverlap) {
+			t.Errorf("%q/%q: lifetime %s, overlap %s, err %v", c.lifetime, c.overlap, cfg.ClientKeyLifetime,
+				cfg.ClientKeyRotationOverlap, err)
+		}
+		if !c.ok && err == nil {
+			t.Errorf("%q/%q was accepted", c.lifetime, c.overlap)
+		}
+	}
+}

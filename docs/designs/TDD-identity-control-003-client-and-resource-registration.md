@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-003
   title: Protocol Client and Protected-Resource Registration
   owner: Core Platform Team
-  version: 1.10.1
+  version: 1.11.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -93,7 +93,7 @@ read at deploy time could never serve.
 | :-- | :-- | :-- |
 | `RegistrationService` | `internal/registration` | Desired state, validation, lifecycle |
 | `ApplicationReferenceResolver` | `internal/registration` | Resolves and revalidates the Application reference against its current authority |
-| `ClientKeyRegistrar` | `internal/registration` | Registers, rotates, and revokes a client's public keys on the kernel client through the Admin API. It never receives a private key |
+| `ClientKeyRegistrar` | `internal/registration` | Registers, rotates, and revokes a client's public keys on the kernel client through the Admin API. It never receives a private key. Built as the key methods of the registration service (`keys.go`), because each key change runs under the registration's row lock |
 | `RegistrationReconciler` | `internal/reconcile` | Compares desired state against Keycloak on a schedule, repairs or blocks drift by field class, and records every run |
 
 ### Registration Path
@@ -325,7 +325,11 @@ CREATE TABLE identity.client_key (
     CONSTRAINT client_key_state_check
         CHECK (state IN ('active', 'retiring', 'revoked')),
     CONSTRAINT client_key_public_only
-        CHECK (NOT (public_jwk ?| ARRAY['d', 'p', 'q', 'dp', 'dq', 'qi', 'oth', 'k']))
+        CHECK (NOT (public_jwk ?| ARRAY['d', 'p', 'q', 'dp', 'dq', 'qi', 'oth', 'k'])),
+    CONSTRAINT client_key_dates_check
+        CHECK ((state = 'revoked') = (revoked_at IS NOT NULL)
+            AND ((state = 'retiring') = (retiring_at IS NOT NULL) OR state = 'revoked')
+            AND expires_at > registered_at)
 );
 
 CREATE UNIQUE INDEX client_key_kid ON identity.client_key (registration_id, kid);
@@ -349,6 +353,16 @@ authenticates as the client.
 - The kernel client's JWKS is rebuilt from the `active` and `retiring` rows. Desired state for
   keys is therefore this table, and the reconciler compares the client against it (§Drift
   Reconciliation).
+- `client_key_dates_check` keeps the dates honest: a revoked key says when, a retiring key says
+  when its overlap ends, and an active key carries neither.
+- A thumbprint stays taken after its key is revoked. A key revoked because it leaked can never be
+  registered again, to this client or any other.
+
+**A key is never rewritten or deleted.** A new key is a new row. The runtime role holds no
+`DELETE` on this table, and `UPDATE` only on the columns a rotation, a revocation or an expiry
+changes: `state`, `retiring_at`, `revoked_at`, `revoked_by` and `revocation_reason` (`grants.sql`).
+A runtime that could rewrite `public_jwk` could swap a registered key for one whose private half it
+holds, and the next rebuild of the kernel's JWKS would install it.
 
 ## API / Interface
 
@@ -401,10 +415,19 @@ lists nothing rather than answering 404, as `/findings` does.
 
 - `POST /v1/registrations` for a `confidential` or `workload` profile takes the client's first public
   key as a JWK in `public_key`.
-- `POST /v1/registrations/{registration_id}/keys` takes the next key. That starts a rotation
-  (§Client Key Rotation).
-- `GET .../keys` lists the keys with their states and dates.
-- `:revoke` removes one key at once. It requires an `X-Administrative-Reason`, recorded on the key.
+- `POST /v1/registrations/{registration_id}/keys` takes the next key as `{"public_key": <JWK>}`.
+  That starts a rotation (§Client Key Rotation). It answers `201` with the keys when the key was
+  added, and `200` when that key already is the client's active key, which is how a retry after a
+  lost response learns the rotation happened.
+- `GET .../keys` lists the keys, newest first, revoked ones included: `{"keys": [...]}`, each with
+  its `kid`, thumbprint, public JWK, state and dates. An unknown registration answers `404`.
+- `:revoke` removes one key at once. It requires an `X-Administrative-Reason`, recorded on the key
+  with the caller, and answers with the keys.
+
+A submitted JWK carries `kty`, `n`, `e` and optionally `kid`, `use` and `alg`, and nothing else. A
+key naming no `kid` is registered under its thumbprint, which is what every Scnehaux key tool names
+its keys by. The key is recorded as its public members only, re-encoded, so a modulus sent with a
+leading zero byte is the same key as one sent without.
 
 A JWK carrying a private parameter is refused, and its content is never logged. A caller that sent
 one has exposed that key and must generate another. A caller that loses its private key registers a
@@ -465,18 +488,19 @@ register(request):
     reject an audience class whose managed scope the realm does not declare
 ```
 
-**Built so far.** Two profiles: `public` and `resource`. `confidential` and `workload`
-need client key registration, rotation and revocation (§Client Key Rotation), which is not
-built. They are refused rather than created with a credential nobody tracks. The RS256
-exception is not offered: every registration is PS256. The registered host set is not
-modelled, so that rule is not enforced yet. A `client_key` is 1 to 128 lowercase
-letters, digits, `.`, `_` or `-`.
+**Built so far.** All four profiles. A `workload` registers the `workload` audience class, whose
+managed scope the kernel does not declare yet, so every workload registration is refused by the
+last rule above until it does. The RS256 exception is not offered: every registration is PS256.
+The registered host set is not modelled, so that rule is not enforced yet. A `client_key` is 1 to
+128 lowercase letters, digits, `.`, `_` or `-`.
 
 **A key an unregistered client holds is refused, not adopted.** Adopting would take over
 a client someone else configured and put it under the reconciler. The kernel is checked
 before the create, and a conflict from the create itself is treated the same way. The
 pending row is retired, which keeps the record and releases the key, and the key's
-response is stored, so a retry is refused the same way.
+response is stored, so a retry is refused the same way. A public key the refused
+registration recorded is revoked with it: it never reached the kernel, and its thumbprint
+stays taken, so that client registers again with a new key pair.
 
 Pending registrations are recovered before each scheduled sweep. One whose create
 never landed is created. One whose response was lost is adopted by `client_key`, which
@@ -516,6 +540,22 @@ remembers. Revocation is the other path: it removes one key at once, for a key t
 leaked. Revoking a client's last key is permitted, and it stops the client authenticating
 until a new key is registered. For a compromised key that is the containment wanted, and
 the reason records why.
+
+**Every key change is one transaction.** It takes the registration's row lock, writes the key rows,
+rebuilds the kernel client's JWKS from the `active` and `retiring` rows through the Admin API, and
+only then commits. A kernel that refuses or cannot be reached rolls the rows back, so the table never
+records a key the kernel was not given. A response lost after the kernel applied the change leaves
+the kernel ahead of the table, and the same request sent again converges them, because the JWKS
+written is a function of the rows alone. Two changes to one client's keys are serialised by the lock.
+
+**Removal on schedule runs before each sweep.** A retiring key is removed by the first scheduled
+pass after its `retiring_at`, and any key by the first pass after its `expires_at`, so each is gone
+within one `IDENTITY_REGISTRATION_RECONCILE_INTERVAL` of its time. The removal records no Principal
+and names its reason, the overlap or the lifetime ending. A registration whose last key has been
+revoked or has expired takes its next key as the active key directly, with nothing to retire.
+
+A client built again, by pending recovery or by an operator recreating a deleted client, holds the
+`active` and `retiring` keys, and no other.
 
 **The mechanism is proven against the pinned kernel.** `identity-kernel`'s
 `compat/client_keys_test.go` tested it against 26.7.4 (compat run 36606481342):
@@ -622,9 +662,9 @@ wrong actor.
 
 **Built so far.** Two field classes are compared: `token_lifespan` and
 `redirect_uris`, the two the drift proof exercises. `audience_scope`,
-`signing_algorithm` and `profile` are designed above and not compared yet. `client_keys`
-is compared once client key registration is built, because until then no registration
-holds a key.
+`signing_algorithm` and `profile` are designed above and not compared yet. Client key
+registration is built, so registrations now hold keys, and `client_keys` is the next field
+class to compare.
 
 - **An absent client is held, not recreated.** It is recorded as one open `missing`
   finding naming whoever the deletion's admin event names, and every sweep leaves it
@@ -636,8 +676,9 @@ holds a key.
   interval. When the lifecycle exists, this can be revisited; until then, holding is the
   conservative reading (RESPONSE-27, D5).
 - **No client is treated as unmanaged yet.** This service's own clients are confidential
-  clients that development scripts create, each with its own key. Client key registration is not
-  built, so they cannot be registered. Disabling every unregistered client would disable this service. When the
+  clients that development scripts create, each with its own key. They can now be registered
+  through this API with those keys, and until they are, disabling every unregistered client would
+  disable this service. When the
   branch is built, it must also exempt the clients Keycloak itself creates in every
   realm (`account`, `account-console`, `admin-cli`, `broker`, `realm-management`,
   `security-admin-console`). Disabling `realm-management` or `admin-cli` would lock
@@ -672,8 +713,8 @@ becomes available.
 
 | Variable | Default | Purpose |
 | :-- | :-- | :-- |
-| `IDENTITY_CLIENT_KEY_LIFETIME` | `90d` | How long a registered client key is valid before it is removed |
-| `IDENTITY_CLIENT_KEY_ROTATION_OVERLAP` | `7d` | Window during which the new and the retiring key are both accepted |
+| `IDENTITY_CLIENT_KEY_LIFETIME` | `2160h` (90 days) | How long a registered client key is valid before it is removed. A Go duration, which has no day unit |
+| `IDENTITY_CLIENT_KEY_ROTATION_OVERLAP` | `168h` (7 days) | Window during which the new and the retiring key are both accepted. Shorter than the lifetime, or startup is refused |
 | `IDENTITY_REGISTRATION_RECONCILE_INTERVAL` | `1h` | Drift sweep cadence. Admin-event retention in `identity-kernel` (7 days) must exceed it, or a change would lose its attribution before a sweep reads it |
 | `IDENTITY_APPLICATION_AUTHORITY` | `manual` | Becomes the Software Catalog authority name once chartered |
 | `IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID` | none, required | The registration path's own Admin API client, `identity-control-registration` |
@@ -718,7 +759,11 @@ becomes available.
 - At the end of the overlap the retiring key is removed without manual action, and an
   assertion signed with it is refused.
 - A revoked key is refused on the next request. A revocation without a reason is refused.
-- A second rotation while a key is still retiring is refused.
+- A second rotation while a key is still retiring is refused. A retry of a rotation already made
+  changes nothing and answers the keys.
+- A key change the kernel refuses leaves the key rows as they were.
+- A revoked key cannot be registered again, to its client or any other.
+- A client built again by recovery or by an operator holds exactly its active and retiring keys.
 - The registration credential cannot create, modify, or disable a user, and the Principal path's
   credential cannot create or modify a client. Both are asserted against a live kernel.
 
