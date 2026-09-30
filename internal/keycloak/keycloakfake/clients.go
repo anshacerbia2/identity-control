@@ -168,6 +168,8 @@ func (r *Registry) PatchClient(ctx context.Context, _ keycloak.Realm, client key
 		}
 		spec.Keys = append([]keycloak.JWK{}, *patch.Keys...)
 		r.specs[client] = spec
+		stored.Credential = keycloak.ClientCredential{Authenticator: "client-jwt", HeldJWKS: true,
+			Keys: append([]keycloak.JWK{}, *patch.Keys...)}
 	}
 	r.clients[client] = stored
 	r.Patches++
@@ -201,15 +203,16 @@ func (r *Registry) ServiceAccountUserID(context.Context) (string, error) {
 
 func copyClient(client keycloak.Client) keycloak.Client {
 	client.RedirectURIs = append([]string(nil), client.RedirectURIs...)
+	client.Credential.Keys = append([]keycloak.JWK(nil), client.Credential.Keys...)
 	return client
 }
 
 // Keys returns the public keys the client holds now: what CreateClient was given, as later patches
-// left it.
+// and console changes left it.
 func (r *Registry) Keys(client keycloak.ClientUUID) []keycloak.JWK {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return append([]keycloak.JWK(nil), r.specs[client].Keys...)
+	return append([]keycloak.JWK(nil), r.clients[client].Credential.Keys...)
 }
 
 // Spec returns what CreateClient was given for a client, and its default scopes.
@@ -251,8 +254,13 @@ func (r *Registry) createClient(ctx context.Context, _ keycloak.Realm, spec keyc
 		return "", nil, err
 	}
 	client := keycloak.ClientUUID(minted.String())
-	r.clients[client] = keycloak.Client{ID: client, ClientID: spec.ClientID, Enabled: true,
+	created := keycloak.Client{ID: client, ClientID: spec.ClientID, Enabled: true,
 		RedirectURIs: append([]string(nil), spec.RedirectURIs...), AccessTokenLifespan: spec.AccessTokenLifespan}
+	if spec.Confidential || spec.Workload {
+		created.Credential = keycloak.ClientCredential{Authenticator: "client-jwt", HeldJWKS: true,
+			Keys: append([]keycloak.JWK(nil), spec.Keys...)}
+	}
+	r.clients[client] = created
 	r.specs[client] = spec
 	r.defaultScopes[client] = append([]string(nil), r.RealmDefaults...)
 	r.events = append(r.events, keycloak.AdminEvent{Time: r.now(), OperationType: "CREATE",

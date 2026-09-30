@@ -1,9 +1,9 @@
 // Package reconcile compares registered desired state against the live Keycloak clients, and
 // repairs or blocks what drifted (TDD-identity-control-003 §Drift Reconciliation).
 //
-// An absent client is held for an operator, not recreated. Two field classes are compared, the two
-// the drift proof exercises: a client's access token
-// lifespan, which is repaired, and its redirect URIs, which are blocked. Each divergence is
+// An absent client is held for an operator, not recreated. Three field classes are compared: a
+// client's access token lifespan, which is repaired, and its redirect URIs and, for a confidential
+// or workload client, its keys and authenticator, which are blocked. Each divergence is
 // attributed through Keycloak's admin events before anything is done about it. A change an
 // unexpired drift exception covers is left in place, and a change nobody can be named for is
 // never repaired automatically. An unreachable Keycloak produces an 'unresolved' run that
@@ -14,7 +14,7 @@
 //   - A client no registration describes is not disabled. The service's own clients are
 //     confidential clients that are not registered yet, so disabling unregistered clients would
 //     disable this service.
-//   - Audience scope, signing algorithm, profile and client keys are not compared yet.
+//   - Audience scope, signing algorithm and profile are not compared yet.
 package reconcile
 
 import (
@@ -36,6 +36,10 @@ type FieldClass string
 const (
 	TokenLifespan FieldClass = "token_lifespan"
 	RedirectURIs  FieldClass = "redirect_uris"
+
+	// ClientKeys is a confidential or workload client's credential: its authenticator, its held
+	// JWKS, and the keys in it.
+	ClientKeys FieldClass = "client_keys"
 )
 
 // FindingClass is what the sweep did about a divergence.
@@ -147,6 +151,14 @@ type registration struct {
 	profile      string
 	redirectURIs []string
 	lifespan     int
+
+	// keys are the active and retiring keys a confidential or workload client should hold.
+	keys []keycloak.JWK
+}
+
+// comparesKeys reports whether the profile authenticates with a registered key.
+func (r registration) comparesKeys() bool {
+	return r.profile == "confidential" || r.profile == "workload"
 }
 
 // comparesRedirects reports whether the profile has redirect URIs at all.
@@ -255,7 +267,7 @@ func (r *Reconciler) Sweep(ctx context.Context) (Run, error) {
 		if !ok {
 			continue
 		}
-		for _, field := range []FieldClass{TokenLifespan, RedirectURIs} {
+		for _, field := range []FieldClass{TokenLifespan, RedirectURIs, ClientKeys} {
 			wrote, differs, err := r.reconcileField(ctx, run.ID, reg, client, field, open, exceptions, latest, attribution)
 			if err != nil {
 				return Run{}, err
@@ -304,6 +316,20 @@ func (r *Reconciler) reconcileField(
 		applies = reg.comparesRedirects()
 		differs = !sameSet(client.RedirectURIs, reg.redirectURIs)
 		desired, observed = sortedCopy(reg.redirectURIs), sortedCopy(client.RedirectURIs)
+	case ClientKeys:
+		applies = reg.comparesKeys()
+		differs = !client.Credential.ByKeys(reg.keys)
+		if applies && differs {
+			// Confirmed before anything is done about it: this service's own rotation writes the
+			// kernel before it commits the rows this sweep read, and blocking that would disable a
+			// client for a change nobody made.
+			var err error
+			if reg, client, differs, err = r.confirmKeyDrift(ctx, reg); err != nil {
+				return false, false, err
+			}
+		}
+		desired, observed = keysValue(reg.keys, keycloak.ClientCredential{Authenticator: "client-jwt", HeldJWKS: true}),
+			keysValue(client.Credential.Keys, client.Credential)
 	}
 	if !applies {
 		return false, false, nil
@@ -346,7 +372,11 @@ func (r *Reconciler) reconcileField(
 	case actor != "" && exceptions[exceptionKey{reg.id, field, actor}]:
 		write.class = Sanctioned
 
-	case field == RedirectURIs:
+	case field == RedirectURIs || field == ClientKeys:
+		// A changed redirect URI sends tokens to a host the registration never named, and a key or
+		// authenticator changed in the console lets whoever holds the matching secret authenticate
+		// as the client. Both are the shape of a takeover: the client is disabled, the changed value
+		// is kept for whoever investigates, and only an operator's reconcile lifts it.
 		write.class = Blocked
 		if client.Enabled {
 			disabled := false
@@ -355,7 +385,7 @@ func (r *Reconciler) reconcileField(
 			}); err != nil {
 				return false, true, fmt.Errorf("reconcile: block %s: %w", reg.clientKey, err)
 			}
-			r.logger.ErrorContext(ctx, "a registered client's redirect URIs changed outside this service; the client is disabled",
+			r.logger.ErrorContext(ctx, "a registered client's "+string(field)+" changed outside this service; the client is disabled",
 				slog.String("client_key", reg.clientKey), slog.String("actor", actor))
 		}
 
@@ -400,8 +430,48 @@ func (r *Reconciler) apply(ctx context.Context, reg registration, field FieldCla
 		return after.AccessTokenLifespan == reg.lifespan, nil
 	case RedirectURIs:
 		return sameSet(after.RedirectURIs, reg.redirectURIs) && after.Enabled, nil
+	case ClientKeys:
+		return after.Credential.ByKeys(reg.keys) && after.Enabled, nil
 	}
 	return false, nil
+}
+
+// confirmKeyDrift reads the registration's keys again under the share lock a key change's update
+// lock excludes, then the client again, and reports whether they still differ. It returns what it
+// read, so the finding records the confirmed values.
+func (r *Reconciler) confirmKeyDrift(ctx context.Context, reg registration) (registration, keycloak.Client, bool, error) {
+	if err := r.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		if _, err := tx.Exec(ctx, lockRegistrationStatement, reg.id.String()); err != nil {
+			return fmt.Errorf("reconcile: lock the registration: %w", err)
+		}
+		keys, err := readDesiredKeys(ctx, tx, lockedKeysStatement, reg.id.String())
+		if err != nil {
+			return err
+		}
+		reg.keys = keys[reg.id]
+		return nil
+	}); err != nil {
+		return reg, keycloak.Client{}, true, err
+	}
+	client, err := call(ctx, r.cfg.CallTimeout, func(ctx context.Context) (keycloak.Client, error) {
+		return r.kernel.GetClient(ctx, r.cfg.Realm, reg.client)
+	})
+	if err != nil {
+		return reg, keycloak.Client{}, true, fmt.Errorf("reconcile: read %s again: %w", reg.clientKey, err)
+	}
+	return reg, client, !client.Credential.ByKeys(reg.keys), nil
+}
+
+// keysValue is a credential as a finding records it: the authenticator, whether the JWKS is held,
+// and the kids, sorted. The key material is compared, and left out of the record: it is public, and
+// the kid names it.
+func keysValue(keys []keycloak.JWK, credential keycloak.ClientCredential) any {
+	kids := make([]string, 0, len(keys))
+	for _, key := range keys {
+		kids = append(kids, key.KID)
+	}
+	return map[string]any{"authenticator": credential.Authenticator, "held_jwks": credential.HeldJWKS,
+		"unreadable": credential.Unreadable, "kids": sortedCopy(kids)}
 }
 
 // claim records a new run unless another replica's is running, and returns the instant admin

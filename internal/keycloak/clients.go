@@ -43,6 +43,46 @@ type Client struct {
 	// STD-IAM-002 §3.3 derives every client's lifetime from its audience, and the realm default is
 	// not that derivation.
 	AccessTokenLifespan int
+
+	// Credential is how the client proves itself: its authenticator, whether it takes its keys from
+	// the JWKS held on it, and those keys. The reconciler compares it for a confidential or
+	// workload client (the client_keys field class).
+	Credential ClientCredential
+}
+
+// ClientCredential is a client's authentication configuration as the kernel holds it.
+type ClientCredential struct {
+	// Authenticator is clientAuthenticatorType: client-jwt for a client that proves itself by a
+	// signed assertion, client-secret for one that presents a secret.
+	Authenticator string
+
+	// HeldJWKS is whether the kernel verifies assertions against the JWKS held on the client
+	// (use.jwks.string) rather than one fetched from a URL.
+	HeldJWKS bool
+
+	// Keys are the keys of that JWKS. Unreadable is set when the JWKS does not parse: a JWKS
+	// nobody can read is not the registered one.
+	Keys       []JWK
+	Unreadable bool
+}
+
+// ByKeys reports whether the credential authenticates by exactly the given keys and nothing else:
+// client-jwt, the held JWKS and not a URL, and the same set of keys, compared by kid and key
+// material together so a kid kept over a swapped modulus is still a difference.
+func (c ClientCredential) ByKeys(keys []JWK) bool {
+	if c.Authenticator != clientJWTAuthorizer || !c.HeldJWKS || c.Unreadable || len(c.Keys) != len(keys) {
+		return false
+	}
+	want := map[JWK]bool{}
+	for _, key := range keys {
+		want[key] = true
+	}
+	for _, key := range c.Keys {
+		if !want[key] {
+			return false
+		}
+	}
+	return true
 }
 
 // ClientPatch is a change to a client. A nil field is left as it is.
@@ -391,6 +431,7 @@ func clientFrom(representation map[string]any) (Client, error) {
 		}
 	}
 	attributes, _ := representation["attributes"].(map[string]any)
+	client.Credential = credentialFrom(representation, attributes)
 	if raw, ok := attributes[AttrAccessTokenLifespan].(string); ok && strings.TrimSpace(raw) != "" {
 		lifespan, err := strconv.Atoi(strings.TrimSpace(raw))
 		if err != nil {
@@ -399,6 +440,33 @@ func clientFrom(representation map[string]any) (Client, error) {
 		client.AccessTokenLifespan = lifespan
 	}
 	return client, nil
+}
+
+// credentialFrom reads a client's authentication configuration. A JWKS URL in use is a held JWKS
+// not in use, whatever the string attribute says.
+func credentialFrom(representation, attributes map[string]any) ClientCredential {
+	credential := ClientCredential{Authenticator: stringField(representation, "clientAuthenticatorType")}
+	held, _ := attributes[attrUseJWKSString].(string)
+	byURL, _ := attributes[attrUseJWKSURL].(string)
+	credential.HeldJWKS = held == "true" && byURL != "true"
+	raw, _ := attributes[AttrJWKS].(string)
+	if strings.TrimSpace(raw) == "" {
+		return credential
+	}
+	var set struct {
+		Keys []map[string]any `json:"keys"`
+	}
+	if err := json.Unmarshal([]byte(raw), &set); err != nil {
+		credential.Unreadable = true
+		return credential
+	}
+	for _, key := range set.Keys {
+		kid, _ := key["kid"].(string)
+		n, _ := key["n"].(string)
+		e, _ := key["e"].(string)
+		credential.Keys = append(credential.Keys, JWK{KID: kid, N: n, E: e})
+	}
+	return credential
 }
 
 func stringField(representation map[string]any, name string) string {

@@ -486,3 +486,42 @@ func TestServiceAccountUserIsTheClientsOwnUser(t *testing.T) {
 		t.Errorf("a client without a service account answered %v", err)
 	}
 }
+
+// A client's credential is read as the kernel holds it, and compared by kid and key material
+// together: a kid kept over a swapped modulus is a different key.
+func TestAClientsCredentialIsReadAndCompared(t *testing.T) {
+	admin, _ := newAdmin(t, &kernel{adminBody: `{"id":"c","clientId":"bff","clientAuthenticatorType":"client-jwt",
+	  "attributes":{"use.jwks.string":"true","use.jwks.url":"false",
+	  "jwks.string":"{\"keys\":[{\"kty\":\"RSA\",\"kid\":\"k1\",\"n\":\"bg\",\"e\":\"AQAB\"}]}"}}`})
+	client, err := admin.GetClient(context.Background(), testRealm, "c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := keycloak.JWK{KID: "k1", N: "bg", E: "AQAB"}
+	if !client.Credential.ByKeys([]keycloak.JWK{key}) {
+		t.Errorf("credential %+v does not hold its own key", client.Credential)
+	}
+	for name, keys := range map[string][]keycloak.JWK{
+		"a swapped modulus": {{KID: "k1", N: "other", E: "AQAB"}},
+		"a second key":      {key, {KID: "k2", N: "bh", E: "AQAB"}},
+		"no key":            nil,
+	} {
+		if client.Credential.ByKeys(keys) {
+			t.Errorf("%s compared equal", name)
+		}
+	}
+	for name, body := range map[string]string{
+		"a secret":          `{"id":"c","clientAuthenticatorType":"client-secret","attributes":{"use.jwks.string":"true","jwks.string":"{\"keys\":[{\"kid\":\"k1\",\"n\":\"bg\",\"e\":\"AQAB\"}]}"}}`,
+		"a key URL":         `{"id":"c","clientAuthenticatorType":"client-jwt","attributes":{"use.jwks.string":"true","use.jwks.url":"true","jwks.string":"{\"keys\":[{\"kid\":\"k1\",\"n\":\"bg\",\"e\":\"AQAB\"}]}"}}`,
+		"an unreadable set": `{"id":"c","clientAuthenticatorType":"client-jwt","attributes":{"use.jwks.string":"true","jwks.string":"not json"}}`,
+	} {
+		other, _ := newAdmin(t, &kernel{adminBody: body})
+		read, err := other.GetClient(context.Background(), testRealm, "c")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if read.Credential.ByKeys([]keycloak.JWK{key}) {
+			t.Errorf("%s compared as the registered key", name)
+		}
+	}
+}

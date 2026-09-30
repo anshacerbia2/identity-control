@@ -734,7 +734,7 @@ table "registration_finding" {
   }
 
   check "registration_finding_field_check" {
-    expr = "field_class IS NULL OR field_class IN ('redirect_uris', 'token_lifespan', 'audience_scope', 'signing_algorithm', 'profile')"
+    expr = "field_class IS NULL OR field_class IN ('redirect_uris', 'token_lifespan', 'audience_scope', 'signing_algorithm', 'profile', 'client_keys')"
   }
 
   check "registration_finding_class_check" {

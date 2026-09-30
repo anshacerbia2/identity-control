@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-003
   title: Protocol Client and Protected-Resource Registration
   owner: Core Platform Team
-  version: 1.13.0
+  version: 1.14.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -250,7 +250,7 @@ CREATE TABLE identity.registration_finding (
     resolution_reason TEXT,
     CONSTRAINT registration_finding_field_check
         CHECK (field_class IS NULL OR field_class IN
-            ('redirect_uris', 'token_lifespan', 'audience_scope', 'signing_algorithm', 'profile')),
+            ('redirect_uris', 'token_lifespan', 'audience_scope', 'signing_algorithm', 'profile', 'client_keys')),
     CONSTRAINT registration_finding_class_check
         CHECK (finding_class IN
             ('repaired', 'blocked', 'sanctioned', 'unattributed', 'missing', 'recreated', 'unmanaged')),
@@ -669,11 +669,22 @@ as the actor of a change. More than 10,000 client events in one window is read a
 attribution unavailable, because attributing from part of the record could name the
 wrong actor.
 
-**Built so far.** Two field classes are compared: `token_lifespan` and
-`redirect_uris`, the two the drift proof exercises. `audience_scope`,
-`signing_algorithm` and `profile` are designed above and not compared yet. Client key
-registration is built, so registrations now hold keys, and `client_keys` is the next field
-class to compare.
+**A client-key divergence is confirmed before it is blocked.** This service's own rotation and
+revocation write the kernel's JWKS inside the transaction that holds the registration's row lock,
+before that transaction commits its rows. A sweep that read the rows before the commit and the
+client after the kernel write would see a difference nobody made. So a `client_keys` divergence is
+read again: the registration's keys under a share lock on its row, which waits for a key change in
+flight and sees what it committed, and then the client. Only a divergence that survives is blocked.
+
+**No drift exception covers `client_keys`.** A key a console change would add is a credential for
+whoever holds its private key, and the path to add one on purpose is `POST .../keys`, which records
+who registered it. A drift exception's field classes are therefore unchanged.
+
+**Built so far.** Three field classes are compared: `token_lifespan`, `redirect_uris`, the two the
+drift proof exercises first, and `client_keys`, for a confidential or workload client: its
+authenticator, whether it takes its keys from the JWKS held on it, and the keys in it, compared by
+`kid` and key material together. `audience_scope`, `signing_algorithm` and `profile` are designed
+above and not compared yet.
 
 - **An absent client is held, not recreated.** It is recorded as one open `missing`
   finding naming whoever the deletion's admin event names, and every sweep leaves it
