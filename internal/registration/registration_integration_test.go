@@ -201,8 +201,9 @@ func TestAPublicClientIsCreatedFromDesiredState(t *testing.T) {
 		!slices.Equal(spec.RedirectURIs, req.RedirectURIs) {
 		t.Errorf("client spec = %+v", spec)
 	}
-	if !slices.Equal(scopes, []string{"scope-internal"}) {
-		t.Errorf("default scopes = %v, want exactly the internal managed scope", scopes)
+	if !sameIDs(scopes, "scope-acr", "scope-basic", "scope-internal") || len(h.kernel.OptionalScopes(keycloak.ClientUUID(client))) != 0 {
+		t.Errorf("default scopes = %v, optional %v; want basic, acr and the internal managed scope, and no optional one",
+			scopes, h.kernel.OptionalScopes(keycloak.ClientUUID(client)))
 	}
 
 	read, err := h.service.Get(context.Background(), registration.ID)
@@ -357,7 +358,7 @@ func TestRecoveryAdoptsAClientWhoseCreationWasNotConfirmed(t *testing.T) {
 	if state != "active" || len(h.clientsNamed("lost-response")) != 1 || h.clientsNamed("lost-response")[0].ID != keycloak.ClientUUID(client) {
 		t.Errorf("after recovery: state %s, client %s, %d client(s)", state, client, len(h.clientsNamed("lost-response")))
 	}
-	if _, scopes, _ := h.kernel.Spec(keycloak.ClientUUID(client)); !slices.Equal(scopes, []string{"scope-internal"}) {
+	if _, scopes, _ := h.kernel.Spec(keycloak.ClientUUID(client)); !sameIDs(scopes, "scope-acr", "scope-basic", "scope-internal") {
 		t.Errorf("the adopted client's scopes = %v", scopes)
 	}
 }
@@ -395,7 +396,7 @@ func TestRecreateBuildsADeletedClientAgain(t *testing.T) {
 	if _, after := h.state(registration.ID); after != string(client) || after == before {
 		t.Errorf("kc_client_id is %s after recreation, want the new client %s", after, client)
 	}
-	if spec, scopes, ok := h.kernel.Spec(client); !ok || !spec.Public || len(scopes) != 1 {
+	if spec, scopes, ok := h.kernel.Spec(client); !ok || !spec.Public || !sameIDs(scopes, "scope-acr", "scope-basic", "scope-internal") {
 		t.Errorf("recreated client spec %+v scopes %v", spec, scopes)
 	}
 }
@@ -409,4 +410,9 @@ func TestAnUnknownRegistrationIsNotFound(t *testing.T) {
 	if _, err := h.service.Recreate(context.Background(), nobody); !errors.Is(err, ErrNotFound) {
 		t.Errorf("Recreate answered %v", err)
 	}
+}
+
+// sameIDs reports whether the scope identifiers are exactly these, in any order.
+func sameIDs(got []string, want ...string) bool {
+	return slices.Equal(sortedStrings(got), sortedStrings(want))
 }

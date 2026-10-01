@@ -257,6 +257,9 @@ func (r *Reconciler) Resolve(ctx context.Context, resolution Resolution) error {
 			// key or a secret the console added stops authenticating before the client is re-enabled.
 			keys, enabled := append([]keycloak.JWK{}, t.reg.keys...), true
 			patch.Keys, patch.Enabled = &keys, &enabled
+		case TokenFormat:
+			clientKey := t.reg.clientKey
+			patch.TokenFormat = &clientKey
 		}
 		converged, err := r.apply(ctx, t.reg, t.field, patch)
 		if err != nil {

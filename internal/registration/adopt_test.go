@@ -7,8 +7,13 @@ import (
 )
 
 func adoptable(converge ...string) AdoptRequest {
-	return AdoptRequest{Request: Request{ClientKey: "bff", RedirectURIs: []string{"https://bff.example.com/cb"}},
-		Converge: converge}
+	return AdoptRequest{Request: Request{ClientKey: "bff", Profile: ProfileConfidential, AudienceClass: "internal",
+		RedirectURIs: []string{"https://bff.example.com/cb"}}, Converge: converge}
+}
+
+// bffScopes are the sets a confidential internal client holds (tokenprofile.go).
+func bffScopes() ScopeSets {
+	return ScopeSets{Default: []string{"acr", "basic", "scnehaux-internal"}, Optional: []string{"scnehaux-profile"}}
 }
 
 var bffKey = keycloak.JWK{KID: "k1", N: "bg", E: "AQAB"}
@@ -16,7 +21,7 @@ var bffKey = keycloak.JWK{KID: "k1", N: "bg", E: "AQAB"}
 func runningBFF() keycloak.Client {
 	return keycloak.Client{ID: "c", ClientID: "bff", Enabled: true, RedirectURIs: []string{"https://bff.example.com/cb"},
 		AccessTokenLifespan: 240, Credential: keycloak.ClientCredential{Authenticator: "client-jwt", HeldJWKS: true,
-			Keys: []keycloak.JWK{bffKey}}}
+			Keys: []keycloak.JWK{bffKey}}, RFC9068: true, ClientIDClaim: "bff"}
 }
 
 func differs(plan Plan, class string) bool {
@@ -30,7 +35,7 @@ func differs(plan Plan, class string) bool {
 
 // A client that already runs as declared is adoptable with nothing to converge.
 func TestAMatchingClientIsAdoptable(t *testing.T) {
-	plan := planAdoption(adoptable(), runningBFF(), []string{"scnehaux-internal"}, "scnehaux-internal", 240,
+	plan := planAdoption(adoptable(), runningBFF(), bffScopes(), "scnehaux-internal", 240,
 		[]keycloak.JWK{bffKey})
 	if !plan.Adoptable || plan.Refusal != "" {
 		t.Errorf("plan = %+v", plan)
@@ -59,10 +64,12 @@ func TestThePlanRefusesWhatTheDeclarationDoesNotMatch(t *testing.T) {
 		"a lifespan, named":         {func(c *keycloak.Client) { c.AccessTokenLifespan = 300 }, []string{ClassTokenLifespan}, ClassTokenLifespan, true},
 		"disabled, not named":       {func(c *keycloak.Client) { c.Enabled = false }, nil, ClassEnabled, false},
 		"disabled, named":           {func(c *keycloak.Client) { c.Enabled = false }, []string{ClassEnabled}, ClassEnabled, true},
+		"no at+jwt, not named":      {func(c *keycloak.Client) { c.RFC9068 = false }, nil, ClassTokenFormat, false},
+		"no client_id, named":       {func(c *keycloak.Client) { c.ClientIDClaim = "" }, []string{ClassTokenFormat}, ClassTokenFormat, true},
 	} {
 		client := runningBFF()
 		c.change(&client)
-		plan := planAdoption(adoptable(c.converge...), client, []string{"scnehaux-internal"}, "scnehaux-internal", 240,
+		plan := planAdoption(adoptable(c.converge...), client, bffScopes(), "scnehaux-internal", 240,
 			[]keycloak.JWK{bffKey})
 		if plan.Adoptable != c.adoptable || !differs(plan, c.class) {
 			t.Errorf("%s: adoptable %v, %s differs %v; plan %+v", name, plan.Adoptable, c.class, differs(plan, c.class), plan)
@@ -72,8 +79,15 @@ func TestThePlanRefusesWhatTheDeclarationDoesNotMatch(t *testing.T) {
 		}
 	}
 
-	missingScope := planAdoption(adoptable(), runningBFF(), []string{"acr"}, "scnehaux-internal", 240, []keycloak.JWK{bffKey})
-	if missingScope.Adoptable || !differs(missingScope, ClassAudienceScope) {
-		t.Errorf("a client without its managed scope was adoptable: %+v", missingScope)
+	for name, scopes := range map[string]ScopeSets{
+		"without its managed scope":   {Default: []string{"acr", "basic"}, Optional: []string{"scnehaux-profile"}},
+		"holding the profile scope":   {Default: []string{"acr", "basic", "profile", "scnehaux-internal"}, Optional: []string{"scnehaux-profile"}},
+		"holding email as optional":   {Default: []string{"acr", "basic", "scnehaux-internal"}, Optional: []string{"email", "scnehaux-profile"}},
+		"without its sign-in profile": {Default: []string{"acr", "basic", "scnehaux-internal"}, Optional: []string{}},
+	} {
+		plan := planAdoption(adoptable(), runningBFF(), scopes, "scnehaux-internal", 240, []keycloak.JWK{bffKey})
+		if plan.Adoptable || !differs(plan, ClassAudienceScope) {
+			t.Errorf("a client %s was adoptable: %+v", name, plan)
+		}
 	}
 }

@@ -163,8 +163,17 @@ func (h *harness) caller() registered {
 	h.kernel.Put(keycloak.Client{ID: resource.client, ClientID: "identity-control", Enabled: true})
 	r := h.register("identity-control-caller", "confidential", "", []string{"identity-control"}, []string{callbackURI})
 	h.kernel.Put(keycloak.Client{ID: r.client, ClientID: "identity-control-caller", Enabled: true,
-		RedirectURIs: []string{callbackURI}, AccessTokenLifespan: 240, Credential: heldBy(r.key)})
+		RedirectURIs: []string{callbackURI}, AccessTokenLifespan: 240, Credential: heldBy(r.key),
+		RFC9068: true, ClientIDClaim: "identity-control-caller"})
+	h.holdsItsScopes(r.client, "confidential")
 	return r
+}
+
+// holdsItsScopes gives a client the scope sets its profile holds (TDD-identity-control-003 §Profiles),
+// for an internal-audience registration the harness stored.
+func (h *harness) holdsItsScopes(client keycloak.ClientUUID, profile string) {
+	desired, _ := clientregistration.DesiredScopes(profile, "internal")
+	h.kernel.HoldScopes(client, desired.Default, desired.Optional)
 }
 
 func (h *harness) sweep() Run {
@@ -843,7 +852,8 @@ func TestAKeylessClientIsNotComparedOnKeys(t *testing.T) {
 	h := newHarness(t)
 	web := h.register("keyless-web", "public", "", nil, []string{callbackURI})
 	h.kernel.Put(keycloak.Client{ID: web.client, ClientID: "keyless-web", Enabled: true,
-		RedirectURIs: []string{callbackURI}, AccessTokenLifespan: 240})
+		RedirectURIs: []string{callbackURI}, AccessTokenLifespan: 240, RFC9068: true, ClientIDClaim: "keyless-web"})
+	h.holdsItsScopes(web.client, "public")
 	h.sweep()
 	if !h.live(web.client).Enabled || len(h.findings(web.client)) != 0 {
 		t.Error("a public client was compared on keys it does not hold")
@@ -1058,5 +1068,64 @@ func TestARetiredRegistrationsFindingsConverge(t *testing.T) {
 	h.sweep()
 	if f := h.findings(caller.client); len(f) != 1 || f[0].convergedAt == nil {
 		t.Errorf("findings after the retirement = %+v, want the missing finding converged", f)
+	}
+}
+
+// A client holding a built-in scope its profile does not, or lacking the at+jwt attribute or its
+// client_id mapper, differs in audience_scope or token_format. Attributed to a console change, it is
+// repaired to the sets; with no event to attribute it to, it waits for an operator, who applies them.
+func TestTheTokenProfileIsHeldAndRepaired(t *testing.T) {
+	h := newHarness(t)
+	caller := h.caller()
+	h.sweep()
+	if f := h.findings(caller.client); len(f) != 0 {
+		t.Fatalf("a client registered with its token profile has findings: %+v", f)
+	}
+
+	h.tick(time.Second)
+	h.kernel.ConsoleChange(admin, caller.client, func(c *keycloak.Client) { c.ClientIDClaim = "" })
+	h.kernel.AttachScope(caller.client, "scope-profile")
+	h.tick(time.Second)
+	h.sweep()
+	live := h.live(caller.client)
+	if live.ClientIDClaim != "identity-control-caller" {
+		t.Errorf("the client_id mapper was not repaired: %q", live.ClientIDClaim)
+	}
+	repaired := map[string]bool{}
+	for _, f := range h.findings(caller.client) {
+		if f.class == string(Repaired) && f.convergedAt != nil {
+			repaired[f.field] = true
+		}
+	}
+	if !repaired[string(TokenFormat)] || !repaired[string(AudienceScope)] {
+		t.Errorf("findings = %+v, want token_format and audience_scope repaired and converged", h.findings(caller.client))
+	}
+	defaults, err := h.kernel.DefaultClientScopes(context.Background(), realm, caller.client)
+	if err != nil || slices.Contains(defaults, "profile") {
+		t.Errorf("the profile scope is still attached: %v, %v", defaults, err)
+	}
+
+	// A difference no admin event explains is left for an operator.
+	h.tick(time.Minute)
+	h.kernel.ConsoleChange("", caller.client, func(c *keycloak.Client) { c.RFC9068 = false })
+	h.tick(time.Second)
+	h.sweep()
+	var waiting *findingRow
+	for _, f := range h.findings(caller.client) {
+		if f.field == string(TokenFormat) && f.class == string(Unattributed) && f.convergedAt == nil {
+			found := f
+			waiting = &found
+		}
+	}
+	if waiting == nil {
+		t.Fatalf("findings = %+v, want an open unattributed token_format finding", h.findings(caller.client))
+	}
+	operator, _ := id.NewV7()
+	if err := h.reconciler.Resolve(context.Background(), Resolution{Findings: []id.UUID{waiting.id}, ResolvedBy: operator,
+		Reason: "apply the registered token format"}); err != nil {
+		t.Fatal(err)
+	}
+	if !h.live(caller.client).RFC9068 {
+		t.Error("the operator's reconcile did not restore the at+jwt attribute")
 	}
 }

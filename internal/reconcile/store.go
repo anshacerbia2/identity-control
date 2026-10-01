@@ -47,7 +47,8 @@ var desiredStatement = `SELECT r.registration_id::text,
        coalesce(r.redirect_uris, '{}'::text[]),
        ` + clientregistration.LifespanSQL("r.realm", "r.audience") + `,
        r.state,
-       r.suspended_at
+       r.suspended_at,
+       r.audience_class
 FROM identity.client_registration r
 WHERE r.realm = $1 AND r.state IN ('active', 'suspended') AND r.kc_client_id IS NOT NULL
 ORDER BY r.client_key`
@@ -127,7 +128,7 @@ func readRegistrations(ctx context.Context, tx db.Tx, realm keycloak.Realm) ([]r
 			clientID string
 		)
 		if err := rows.Scan(&raw, &reg.clientKey, &clientID, &reg.profile, &reg.redirectURIs, &reg.lifespan, &reg.state,
-			&reg.suspendedAt); err != nil {
+			&reg.suspendedAt, &reg.audienceClass); err != nil {
 			return nil, fmt.Errorf("reconcile: scan desired state: %w", err)
 		}
 		parsed, err := id.Parse(raw)

@@ -78,8 +78,9 @@ func TestAConfidentialClientIsCreatedHoldingItsKey(t *testing.T) {
 	}
 	spec, scopes, ok := h.kernel.Spec(client)
 	if !ok || !spec.Confidential || !slices.Equal(spec.RedirectURIs, []string{"https://bff.example.com/callback"}) ||
-		!slices.Equal(scopes, []string{"scope-internal"}) {
-		t.Errorf("client spec = %+v, scopes %v", spec, scopes)
+		!sameIDs(scopes, "scope-acr", "scope-basic", "scope-internal") ||
+		!sameIDs(h.kernel.OptionalScopes(client), "scope-sign-in") {
+		t.Errorf("client spec = %+v, scopes %v and optional %v", spec, scopes, h.kernel.OptionalScopes(client))
 	}
 	if kids := h.kernelKIDs(client); !slices.Equal(kids, []string{key.kid}) {
 		t.Errorf("the kernel holds %v, want the registered key", kids)
@@ -142,10 +143,10 @@ func TestAWorkloadWaitsForTheKernelsWorkloadScope(t *testing.T) {
 	if _, err := h.service.Register(context.Background(), req); !errors.Is(err, ErrScopeUndeclared) {
 		t.Fatalf("a workload answered %v, want ErrScopeUndeclared", err)
 	}
-	// The realm attaches its default scopes to every new client, acr among them, as the real kernel
-	// does. A workload must not keep acr: it puts acr=1 into a client credentials token.
+	// A realm made before identity-kernel narrowed its defaults attaches profile and acr to every new
+	// client, as the real kernel did. A workload keeps neither: acr puts acr=1 into a client credentials
+	// token, and profile puts names into it.
 	h.kernel.Scopes["scnehaux-workload"] = "scope-workload"
-	h.kernel.Scopes["acr"] = "scope-acr"
 	h.kernel.RealmDefaults = []string{"scope-profile", "scope-acr"}
 	idempotencyKey, _ := id.NewV7()
 	req.IdempotencyKey = idempotencyKey.String()
@@ -155,14 +156,15 @@ func TestAWorkloadWaitsForTheKernelsWorkloadScope(t *testing.T) {
 	}
 	_, client := h.state(workload.ID)
 	if spec, scopes, _ := h.kernel.Spec(keycloak.ClientUUID(client)); !spec.Workload || len(spec.RedirectURIs) != 0 ||
-		len(spec.Keys) != 1 || !slices.Equal(scopes, []string{"scope-profile", "scope-workload"}) {
-		t.Errorf("workload spec = %+v, scopes %v; want the managed scope and no acr", spec, scopes)
+		len(spec.Keys) != 1 || !sameIDs(scopes, "scope-basic", "scope-service-account", "scope-workload") {
+		t.Errorf("workload spec = %+v, scopes %v; want basic, service_account and the managed scope, and no acr or profile", spec, scopes)
 	}
 
-	// A confidential client keeps the realm's acr: STD-IAM-002 permits it outside the workload profile.
+	// A confidential client keeps acr, which STD-IAM-002 permits outside the workload profile, and loses
+	// profile, which puts personal data into an access token.
 	registration, bff := h.registerConfidential("keeps-acr", testKey(t))
-	if _, scopes, _ := h.kernel.Spec(bff); !slices.Contains(scopes, "scope-acr") {
-		t.Errorf("a confidential client lost acr: %v (registration %s)", scopes, registration.ID)
+	if _, scopes, _ := h.kernel.Spec(bff); !sameIDs(scopes, "scope-acr", "scope-basic", "scope-internal") {
+		t.Errorf("a confidential client holds %v (registration %s)", scopes, registration.ID)
 	}
 
 	// A workload's client is not recreated alone: its identity lives on the service-account user a

@@ -85,6 +85,11 @@ type kernel struct {
 	lastTokenForm url.Values
 	// lastPutBody is the body of the last PUT, for a call that reads back after it writes.
 	lastPutBody []byte
+	// route, when set, answers a request by method and path, for a call that makes several requests.
+	route func(method, path string) (int, string)
+	// calls are every admin request, as "METHOD path", with the bodies sent.
+	calls  []string
+	bodies [][]byte
 }
 
 func (k *kernel) handler() http.Handler {
@@ -126,6 +131,14 @@ func (k *kernel) handler() http.Handler {
 			k.lastPutBody = k.lastBody
 		}
 
+		k.calls = append(k.calls, r.Method+" "+r.URL.Path)
+		k.bodies = append(k.bodies, k.lastBody)
+		if k.route != nil {
+			status, body := k.route(r.Method, r.URL.Path)
+			w.WriteHeader(status)
+			_, _ = io.WriteString(w, body)
+			return
+		}
 		if k.adminLocation != "" {
 			w.Header().Set("Location", k.adminLocation)
 		}
