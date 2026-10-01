@@ -333,6 +333,7 @@ type stubRegistrar struct {
 	// The ownership surface: who owns what, and what it was asked.
 	owners  map[id.UUID]id.UUID
 	granted *registration.OwnershipChange
+	readErr error // what Owns and Mine answer
 }
 
 func (s *stubRegistrar) lifecycle(action string, change registration.StateChange) (registration.Registration, error) {
@@ -361,10 +362,13 @@ func (s *stubRegistrar) ExpiringKeys(context.Context) (registration.Expiring, er
 }
 
 func (s *stubRegistrar) Owns(_ context.Context, principal, registrationID id.UUID) (bool, error) {
-	return s.owners[registrationID] == principal, nil
+	return s.owners[registrationID] == principal, s.readErr
 }
 
 func (s *stubRegistrar) Mine(_ context.Context, principal id.UUID) ([]registration.Registration, error) {
+	if s.readErr != nil {
+		return nil, s.readErr
+	}
 	out := []registration.Registration{}
 	for registrationID, owner := range s.owners {
 		if owner == principal {

@@ -4,6 +4,7 @@ package httpapi_test
 // a registration it owns and nothing else, and every other route refuses it before reading anything.
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"github.com/anshacerbia2/foundation-platform/id"
 
 	"github.com/anshacerbia2/identity-control/internal/httpapi"
+	"github.com/anshacerbia2/identity-control/internal/registration"
 )
 
 func TestAnOwnerReachesOnlyTheRegistrationsItOwns(t *testing.T) {
@@ -122,5 +124,121 @@ func TestAProviderGrantsOwnershipWithAReason(t *testing.T) {
 	if got := registrar.granted; got == nil || got.RegistrationID != registrationID || got.Principal != owner ||
 		got.ChangedBy != caller || got.Reason != "the orders team owns this BFF" {
 		t.Errorf("granted %+v", got)
+	}
+}
+
+func TestAProviderRevokesOwnershipWithAReason(t *testing.T) {
+	registrationID, owner := mustUUID(t), mustUUID(t)
+	base := "/v1/registrations/" + registrationID.String() + "/owners/"
+	for name, c := range map[string]struct {
+		path, reason string
+		want         int
+	}{
+		"no reason":          {base + owner.String() + ":revoke", "", http.StatusBadRequest},
+		"an unknown action":  {base + owner.String() + ":delete", "r", http.StatusNotFound},
+		"a malformed owner":  {base + "nope:revoke", "r", http.StatusBadRequest},
+		"a malformed client": {"/v1/registrations/nope/owners/" + owner.String() + ":revoke", "r", http.StatusBadRequest},
+	} {
+		registrar := &stubRegistrar{}
+		r, _ := asPrincipal(t, httptest.NewRequest(http.MethodPost, c.path, nil))
+		if c.reason != "" {
+			r.Header.Set(httpapi.AdministrativeReasonHeader, c.reason)
+		}
+		if w := serve(registrarHandler(t, registrar), r); w.Code != c.want || registrar.granted != nil {
+			t.Errorf("%s answered %d, want %d", name, w.Code, c.want)
+		}
+	}
+
+	registrar := &stubRegistrar{}
+	r, caller := asPrincipal(t, httptest.NewRequest(http.MethodPost, base+owner.String()+":revoke", nil))
+	r.Header.Set(httpapi.AdministrativeReasonHeader, "moved team")
+	if w := serve(registrarHandler(t, registrar), r); w.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", w.Code, w.Body)
+	}
+	if got := registrar.granted; got == nil || got.Principal != owner || got.ChangedBy != caller || got.Reason != "moved team" {
+		t.Errorf("revoked %+v", got)
+	}
+}
+
+func TestOwnershipRefusalsAreMappedToTheirStatus(t *testing.T) {
+	registrationID, owner := mustUUID(t), mustUUID(t)
+	for name, c := range map[string]struct {
+		err  error
+		want int
+	}{
+		"an ineligible owner":   {registration.ErrOwnerNotEligible, http.StatusBadRequest},
+		"an incomplete request": {registration.ErrInvalid, http.StatusBadRequest},
+		"already an owner":      {registration.ErrAlreadyOwner, http.StatusConflict},
+		"too few owners":        {registration.ErrTooFewOwners, http.StatusConflict},
+		"a retired client":      {registration.ErrInvalidTransition, http.StatusConflict},
+		"not an owner":          {registration.ErrOwnerNotFound, http.StatusNotFound},
+		"an unknown client":     {registration.ErrNotFound, http.StatusNotFound},
+		"a database failure":    {errors.New("connection refused"), http.StatusInternalServerError},
+	} {
+		handler := registrarHandler(t, &stubRegistrar{err: c.err})
+		grant, _ := asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/registrations/"+registrationID.String()+"/owners",
+			strings.NewReader(`{"principal_id":"`+owner.String()+`"}`)))
+		grant.Header.Set(httpapi.AdministrativeReasonHeader, "r")
+		if w := serve(handler, grant); w.Code != c.want {
+			t.Errorf("a grant meeting %s answered %d, want %d", name, w.Code, c.want)
+		}
+		list, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, "/v1/registrations/"+registrationID.String()+"/owners", nil))
+		if w := serve(handler, list); w.Code != c.want {
+			t.Errorf("a listing meeting %s answered %d, want %d", name, w.Code, c.want)
+		}
+	}
+	if strings.Contains(serve(registrarHandler(t, &stubRegistrar{err: errors.New("connection refused")}),
+		func() *http.Request {
+			r, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, "/v1/registrations/"+registrationID.String()+"/owners", nil))
+			return r
+		}()).Body.String(), "connection refused") {
+		t.Error("a database error reached the response")
+	}
+}
+
+func TestOwnerRoutesRefuseWhatTheyCannotRead(t *testing.T) {
+	owner := mustUUID(t)
+	handler := registrarHandler(t, &stubRegistrar{})
+	if w := serve(handler, httptest.NewRequest(http.MethodGet, "/v1/registrations:mine", nil)); w.Code != http.StatusUnauthorized {
+		t.Errorf("mine without a caller answered %d, want 401", w.Code)
+	}
+	if w := serve(handler, httptest.NewRequest(http.MethodGet, "/v1/registrations/"+owner.String()+"/keys", nil)); w.Code != http.StatusUnauthorized {
+		t.Errorf("an owner route without a caller answered %d, want 401", w.Code)
+	}
+	if w := serve(handler, asOwner(httptest.NewRequest(http.MethodGet, "/v1/registrations/nope/keys", nil), owner)); w.Code != http.StatusBadRequest {
+		t.Errorf("an owner naming a malformed registration answered %d, want 400", w.Code)
+	}
+	if w := serve(handler, httptest.NewRequest(http.MethodGet, "/v1/registrations", nil)); w.Code != http.StatusUnauthorized {
+		t.Errorf("a provider route without a caller answered %d, want 401", w.Code)
+	}
+}
+
+func TestOwnershipRoutesRefuseMalformedRequests(t *testing.T) {
+	registrationID := mustUUID(t)
+	handler := registrarHandler(t, &stubRegistrar{})
+	for name, c := range map[string]struct{ method, path, body string }{
+		"a body that is not an ownership": {http.MethodPost, "/v1/registrations/" + registrationID.String() + "/owners", `{"owner":1}`},
+		"a malformed principal":           {http.MethodPost, "/v1/registrations/" + registrationID.String() + "/owners", `{"principal_id":"nope"}`},
+		"a malformed registration":        {http.MethodPost, "/v1/registrations/nope/owners", `{"principal_id":"` + mustUUID(t).String() + `"}`},
+		"a listing of a malformed client": {http.MethodGet, "/v1/registrations/nope/owners", ""},
+	} {
+		r, _ := asPrincipal(t, httptest.NewRequest(c.method, c.path, strings.NewReader(c.body)))
+		r.Header.Set(httpapi.AdministrativeReasonHeader, "r")
+		if w := serve(handler, r); w.Code != http.StatusBadRequest {
+			t.Errorf("%s answered %d, want 400", name, w.Code)
+		}
+	}
+}
+
+// A failed ownership read admits nobody and discloses nothing.
+func TestAFailedOwnershipReadAdmitsNobody(t *testing.T) {
+	owner, registrationID := mustUUID(t), mustUUID(t)
+	handler := registrarHandler(t, &stubRegistrar{readErr: errors.New("connection refused"),
+		owners: map[id.UUID]id.UUID{registrationID: owner}})
+	for _, path := range []string{"/v1/registrations/" + registrationID.String() + "/keys", "/v1/registrations:mine"} {
+		w := serve(handler, asOwner(httptest.NewRequest(http.MethodGet, path, nil), owner))
+		if w.Code != http.StatusInternalServerError || strings.Contains(w.Body.String(), "connection refused") {
+			t.Errorf("%s answered %d: %s", path, w.Code, w.Body)
+		}
 	}
 }
