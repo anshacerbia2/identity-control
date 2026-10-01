@@ -53,8 +53,8 @@ func (h *harness) setMapping(principalID id.UUID, state string) {
 func TestAnOwnerIsAnActivePersonAndOwnsWhatItWasGranted(t *testing.T) {
 	h := newHarness(t)
 	ctx := context.Background()
-	registration := h.resource("owned-api", "internal")
-	other := h.resource("other-api", "internal")
+	registration := h.resource("owned-api", "L1")
+	other := h.resource("other-api", "L1")
 	alice, workload := h.person("human"), h.person("workload")
 	change := func(principal id.UUID) OwnershipChange {
 		return OwnershipChange{RegistrationID: registration.ID, Principal: principal, ChangedBy: h.caller, Reason: "the orders team"}
@@ -98,7 +98,7 @@ func TestAProductionRegistrationKeepsTwoOwners(t *testing.T) {
 	h := newHarness(t)
 	ctx := context.Background()
 	h.service.cfg.Production = true
-	registration := h.resource("production-api", "internal")
+	registration := h.resource("production-api", "L1")
 	alice, bob, carol := h.person("human"), h.person("human"), h.person("human")
 	for _, principal := range []id.UUID{alice, bob} {
 		if _, err := h.service.GrantOwner(ctx, OwnershipChange{RegistrationID: registration.ID, Principal: principal,
