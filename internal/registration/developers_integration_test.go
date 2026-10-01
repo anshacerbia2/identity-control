@@ -54,6 +54,9 @@ func TestAProviderGrantsTheStandingToAnActivePerson(t *testing.T) {
 	if is, err := h.service.IsApplicationDeveloper(ctx, developer); err != nil || !is {
 		t.Fatalf("the grantee holds no standing: %v, %v", is, err)
 	}
+	if standing, err := h.service.Standing(ctx, developer); err != nil || !standing.ApplicationDeveloper || standing.Environment != "non-production" {
+		t.Errorf("the grantee's standing reads %+v, %v", standing, err)
+	}
 	listed, err := h.service.ApplicationDevelopers(ctx)
 	found := false
 	for _, grant := range listed {

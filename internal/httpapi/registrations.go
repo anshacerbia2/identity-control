@@ -72,6 +72,7 @@ type Registrar interface {
 	// Application developer standing (ADR-IAM-003 §5.3, TDD-identity-control-003 §Application
 	// Developers).
 	IsApplicationDeveloper(ctx context.Context, principal id.UUID) (bool, error)
+	Standing(ctx context.Context, principal id.UUID) (registration.Standing, error)
 	ApplicationDevelopers(ctx context.Context) ([]registration.Developer, error)
 	GrantApplicationDeveloper(ctx context.Context, change registration.DeveloperChange) error
 	RevokeApplicationDeveloper(ctx context.Context, change registration.DeveloperChange) error

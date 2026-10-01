@@ -270,3 +270,24 @@ func uniqueStrings(values []string) []string {
 	}
 	return out
 }
+
+// Standing is what a caller may do with registrations beyond what it owns, as a console needs to
+// know before it offers anything: whether it holds application developer standing, and whether this
+// deployment is production, where a developer creates nothing.
+type Standing struct {
+	ApplicationDeveloper bool   `json:"application_developer"`
+	Environment          string `json:"environment"`
+}
+
+// Standing reads the Principal's standing.
+func (s *Service) Standing(ctx context.Context, principal id.UUID) (Standing, error) {
+	developer, err := s.IsApplicationDeveloper(ctx, principal)
+	if err != nil {
+		return Standing{}, err
+	}
+	environment := "non-production"
+	if s.cfg.Production {
+		environment = "production"
+	}
+	return Standing{ApplicationDeveloper: developer, Environment: environment}, nil
+}

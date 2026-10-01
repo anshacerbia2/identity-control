@@ -97,8 +97,8 @@ func TestEveryAPIRouteIsWrapped(t *testing.T) {
 	}
 	for _, m := range matches {
 		pattern, handler := m[1], strings.TrimSpace(m[2])
-		if pattern == "GET /v1/registrations:mine" {
-			continue // the caller's own ownerships, for any caller
+		if pattern == "GET /v1/registrations:mine" || pattern == "GET /v1/registrations:standing" {
+			continue // the caller's own ownerships and standing, for any caller
 		}
 		if pattern == "POST /v1/registrations" && strings.HasPrefix(handler, "creator(") {
 			continue // a provider, or an application developer within its bounds

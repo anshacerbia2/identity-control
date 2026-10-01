@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-003
   title: Protocol Client and Protected-Resource Registration
   owner: Core Platform Team
-  version: 1.21.0
+  version: 1.22.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -429,6 +429,7 @@ GET    /v1/registrations/{registration_id}/findings
 GET    /v1/registrations:drift
 GET    /v1/registrations:expiring-keys
 GET    /v1/registrations:mine
+GET    /v1/registrations:standing
 POST   /v1/registrations:reconcile
 POST   /v1/registrations/{registration_id}/owners
 GET    /v1/registrations/{registration_id}/owners
@@ -1053,6 +1054,7 @@ without `provider_scope` is an owner's (`TDD-identity-control-001` §Caller Toke
 | Route | Provider | Owner |
 | :-- | :-- | :-- |
 | `GET /v1/registrations:mine` | its own owned registrations | its own owned registrations |
+| `GET /v1/registrations:standing` | its own standing | its own standing |
 | `GET /v1/registrations/{id}`, `/keys`, `/findings`, `/owners` | any | owned only |
 | `POST /v1/registrations/{id}/keys` (rotate), `/keys/{key_id}:revoke` | any | owned only |
 | `POST /v1/registrations/{id}:suspend`, `:restore` | any | owned only |
@@ -1215,6 +1217,12 @@ provider.
 accepts its tokens, and the resource's owners did not agree to a client they do not know. A
 provider registers a client for another team's resource until that resource's owners can approve
 one, which is the same approval a production change takes.
+
+`GET /v1/registrations:standing` answers any authenticated caller with its own standing:
+`{"provider": bool, "application_developer": bool, "environment": "production" | "non-production"}`.
+A console reads it to offer registration only where the API would accept one, so it never shows a
+control the API refuses. It names no other Principal, and the environment is the deployment's
+setting, which every refusal in production already states.
 
 The standing is checked twice: before the request is read, where every provider route is refused,
 and again inside the transaction that records the registration, so a standing revoked between the
