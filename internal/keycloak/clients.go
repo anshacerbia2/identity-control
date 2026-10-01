@@ -31,6 +31,15 @@ type ClientUUID string
 // in seconds.
 const AttrAccessTokenLifespan = "access.token.lifespan"
 
+// AttrRFC9068HeaderType makes the kernel write the header typ at+jwt into the client's access tokens
+// (RFC 9068 §2.1). It is a per-client setting, off by default (Keycloak 26.2 release notes).
+const AttrRFC9068HeaderType = "access.token.header.type.rfc9068"
+
+// ClientIDMapper is the name of the mapper that writes client_id into a client's access tokens. The
+// kernel writes it only into a service-account token, and RFC 9068 §2.2 requires it in every access
+// token, so each client carries its own (STD-IAM-002 §3.2).
+const ClientIDMapper = "client_id"
+
 // Client is the subset of a client's representation the reconciler compares.
 type Client struct {
 	ID           ClientUUID
@@ -54,6 +63,12 @@ type Client struct {
 	// again, which a disable alone does not do (TDD-identity-control-003 §Suspension, Restoration,
 	// and Retirement).
 	NotBefore int64
+
+	// RFC9068 is whether the client's access tokens carry the header typ at+jwt, and ClientIDClaim
+	// the value its client_id mapper writes, or "" when it has none. Together they are the
+	// token_format field class.
+	RFC9068       bool
+	ClientIDClaim string
 }
 
 // ClientCredential is a client's authentication configuration as the kernel holds it.
@@ -104,6 +119,11 @@ type ClientPatch struct {
 
 	// NotBefore sets the client's revocation time, in Unix seconds.
 	NotBefore *int64
+
+	// TokenFormat makes the client an RFC 9068 issuer's client: the at+jwt header attribute, and a
+	// client_id mapper writing this value. The mapper is created, or rewritten when it writes
+	// anything else.
+	TokenFormat *string
 }
 
 // JWK is one public key a confidential or workload client authenticates with: RSA, for signatures,
@@ -222,6 +242,17 @@ type ClientRegistry interface {
 	// DeleteClient deletes a client, and with it its service-account user. It answers ErrNotFound
 	// for a client that does not exist, which a retirement retried after a deletion reads as done.
 	DeleteClient(ctx context.Context, realm Realm, client ClientUUID) error
+
+	// OptionalClientScopes returns the names of the client's optional client scopes: the ones it may
+	// request at sign-in.
+	OptionalClientScopes(ctx context.Context, realm Realm, client ClientUUID) ([]string, error)
+
+	// AddOptionalClientScope attaches a client scope to a client as an optional scope.
+	AddOptionalClientScope(ctx context.Context, realm Realm, client ClientUUID, scopeID string) error
+
+	// RemoveOptionalClientScope detaches an optional client scope. Detaching one the client does not
+	// hold succeeds.
+	RemoveOptionalClientScope(ctx context.Context, realm Realm, client ClientUUID, scopeID string) error
 }
 
 // ClientSpec is a client built from desired state (TDD-identity-control-003 §Profiles). Exactly one
@@ -306,6 +337,7 @@ func (s ClientSpec) representation() map[string]any {
 	attributes := map[string]any{
 		"access.token.signed.response.alg": "PS256",
 		AttrAccessTokenLifespan:            strconv.Itoa(s.AccessTokenLifespan),
+		AttrRFC9068HeaderType:              "true",
 	}
 	switch {
 	case s.Public:
@@ -334,7 +366,7 @@ func (s ClientSpec) representation() map[string]any {
 		keyAttributes(attributes, s.Keys)
 	}
 	representation["attributes"] = attributes
-	var mappers []map[string]any
+	mappers := []map[string]any{clientIDMapper(s.ClientID)}
 	for _, resource := range s.Audience {
 		mappers = append(mappers, map[string]any{
 			"name":           "audience-" + resource,
@@ -348,10 +380,26 @@ func (s ClientSpec) representation() map[string]any {
 			},
 		})
 	}
-	if len(mappers) > 0 {
-		representation["protocolMappers"] = mappers
-	}
+	representation["protocolMappers"] = mappers
 	return representation
+}
+
+// clientIDMapper writes the client's client_id into its access tokens, and nowhere else.
+func clientIDMapper(clientID string) map[string]any {
+	return map[string]any{
+		"name":           ClientIDMapper,
+		"protocol":       "openid-connect",
+		"protocolMapper": "oidc-hardcoded-claim-mapper",
+		"config": map[string]any{
+			"claim.name":                ClientIDMapper,
+			"claim.value":               clientID,
+			"jsonType.label":            "String",
+			"access.token.claim":        "true",
+			"id.token.claim":            "false",
+			"userinfo.token.claim":      "false",
+			"introspection.token.claim": "true",
+		},
+	}
 }
 
 var _ ClientRegistry = (*Admin)(nil)
@@ -402,6 +450,14 @@ func (a *Admin) PatchClient(ctx context.Context, realm Realm, client ClientUUID,
 	if patch.NotBefore != nil {
 		representation["notBefore"] = *patch.NotBefore
 	}
+	if patch.TokenFormat != nil {
+		attributes, _ := representation["attributes"].(map[string]any)
+		if attributes == nil {
+			attributes = map[string]any{}
+		}
+		attributes[AttrRFC9068HeaderType] = "true"
+		representation["attributes"] = attributes
+	}
 	if patch.Keys != nil {
 		if len(*patch.Keys) > MaxClientKeys {
 			return fmt.Errorf("keycloak: a client holds at most %d keys", MaxClientKeys)
@@ -424,7 +480,66 @@ func (a *Admin) PatchClient(ctx context.Context, realm Realm, client ClientUUID,
 		return err
 	}
 	response.Close()
+	if patch.TokenFormat != nil {
+		// A client's mappers are not written by a PUT of its representation; they have their own
+		// resource.
+		return a.ensureClientIDMapper(ctx, realm, client, *patch.TokenFormat)
+	}
 	return nil
+}
+
+// ensureClientIDMapper creates the client_id mapper, or rewrites one that writes another value.
+func (a *Admin) ensureClientIDMapper(ctx context.Context, realm Realm, client ClientUUID, value string) error {
+	models := a.clientPath(realm, client) + "/protocol-mappers/models"
+	response, err := a.do(ctx, http.MethodGet, models, nil, nil, false)
+	if err != nil {
+		return err
+	}
+	var existing []map[string]any
+	err = json.Unmarshal(response.body, &existing)
+	response.Close()
+	if err != nil {
+		return fmt.Errorf("keycloak: decode protocol mappers: %w", err)
+	}
+	desired := clientIDMapper(value)
+	for _, mapper := range existing {
+		if stringField(mapper, "name") != ClientIDMapper {
+			continue
+		}
+		if clientIDValue(mapper) == value {
+			return nil
+		}
+		id := stringField(mapper, "id")
+		desired["id"] = id
+		response, err := a.do(ctx, http.MethodPut, models+"/"+url.PathEscape(id), nil, desired, false)
+		if err != nil {
+			return err
+		}
+		response.Close()
+		return nil
+	}
+	response, err = a.do(ctx, http.MethodPost, models, nil, desired, true)
+	if err != nil {
+		return err
+	}
+	response.Close()
+	return nil
+}
+
+// clientIDValue is the value a client_id mapper writes, or "" for a mapper of another kind.
+func clientIDValue(mapper map[string]any) string {
+	if stringField(mapper, "protocolMapper") != "oidc-hardcoded-claim-mapper" {
+		return ""
+	}
+	config, _ := mapper["config"].(map[string]any)
+	if claim, _ := config["claim.name"].(string); claim != ClientIDMapper {
+		return ""
+	}
+	if access, _ := config["access.token.claim"].(string); access != "true" {
+		return ""
+	}
+	value, _ := config["claim.value"].(string)
+	return value
 }
 
 // DeleteClient deletes one client. Not marked mutating: a repeat of a delete that took effect answers
@@ -471,6 +586,12 @@ func clientFrom(representation map[string]any) (Client, error) {
 	}
 	attributes, _ := representation["attributes"].(map[string]any)
 	client.Credential = credentialFrom(representation, attributes)
+	client.RFC9068 = attributes[AttrRFC9068HeaderType] == "true"
+	for _, mapper := range listOfMaps(representation["protocolMappers"]) {
+		if stringField(mapper, "name") == ClientIDMapper {
+			client.ClientIDClaim = clientIDValue(mapper)
+		}
+	}
 	if raw, ok := attributes[AttrAccessTokenLifespan].(string); ok && strings.TrimSpace(raw) != "" {
 		lifespan, err := strconv.Atoi(strings.TrimSpace(raw))
 		if err != nil {
@@ -730,10 +851,29 @@ func (a *Admin) ListClients(ctx context.Context, realm Realm) ([]Client, error) 
 
 // DefaultClientScopes reads the names of a client's default client scopes.
 func (a *Admin) DefaultClientScopes(ctx context.Context, realm Realm, client ClientUUID) ([]string, error) {
+	return a.clientScopes(ctx, realm, client, "/default-client-scopes")
+}
+
+// OptionalClientScopes reads the names of the client's optional client scopes.
+func (a *Admin) OptionalClientScopes(ctx context.Context, realm Realm, client ClientUUID) ([]string, error) {
+	return a.clientScopes(ctx, realm, client, "/optional-client-scopes")
+}
+
+// AddOptionalClientScope attaches the scope as an optional scope. Idempotent.
+func (a *Admin) AddOptionalClientScope(ctx context.Context, realm Realm, client ClientUUID, scopeID string) error {
+	return a.attachScope(ctx, realm, client, "/optional-client-scopes", scopeID)
+}
+
+// RemoveOptionalClientScope detaches an optional scope. Detaching one not held succeeds.
+func (a *Admin) RemoveOptionalClientScope(ctx context.Context, realm Realm, client ClientUUID, scopeID string) error {
+	return a.detachScope(ctx, realm, client, "/optional-client-scopes", scopeID)
+}
+
+func (a *Admin) clientScopes(ctx context.Context, realm Realm, client ClientUUID, kind string) ([]string, error) {
 	if client == "" {
 		return nil, errors.New("keycloak: a client identifier is required")
 	}
-	response, err := a.do(ctx, http.MethodGet, a.clientPath(realm, client)+"/default-client-scopes", nil, nil, false)
+	response, err := a.do(ctx, http.MethodGet, a.clientPath(realm, client)+kind, nil, nil, false)
 	if err != nil {
 		return nil, err
 	}
@@ -774,11 +914,15 @@ func (a *Admin) ServiceAccountUser(ctx context.Context, realm Realm, client Clie
 // RemoveDefaultClientScope detaches the scope. Idempotent: a scope the client does not hold is
 // already detached, so the kernel's not-found answer is success.
 func (a *Admin) RemoveDefaultClientScope(ctx context.Context, realm Realm, client ClientUUID, scopeID string) error {
+	return a.detachScope(ctx, realm, client, "/default-client-scopes", scopeID)
+}
+
+func (a *Admin) detachScope(ctx context.Context, realm Realm, client ClientUUID, kind, scopeID string) error {
 	if client == "" || scopeID == "" {
 		return errors.New("keycloak: a client and a scope are required")
 	}
 	response, err := a.do(ctx, http.MethodDelete,
-		a.clientPath(realm, client)+"/default-client-scopes/"+url.PathEscape(scopeID), nil, nil, false)
+		a.clientPath(realm, client)+kind+"/"+url.PathEscape(scopeID), nil, nil, false)
 	if errors.Is(err, ErrNotFound) {
 		return nil
 	}
@@ -791,14 +935,30 @@ func (a *Admin) RemoveDefaultClientScope(ctx context.Context, realm Realm, clien
 
 // AddDefaultClientScope attaches the scope. Idempotent: attaching one already attached succeeds.
 func (a *Admin) AddDefaultClientScope(ctx context.Context, realm Realm, client ClientUUID, scopeID string) error {
+	return a.attachScope(ctx, realm, client, "/default-client-scopes", scopeID)
+}
+
+func (a *Admin) attachScope(ctx context.Context, realm Realm, client ClientUUID, kind, scopeID string) error {
 	if client == "" || scopeID == "" {
 		return errors.New("keycloak: a client and a scope are required")
 	}
 	response, err := a.do(ctx, http.MethodPut,
-		a.clientPath(realm, client)+"/default-client-scopes/"+url.PathEscape(scopeID), nil, nil, false)
+		a.clientPath(realm, client)+kind+"/"+url.PathEscape(scopeID), nil, nil, false)
 	if err != nil {
 		return err
 	}
 	response.Close()
 	return nil
+}
+
+// listOfMaps reads a decoded JSON array of objects.
+func listOfMaps(value any) []map[string]any {
+	list, _ := value.([]any)
+	out := make([]map[string]any, 0, len(list))
+	for _, item := range list {
+		if m, ok := item.(map[string]any); ok {
+			out = append(out, m)
+		}
+	}
+	return out
 }

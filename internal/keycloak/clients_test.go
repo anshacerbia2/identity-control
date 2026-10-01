@@ -340,13 +340,83 @@ func TestCreateClientSendsAPublicClientAsTheProfileRequires(t *testing.T) {
 	attributes := sent["attributes"].(map[string]any)
 	if sent["publicClient"] != true || sent["directAccessGrantsEnabled"] != false || sent["implicitFlowEnabled"] != false ||
 		attributes["pkce.code.challenge.method"] != "S256" || attributes["use.refresh.tokens"] != "false" ||
-		attributes["access.token.lifespan"] != "540" || attributes["access.token.signed.response.alg"] != "PS256" {
+		attributes["access.token.lifespan"] != "540" || attributes["access.token.signed.response.alg"] != "PS256" ||
+		attributes["access.token.header.type.rfc9068"] != "true" {
 		t.Errorf("sent %v", sent)
 	}
 	mappers := sent["protocolMappers"].([]any)
-	config := mappers[0].(map[string]any)["config"].(map[string]any)
-	if len(mappers) != 1 || config["included.client.audience"] != "orders" {
-		t.Errorf("audience mappers = %v", mappers)
+	clientID := mappers[0].(map[string]any)
+	clientIDConfig := clientID["config"].(map[string]any)
+	audience := mappers[1].(map[string]any)["config"].(map[string]any)
+	if len(mappers) != 2 || clientID["name"] != "client_id" || clientID["protocolMapper"] != "oidc-hardcoded-claim-mapper" ||
+		clientIDConfig["claim.value"] != "web" || clientIDConfig["access.token.claim"] != "true" ||
+		clientIDConfig["id.token.claim"] != "false" || audience["included.client.audience"] != "orders" {
+		t.Errorf("mappers = %v, want the client_id mapper and the audience mapper", mappers)
+	}
+}
+
+// A client read back reports whether it carries the at+jwt attribute and what its client_id mapper
+// writes, which is the token_format field class.
+func TestGetClientReadsTheTokenFormat(t *testing.T) {
+	admin, _ := newAdmin(t, &kernel{adminBody: `{"id":"c","clientId":"web","attributes":{"access.token.header.type.rfc9068":"true"},
+	  "protocolMappers":[{"name":"client_id","protocolMapper":"oidc-hardcoded-claim-mapper",
+	    "config":{"claim.name":"client_id","claim.value":"web","access.token.claim":"true"}}]}`})
+	client, err := admin.GetClient(context.Background(), testRealm, "c")
+	if err != nil || !client.RFC9068 || client.ClientIDClaim != "web" {
+		t.Errorf("read %+v, %v", client, err)
+	}
+	bare, _ := newAdmin(t, &kernel{adminBody: `{"id":"c","clientId":"web","attributes":{}}`})
+	client, _ = bare.GetClient(context.Background(), testRealm, "c")
+	if client.RFC9068 || client.ClientIDClaim != "" {
+		t.Errorf("a client without either read as %+v", client)
+	}
+}
+
+// The token format is the attribute, through the representation, and the mapper, through its own
+// resource: created when absent, rewritten when it writes another value, left when it is right.
+func TestPatchClientWritesTheTokenFormat(t *testing.T) {
+	for name, c := range map[string]struct {
+		mappers string
+		want    string
+	}{
+		"absent":      {`[]`, "POST"},
+		"another one": {`[{"id":"m1","name":"client_id","protocolMapper":"oidc-hardcoded-claim-mapper","config":{"claim.name":"client_id","claim.value":"other","access.token.claim":"true"}}]`, "PUT"},
+		"right":       {`[{"id":"m1","name":"client_id","protocolMapper":"oidc-hardcoded-claim-mapper","config":{"claim.name":"client_id","claim.value":"web","access.token.claim":"true"}}]`, ""},
+	} {
+		k := &kernel{}
+		k.route = func(method, path string) (int, string) {
+			switch {
+			case strings.HasSuffix(path, "/protocol-mappers/models") && method == http.MethodGet:
+				return http.StatusOK, c.mappers
+			case strings.Contains(path, "/protocol-mappers/models") && method == http.MethodPost:
+				return http.StatusCreated, ""
+			case method == http.MethodGet:
+				return http.StatusOK, clientRepresentation
+			default:
+				return http.StatusNoContent, ""
+			}
+		}
+		admin, _ := newAdmin(t, k)
+		value := "web"
+		if err := admin.PatchClient(context.Background(), testRealm, "0b1c2d3e", keycloak.ClientPatch{TokenFormat: &value}); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		var written map[string]any
+		_ = json.Unmarshal(k.lastPutBody, &written)
+		if name != "another one" {
+			if attributes, _ := written["attributes"].(map[string]any); attributes["access.token.header.type.rfc9068"] != "true" {
+				t.Errorf("%s: the representation written carries no at+jwt attribute: %v", name, written)
+			}
+		}
+		var mapperCalls []string
+		for _, call := range k.calls {
+			if strings.Contains(call, "/protocol-mappers/models") && !strings.HasPrefix(call, "GET") {
+				mapperCalls = append(mapperCalls, strings.SplitN(call, " ", 2)[0])
+			}
+		}
+		if (c.want == "" && len(mapperCalls) != 0) || (c.want != "" && (len(mapperCalls) != 1 || mapperCalls[0] != c.want)) {
+			t.Errorf("%s: mapper calls %v, want %q", name, mapperCalls, c.want)
+		}
 	}
 }
 
@@ -358,8 +428,9 @@ func TestCreateClientSendsAResourceThatNobodyLogsInThrough(t *testing.T) {
 	}
 	var sent map[string]any
 	_ = json.Unmarshal(k.lastBody, &sent)
-	if sent["bearerOnly"] != true || sent["standardFlowEnabled"] != false || sent["redirectUris"] != nil {
-		t.Errorf("sent %v", sent)
+	if sent["bearerOnly"] != true || sent["standardFlowEnabled"] != false || sent["redirectUris"] != nil ||
+		sent["protocolMappers"] != nil || sent["attributes"] != nil {
+		t.Errorf("sent %v; a resource is issued no token, so it carries no token format", sent)
 	}
 }
 

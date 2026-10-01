@@ -58,10 +58,14 @@ type Registry struct {
 	// it.
 	RealmDefaults []string
 
+	// RealmOptional are the scope identifiers every created client holds as optional scopes.
+	RealmOptional []string
+
 	clients         map[keycloak.ClientUUID]keycloak.Client
 	specs           map[keycloak.ClientUUID]keycloak.ClientSpec
 	serviceAccounts map[keycloak.ClientUUID]keycloak.User
 	defaultScopes   map[keycloak.ClientUUID][]string
+	optionalScopes  map[keycloak.ClientUUID][]string
 	events          []keycloak.AdminEvent
 	deletes         int
 }
@@ -71,8 +75,10 @@ func NewRegistry(serviceAccount string) *Registry {
 	return &Registry{ServiceAccount: serviceAccount, clients: map[keycloak.ClientUUID]keycloak.Client{},
 		serviceAccounts: map[keycloak.ClientUUID]keycloak.User{},
 		specs:           map[keycloak.ClientUUID]keycloak.ClientSpec{}, defaultScopes: map[keycloak.ClientUUID][]string{},
+		optionalScopes: map[keycloak.ClientUUID][]string{},
 		Scopes: map[string]string{"scnehaux-internal": "scope-internal", "scnehaux-provider": "scope-provider",
-			"scnehaux-external": "scope-external"}}
+			"scnehaux-external": "scope-external", "basic": "scope-basic", "acr": "scope-acr",
+			"scnehaux-profile": "scope-sign-in", "profile": "scope-profile", "email": "scope-email"}}
 }
 
 var _ keycloak.ClientRegistry = (*Registry)(nil)
@@ -89,6 +95,25 @@ func (r *Registry) Put(client keycloak.Client) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.clients[client.ID] = copyClient(client)
+}
+
+// HoldScopes sets a client's default and optional scopes by name, as they stand before the test
+// begins, recording no admin event. A name Scopes does not declare is held as it is.
+func (r *Registry) HoldScopes(client keycloak.ClientUUID, defaults, optional []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	ids := func(names []string) []string {
+		out := make([]string, 0, len(names))
+		for _, name := range names {
+			if id, ok := r.Scopes[name]; ok {
+				out = append(out, id)
+			} else {
+				out = append(out, name)
+			}
+		}
+		return out
+	}
+	r.defaultScopes[client], r.optionalScopes[client] = ids(defaults), ids(optional)
 }
 
 // Remove deletes a client, as a console deletion would, recording its admin event.
@@ -125,6 +150,7 @@ func (r *Registry) DeleteClient(ctx context.Context, _ keycloak.Realm, client ke
 	delete(r.specs, client)
 	delete(r.serviceAccounts, client)
 	delete(r.defaultScopes, client)
+	delete(r.optionalScopes, client)
 	r.deletes++
 	r.events = append(r.events, keycloak.AdminEvent{Time: r.now(), OperationType: "DELETE",
 		ResourcePath: "clients/" + string(client), UserID: r.ServiceAccount})
@@ -193,6 +219,9 @@ func (r *Registry) PatchClient(ctx context.Context, _ keycloak.Realm, client key
 	}
 	if patch.NotBefore != nil {
 		stored.NotBefore = *patch.NotBefore
+	}
+	if patch.TokenFormat != nil {
+		stored.RFC9068, stored.ClientIDClaim = true, *patch.TokenFormat
 	}
 	if patch.Keys != nil {
 		spec := r.specs[client]
@@ -296,9 +325,13 @@ func (r *Registry) createClient(ctx context.Context, _ keycloak.Realm, spec keyc
 		created.Credential = keycloak.ClientCredential{Authenticator: "client-jwt", HeldJWKS: true,
 			Keys: append([]keycloak.JWK(nil), spec.Keys...)}
 	}
+	if !spec.Resource {
+		created.RFC9068, created.ClientIDClaim = true, spec.ClientID
+	}
 	r.clients[client] = created
 	r.specs[client] = spec
 	r.defaultScopes[client] = append([]string(nil), r.RealmDefaults...)
+	r.optionalScopes[client] = append([]string(nil), r.RealmOptional...)
 	r.events = append(r.events, keycloak.AdminEvent{Time: r.now(), OperationType: "CREATE",
 		ResourcePath: "clients/" + string(client), UserID: r.ServiceAccount})
 	var serviceAccount *keycloak.User
@@ -359,6 +392,85 @@ func (r *Registry) DefaultClientScopes(ctx context.Context, _ keycloak.Realm, cl
 }
 
 // AttachScope attaches a default scope to a client with no admin event: the state before a test.
+// OptionalScopes are the identifiers of the client's optional scopes, for a test's assertions.
+func (r *Registry) OptionalScopes(client keycloak.ClientUUID) []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.optionalScopes[client]...)
+}
+
+// AttachOptionalScope attaches an optional scope as the console would, recording no event.
+func (r *Registry) AttachOptionalScope(client keycloak.ClientUUID, scopeID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.optionalScopes[client] = append(r.optionalScopes[client], scopeID)
+}
+
+func (r *Registry) OptionalClientScopes(ctx context.Context, _ keycloak.Realm, client keycloak.ClientUUID) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.FailGet != nil {
+		return nil, r.FailGet
+	}
+	return r.scopeNames(r.optionalScopes[client]), nil
+}
+
+func (r *Registry) AddOptionalClientScope(ctx context.Context, _ keycloak.Realm, client keycloak.ClientUUID, scopeID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.FailPatch != nil {
+		return r.FailPatch
+	}
+	for _, held := range r.optionalScopes[client] {
+		if held == scopeID {
+			return nil
+		}
+	}
+	r.optionalScopes[client] = append(r.optionalScopes[client], scopeID)
+	return nil
+}
+
+func (r *Registry) RemoveOptionalClientScope(ctx context.Context, _ keycloak.Realm, client keycloak.ClientUUID, scopeID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.FailPatch != nil {
+		return r.FailPatch
+	}
+	kept := r.optionalScopes[client][:0]
+	for _, held := range r.optionalScopes[client] {
+		if held != scopeID {
+			kept = append(kept, held)
+		}
+	}
+	r.optionalScopes[client] = kept
+	return nil
+}
+
+// scopeNames maps scope identifiers to their names in Scopes, keeping an identifier Scopes does not
+// name. The caller holds the lock.
+func (r *Registry) scopeNames(ids []string) []string {
+	names := make([]string, 0, len(ids))
+	for _, scopeID := range ids {
+		name := scopeID
+		for scopeName, id := range r.Scopes {
+			if id == scopeID {
+				name = scopeName
+			}
+		}
+		names = append(names, name)
+	}
+	return names
+}
+
 func (r *Registry) AttachScope(client keycloak.ClientUUID, scopeID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

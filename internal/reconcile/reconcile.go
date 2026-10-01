@@ -45,6 +45,13 @@ const (
 	// Suspension is a suspended registration's client: disabled, with the not-before that ends the
 	// refresh tokens it was issued (ADR-IAM-001 §5.13).
 	Suspension FieldClass = "suspension"
+
+	// AudienceScope is a client's default and optional client scopes, as the closed sets of its
+	// profile (TDD-identity-control-003 §Profiles).
+	AudienceScope FieldClass = "audience_scope"
+
+	// TokenFormat is a client's at+jwt header attribute and its client_id mapper (STD-IAM-002 §3.2).
+	TokenFormat FieldClass = "token_format"
 )
 
 // FindingClass is what the sweep did about a divergence.
@@ -178,6 +185,19 @@ type registration struct {
 	// state is active or suspended, and suspendedAt the latest suspension.
 	state       string
 	suspendedAt *time.Time
+
+	// audienceClass selects the managed scope among the client's scope sets.
+	audienceClass string
+}
+
+// comparesTokenProfile reports whether the profile is issued tokens, and so holds a token format
+// and scope sets. A resource is only an audience.
+func (r registration) comparesTokenProfile() bool { return r.profile != "resource" }
+
+// desiredScopes are the scope sets the registration's client holds.
+func (r registration) desiredScopes() registrations.ScopeSets {
+	desired, _ := registrations.DesiredScopes(r.profile, r.audienceClass)
+	return desired
 }
 
 // suspended reports whether the registration is suspended, and so compared for its suspension only.
@@ -270,6 +290,7 @@ func (r *Reconciler) Sweep(ctx context.Context) (Run, error) {
 	}
 
 	live := make(map[keycloak.ClientUUID]keycloak.Client, len(desired))
+	scopes := make(map[keycloak.ClientUUID]registrations.ScopeSets, len(desired))
 	var absent []registration
 	for _, reg := range desired {
 		client, err := call(ctx, r.cfg.CallTimeout, func(ctx context.Context) (keycloak.Client, error) {
@@ -286,6 +307,16 @@ func (r *Reconciler) Sweep(ctx context.Context) (Run, error) {
 		default:
 			live[reg.client] = client
 		}
+		if err != nil || !reg.comparesTokenProfile() || reg.suspended() {
+			continue
+		}
+		sets, err := registrations.LiveScopes(ctx, r.kernel, r.cfg.Realm, reg.client, r.cfg.CallTimeout)
+		if err != nil {
+			r.logger.WarnContext(ctx, "registration sweep unresolved: a client's scopes could not be read",
+				slog.String("client_key", reg.clientKey), slog.String("error", err.Error()))
+			return finish(Unresolved, attribution, 0)
+		}
+		scopes[reg.client] = sets
 	}
 
 	// Every client in the realm, for the ones no registration describes. Read with the others, before
@@ -331,8 +362,9 @@ func (r *Reconciler) Sweep(ctx context.Context) (Run, error) {
 			diverged = diverged || differs
 			continue
 		}
-		for _, field := range []FieldClass{TokenLifespan, RedirectURIs, ClientKeys} {
-			wrote, differs, err := r.reconcileField(ctx, run.ID, reg, client, field, open, exceptions, latest, attribution)
+		for _, field := range []FieldClass{TokenLifespan, RedirectURIs, ClientKeys, AudienceScope, TokenFormat} {
+			wrote, differs, err := r.reconcileField(ctx, run.ID, reg, client, scopes[reg.client], field, open, exceptions,
+				latest, attribution)
 			if err != nil {
 				return Run{}, err
 			}
@@ -386,6 +418,7 @@ func (r *Reconciler) reconcileField(
 	run id.UUID,
 	reg registration,
 	client keycloak.Client,
+	scopes registrations.ScopeSets,
 	field FieldClass,
 	open map[findingKey]openFinding,
 	exceptions map[exceptionKey]bool,
@@ -423,6 +456,17 @@ func (r *Reconciler) reconcileField(
 		}
 		desired, observed = keysValue(reg.keys, keycloak.ClientCredential{Authenticator: "client-jwt", HeldJWKS: true}),
 			keysValue(client.Credential.Keys, client.Credential)
+	case AudienceScope:
+		applies = reg.comparesTokenProfile()
+		differs = !registrations.SameScopes(scopes, reg.desiredScopes())
+		desired, observed = sortedScopes(reg.desiredScopes()), sortedScopes(scopes)
+	case TokenFormat:
+		applies = reg.comparesTokenProfile()
+		differs = !client.RFC9068 || client.ClientIDClaim != reg.clientKey
+		desired = map[string]any{"at_jwt": true, "client_id": reg.clientKey}
+		observed = map[string]any{"at_jwt": client.RFC9068, "client_id": client.ClientIDClaim}
+		clientKey := reg.clientKey
+		repair.TokenFormat = &clientKey
 	}
 	if !applies {
 		return false, false, nil
@@ -550,6 +594,18 @@ func (r *Reconciler) reconcileSuspension(ctx context.Context, run id.UUID, reg r
 // apply writes desired state for one field and reads the client back, reporting whether it now
 // matches. A repair is recorded converged only when the kernel says so.
 func (r *Reconciler) apply(ctx context.Context, reg registration, field FieldClass, patch keycloak.ClientPatch) (bool, error) {
+	if field == AudienceScope {
+		// The scope sets are their own resources, not fields of the client's representation.
+		if err := registrations.ConvergeScopes(ctx, r.kernel, r.cfg.Realm, reg.client, reg.desiredScopes(),
+			r.cfg.CallTimeout); err != nil {
+			return false, fmt.Errorf("reconcile: repair %s %s: %w", reg.clientKey, field, err)
+		}
+		after, err := registrations.LiveScopes(ctx, r.kernel, r.cfg.Realm, reg.client, r.cfg.CallTimeout)
+		if err != nil {
+			return false, fmt.Errorf("reconcile: read back %s: %w", reg.clientKey, err)
+		}
+		return registrations.SameScopes(after, reg.desiredScopes()), nil
+	}
 	if _, err := call(ctx, r.cfg.CallTimeout, func(ctx context.Context) (struct{}, error) {
 		return struct{}{}, r.kernel.PatchClient(ctx, r.cfg.Realm, reg.client, patch)
 	}); err != nil {
@@ -570,8 +626,15 @@ func (r *Reconciler) apply(ctx context.Context, reg registration, field FieldCla
 		return after.Credential.ByKeys(reg.keys) && after.Enabled, nil
 	case Suspension:
 		return !after.Enabled && after.NotBefore >= reg.notBefore(), nil
+	case TokenFormat:
+		return after.RFC9068 && after.ClientIDClaim == reg.clientKey, nil
 	}
 	return false, nil
+}
+
+// sortedScopes is a scope sets value as a finding records it.
+func sortedScopes(sets registrations.ScopeSets) registrations.ScopeSets {
+	return registrations.ScopeSets{Default: sortedCopy(sets.Default), Optional: sortedCopy(sets.Optional)}
 }
 
 // confirmKeyDrift reads the registration's keys again under the share lock a key change's update

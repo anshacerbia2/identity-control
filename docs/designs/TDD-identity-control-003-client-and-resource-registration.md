@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-003
   title: Protocol Client and Protected-Resource Registration
   owner: Core Platform Team
-  version: 1.16.0
+  version: 1.17.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -514,13 +514,25 @@ application registers a `confidential` client for its BFF instead.
 `workload` prohibits refresh tokens because a workload re-authenticates with its own
 credential rather than continuing a session.
 
-Every registration attaches exactly one managed audience scope. A `workload` registration also
-detaches the kernel's built-in `acr` scope. Keycloak attaches its realm default client scopes to
-every new client, and `acr` puts `acr=1` into a client credentials token, which STD-IAM-002 §3.2
-prohibits for a workload. `identity-kernel` leaves the realm default alone and records that a
-workload client does not hold it (TDD-identity-kernel-001 §Claim Projection, proven by its
-`compat/workload_test.go`). The detachment runs wherever the managed scope is attached, so
-pending recovery applies it too, and a realm without an `acr` scope has nothing to detach.
+**Every client but a resource is registered as an RFC 9068 issuer's client, and holds a closed set
+of scopes** (STD-IAM-002 §3.2, §3.2.1):
+
+| Setting | Public, confidential | Workload |
+| :-- | :-- | :-- |
+| `access.token.header.type.rfc9068` attribute | `true`, so its access tokens carry `typ` `at+jwt` | `true` |
+| `client_id` mapper | a hardcoded claim naming its `client_key`, in access tokens | the same |
+| Default client scopes | exactly `basic`, `acr`, and its managed audience scope | exactly `basic` and its managed audience scope |
+| Optional client scopes | `scnehaux-profile` for a confidential client, else none | none |
+
+The kernel writes the at+jwt header only for a client that carries the attribute, and `client_id`
+only into a service-account token, so both are set per client (identity-kernel compat run
+36775603547). The scope sets are closed because a scope the client holds is a claim surface: the
+kernel's built-in `profile`, `email`, `roles` and `web-origins` put personal data and roles into an
+access token, `acr` puts `acr=1` into a client credentials token, and `service_account` writes a
+workload's network address. A scope outside the set is detached; a missing one is attached. A scope
+the realm does not declare is skipped, except the managed audience scope, whose absence refuses the
+registration. The sets are applied wherever the managed scope is attached: creation, pending
+recovery, recreation, and adoption.
 
 A `workload` registration is made by the workload path (`TDD-identity-control-004`), which reserves
 it in the same transaction as the workload and realizes it through this path. An operator's
@@ -598,7 +610,8 @@ adopt(request):
     read the one Keycloak client with that client_key; none is not found
     compare it with the declaration, per field class:
         token_lifespan   repairable
-        audience_scope   repairable   the managed scope attached as a default scope
+        audience_scope   repairable   exactly the default and optional scopes of §Profiles
+        token_format     repairable   the at+jwt attribute and the client_id mapper
         enabled          repairable   the client is enabled
         redirect_uris    blocking
         client_keys      blocking     client-jwt, the held JWKS, exactly the declared keys
@@ -739,7 +752,8 @@ Each field class has one policy, and the first two are what the drift proof exer
 | :-- | :-- | :-- |
 | `token_lifespan` | `access.token.lifespan` client attribute | repair |
 | `redirect_uris` | `redirectUris` | block |
-| `audience_scope` | default and optional client scopes | repair |
+| `audience_scope` | default and optional client scopes, as the closed sets of §Profiles | repair |
+| `token_format` | `access.token.header.type.rfc9068`, the `client_id` mapper | repair |
 | `signing_algorithm` | `access.token.signed.response.alg` | repair |
 | `profile` | `publicClient`, `serviceAccountsEnabled`, `standardFlowEnabled` | repair |
 | `client_keys` | `clientAuthenticatorType`, `use.jwks.string`, `jwks.string` | block |
@@ -813,7 +827,11 @@ who registered it. A drift exception's field classes are therefore unchanged.
 drift proof exercises first, and `client_keys`, for a confidential or workload client: its
 authenticator, whether it takes its keys from the JWKS held on it, and the keys in it, compared by
 `kid` and key material together. `suspension` is compared for every suspended registration.
-`audience_scope`, `signing_algorithm` and `profile` are designed above and not compared yet.
+`audience_scope` and `token_format` are compared for every client but a resource: the first as two
+closed sets, the second as the attribute and the mapper's value. A client registered before they
+were compared, and an adopted one, is found differing at the first sweep; with no admin event to
+attribute the difference to, the finding is `unattributed` and an operator applies the registered
+state once. `signing_algorithm` and `profile` are designed above and not compared yet.
 
 - **An absent client is held, not recreated.** It is recorded as one open `missing`
   finding naming whoever the deletion's admin event names, and every sweep leaves it
@@ -959,8 +977,12 @@ retire(registration, reason, caller):
 - A `public` profile supplying a public key is refused. A `confidential` or `workload`
   profile without one is refused.
 - Every registration receives exactly one managed audience scope.
-- A workload registration holds no `acr` scope, after creation, recovery, and recreation alike.
-  Other profiles keep the realm's `acr`.
+- A registered client holds exactly its default and optional scope sets of §Profiles after
+  creation, recovery, and recreation alike: a built-in `profile`, `email`, `roles` or `web-origins`
+  scope is detached, a workload holds neither `acr` nor `service_account`, and only a confidential
+  client holds `scnehaux-profile`, as an optional scope.
+- A registered client other than a resource carries the at+jwt attribute and a `client_id` mapper
+  naming its `client_key`; a resource carries neither.
 - An internal, privileged, or workload registration requesting RS256 is refused by the
   API and by the database constraint.
 - An external RS256 exception without an owner, reason, future expiry, or verifier
@@ -1020,6 +1042,10 @@ retire(registration, reason, caller):
   desired state.
 - A Keycloak client with no registration is disabled and alerted, not deleted.
 - Reconciliation is idempotent against a consistent state.
+
+- A client whose default or optional scopes differ from the sets, or that lacks the at+jwt attribute
+  or its `client_id` mapper, is found differing in `audience_scope` or `token_format`; attributed,
+  it is repaired to the sets; unattributed, an operator's reconcile applies them.
 
 ### Adoption
 

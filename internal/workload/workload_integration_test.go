@@ -213,7 +213,7 @@ func TestAWorkloadIsBoundToItsClientsServiceAccount(t *testing.T) {
 		t.Fatalf("%d clients named nightly-job", len(found))
 	}
 	spec, scopes, _ := h.clients.Spec(found[0].ID)
-	if !spec.Workload || len(spec.Keys) != 1 || !slices.Equal(scopes, []string{"scope-workload"}) {
+	if !spec.Workload || len(spec.Keys) != 1 || !slices.Equal(scopes, []string{"scope-basic", "scope-workload"}) {
 		t.Errorf("client spec = %+v, scopes %v", spec, scopes)
 	}
 	serviceAccount := keycloak.UserID("sa-" + string(found[0].ID))

@@ -30,10 +30,11 @@ const (
 	ClassEnabled       = "enabled"
 	ClassRedirectURIs  = "redirect_uris"
 	ClassClientKeys    = "client_keys"
+	ClassTokenFormat   = "token_format"
 )
 
 // convergeable are the repairable classes an adoption may converge when the request names them.
-var convergeable = []string{ClassTokenLifespan, ClassAudienceScope, ClassEnabled}
+var convergeable = []string{ClassTokenLifespan, ClassAudienceScope, ClassEnabled, ClassTokenFormat}
 
 var (
 	// ErrNotAdoptable is an adoption the plan refuses: a blocking class differs, or a repairable one
@@ -77,6 +78,9 @@ type Plan struct {
 	Adoptable   bool         `json:"adoptable"`
 	Refusal     string       `json:"refusal,omitempty"`
 	Differences []Difference `json:"differences"`
+
+	// The declaration's profile and audience class, which the scope sets are derived from.
+	profile, audienceClass string
 }
 
 // AdoptResult is the plan, and the registration when the client was adopted.
@@ -102,7 +106,7 @@ func (s *Service) Adopt(ctx context.Context, req AdoptRequest) (AdoptResult, err
 	}
 	for _, class := range req.Converge {
 		if !slices.Contains(convergeable, class) {
-			return AdoptResult{}, invalid("converge names only token_lifespan, audience_scope or enabled")
+			return AdoptResult{}, invalid("converge names only token_lifespan, audience_scope, enabled or token_format")
 		}
 	}
 	if err := validate(req.Request); err != nil {
@@ -165,9 +169,7 @@ func (s *Service) Adopt(ctx context.Context, req AdoptRequest) (AdoptResult, err
 	if err != nil {
 		return AdoptResult{}, err
 	}
-	scopes, err := call(ctx, s.cfg.CallTimeout, func(ctx context.Context) ([]string, error) {
-		return s.kernel.DefaultClientScopes(ctx, s.cfg.Realm, client.ID)
-	})
+	scopes, err := LiveScopes(ctx, s.kernel, s.cfg.Realm, client.ID, s.cfg.CallTimeout)
 	if err != nil {
 		return AdoptResult{}, err
 	}
@@ -289,8 +291,12 @@ func (s *Service) checkAdoptable(ctx context.Context, req Request, keys []Public
 }
 
 // planAdoption compares the client with the declaration, per field class.
-func planAdoption(req AdoptRequest, client keycloak.Client, scopes []string, scopeName string, lifespan int,
+func planAdoption(req AdoptRequest, client keycloak.Client, scopes ScopeSets, scopeName string, lifespan int,
 	keys []keycloak.JWK) Plan {
+	desiredScopes, _ := DesiredScopes(req.Profile, req.AudienceClass)
+	sortedSets := func(sets ScopeSets) ScopeSets {
+		return ScopeSets{Default: sortedStrings(sets.Default), Optional: sortedStrings(sets.Optional)}
+	}
 	kids := func(keys []keycloak.JWK) []string {
 		out := []string{}
 		for _, key := range keys {
@@ -300,11 +306,15 @@ func planAdoption(req AdoptRequest, client keycloak.Client, scopes []string, sco
 		return out
 	}
 	desiredURIs, observedURIs := sortedStrings(req.RedirectURIs), sortedStrings(client.RedirectURIs)
-	plan := Plan{ClientKey: req.ClientKey, Differences: []Difference{
+	plan := Plan{ClientKey: req.ClientKey, profile: req.Profile, audienceClass: req.AudienceClass, Differences: []Difference{
 		{FieldClass: ClassTokenLifespan, Policy: PolicyRepair, Desired: lifespan, Observed: client.AccessTokenLifespan,
 			Differs: client.AccessTokenLifespan != lifespan},
-		{FieldClass: ClassAudienceScope, Policy: PolicyRepair, Desired: scopeName, Observed: sortedStrings(scopes),
-			Differs: !slices.Contains(scopes, scopeName)},
+		{FieldClass: ClassAudienceScope, Policy: PolicyRepair, Desired: sortedSets(desiredScopes),
+			Observed: sortedSets(scopes), Differs: !SameScopes(scopes, desiredScopes)},
+		{FieldClass: ClassTokenFormat, Policy: PolicyRepair,
+			Desired:  map[string]any{"at_jwt": true, "client_id": req.ClientKey},
+			Observed: map[string]any{"at_jwt": client.RFC9068, "client_id": client.ClientIDClaim},
+			Differs:  !client.RFC9068 || client.ClientIDClaim != req.ClientKey},
 		{FieldClass: ClassEnabled, Policy: PolicyRepair, Desired: true, Observed: client.Enabled, Differs: !client.Enabled},
 		{FieldClass: ClassRedirectURIs, Policy: PolicyBlock, Desired: desiredURIs, Observed: observedURIs,
 			Differs: !slices.Equal(desiredURIs, observedURIs)},
@@ -353,8 +363,12 @@ func (s *Service) converge(ctx context.Context, plan Plan, client keycloak.Clien
 				return struct{}{}, s.kernel.PatchClient(ctx, s.cfg.Realm, client.ID, keycloak.ClientPatch{AccessTokenLifespan: &value})
 			})
 		case ClassAudienceScope:
+			desired, _ := DesiredScopes(plan.profile, plan.audienceClass)
+			err = ConvergeScopes(ctx, s.kernel, s.cfg.Realm, client.ID, desired, s.cfg.CallTimeout)
+		case ClassTokenFormat:
+			clientKey := plan.ClientKey
 			_, err = call(ctx, s.cfg.CallTimeout, func(ctx context.Context) (struct{}, error) {
-				return struct{}{}, s.kernel.AddDefaultClientScope(ctx, s.cfg.Realm, client.ID, scopeID)
+				return struct{}{}, s.kernel.PatchClient(ctx, s.cfg.Realm, client.ID, keycloak.ClientPatch{TokenFormat: &clientKey})
 			})
 		case ClassEnabled:
 			enabled := true
