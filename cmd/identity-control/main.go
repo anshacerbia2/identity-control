@@ -362,6 +362,25 @@ func scheduleSweeps(ctx context.Context, provisioner *provisioning.Provisioner, 
 				logger.LogAttrs(ctx, level, message, attrs...)
 			}
 		}
+		// Changes waiting for a provider's approval (TDD-identity-control-003 §Operational Notes):
+		// a warning past three days, an error past seven, so an approval backlog alerts.
+		if waiting, err := registrar.OpenChanges(ctx); err != nil {
+			logger.Error("waiting registration changes could not be read", slog.String("error", err.Error()))
+		} else {
+			for _, change := range waiting {
+				age := time.Since(change.ProposedAt)
+				level := slog.LevelWarn
+				switch {
+				case age > registration.ChangeCriticalAge:
+					level = slog.LevelError
+				case age <= registration.ChangeWarningAge:
+					continue
+				}
+				logger.LogAttrs(ctx, level, "a registration change has waited past its approval threshold",
+					slog.String("client_key", change.ClientKey), slog.String("change_id", change.ID.String()),
+					slog.Time("proposed_at", change.ProposedAt))
+			}
+		}
 		run, err := reconciler.Sweep(ctx)
 		switch {
 		case errors.Is(err, reconcile.ErrSweepInProgress):

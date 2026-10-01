@@ -62,6 +62,12 @@ type Registrar interface {
 	Owners(ctx context.Context, registrationID id.UUID) ([]registration.Owner, error)
 	GrantOwner(ctx context.Context, change registration.OwnershipChange) ([]registration.Owner, error)
 	RevokeOwner(ctx context.Context, change registration.OwnershipChange) ([]registration.Owner, error)
+
+	// Changes (ADR-IAM-003 §5.2, TDD-identity-control-003 §Registration Changes).
+	ProposeChange(ctx context.Context, proposal registration.Proposal) (registration.Change, bool, error)
+	DecideChange(ctx context.Context, decision registration.Decision, provider bool) (registration.Change, error)
+	Changes(ctx context.Context, registrationID id.UUID) ([]registration.Change, error)
+	OpenChanges(ctx context.Context) ([]registration.Change, error)
 }
 
 // Registrations serves the registration and drift routes.
