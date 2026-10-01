@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-001
   title: Canonical Principal Identifier and Creation Path
   owner: Core Platform Team
-  version: 1.7.1
+  version: 1.8.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -382,9 +382,16 @@ through its `scnehaux-provider` client scope, and this service accepts nothing e
 | :-- | :-- | :-- |
 | `provider:identity-control` | Mint, read, quarantine, relink, and retire Principals through this service | The bootstrap ceremony, to the first Principal; nothing else writes `scnehaux_provider_scope` |
 
-A token carrying `tenant_id`, lacking `provider_scope`, or naming any other scope is refused. The
-access token lifetime is class `L0`, 240 seconds, and is set on the calling client's
-registration.
+A token carrying `tenant_id`, or naming any other scope, is refused. The access token lifetime
+is class `L0`, 240 seconds, and is set on the calling client's registration.
+
+**A token without `provider_scope` is a registration owner's** (`ADR-IAM-003`), the
+`resource-scoped` form of STD-IAM-002 §3.1.1: `principal_id`, `subject_type` `human`, `acr` and
+`auth_time`, and no `tenant_id`. It carries no authority of its own. Its authority is the ownership
+this service records for the registration a request names, read for each request
+(`TDD-identity-control-003` §Registration Ownership), and only the routes listed there serve it.
+Every other route answers it 403 before reading anything, so a Principal route, a workload route or
+an adoption is a provider's alone. A workload's token is never an owner's.
 
 **The caller's token is an access token, typed `at+jwt`** (STD-IAM-002 §3.5 step 5, RFC 9068 §4).
 An ID token carries the same issuer and signature, so the header type is what keeps one from

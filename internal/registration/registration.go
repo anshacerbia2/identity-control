@@ -128,6 +128,10 @@ type Config struct {
 	// exceed CallTimeout, or recovery searches for a client the original request is still creating.
 	PendingRecoveryAfter time.Duration
 
+	// Production is IDENTITY_ENVIRONMENT=production: a registration keeps at least
+	// MinProductionOwners owners (ADR-IAM-003 §5.1).
+	Production bool
+
 	// KeyLifetime is how long a registered client key is valid before it is removed
 	// (IDENTITY_CLIENT_KEY_LIFETIME).
 	KeyLifetime time.Duration

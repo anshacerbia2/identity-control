@@ -39,6 +39,7 @@ BEGIN
               ('identity.workload_owner_change'),
               ('identity.registration_adoption'),
               ('identity.registration_state_change'),
+              ('identity.registration_owner'),
               ('identity.principal_relink'),
               ('identity.principal_finding'),
               ('platform.outbox'),
@@ -127,6 +128,12 @@ REVOKE UPDATE, DELETE, TRUNCATE ON identity.registration_adoption FROM identity_
 -- A lifecycle record says who suspended, restored or retired a client, when and why. Insert-only
 -- (ADR-IAM-001 §5.13), so the record of a containment cannot be rewritten by whoever lifts it.
 REVOKE UPDATE, DELETE, TRUNCATE ON identity.registration_state_change FROM identity_runtime;
+
+-- An ownership says who could act on a registration besides a provider, granted by whom and why
+-- (ADR-IAM-003). Nothing deletes one, and only its revocation is ever written after the grant: the
+-- table-level UPDATE is revoked before the column-level one is granted, as for client_key.
+REVOKE UPDATE, DELETE, TRUNCATE ON identity.registration_owner FROM identity_runtime;
+GRANT UPDATE (revoked_at, revoked_by, revoke_reason) ON identity.registration_owner TO identity_runtime;
 
 -- A relink record says who moved a Principal to a new Keycloak user and why, so it is insert-only.
 -- A dangling-mapping finding is evidence that a user disappeared, kept after it is resolved.

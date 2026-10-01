@@ -83,17 +83,22 @@ func Requirement() verify.ClaimRequirement {
 
 		// §3.5 rule 9 — the scope form must be unambiguous. Both claims present, or neither,
 		// leaves the token's bounded authority undetermined.
-		scope, hasScope := claims.String(ProviderScopeClaim)
-		_, hasTenant := claims.String(TenantIDClaim)
+		// Present at all is a provider's claim: an empty or non-string provider_scope is refused
+		// below rather than read as absent, which would turn it into an owner's token.
+		scope, _ := claims.String(ProviderScopeClaim)
+		hasScope := claims.Has(ProviderScopeClaim)
+		hasTenant := claims.Has(TenantIDClaim)
 		switch {
 		case hasScope && hasTenant:
 			return fmt.Errorf("the token carries both %s and %s", ProviderScopeClaim, TenantIDClaim)
 		case hasTenant:
-			return fmt.Errorf("the %s claim is prohibited on a provider-scope audience", TenantIDClaim)
-		case !hasScope:
-			return fmt.Errorf("the %s claim is absent", ProviderScopeClaim)
-		case scope != ProviderScopeIdentityControl:
+			return fmt.Errorf("the %s claim is prohibited on this audience", TenantIDClaim)
+		case hasScope && scope != ProviderScopeIdentityControl:
 			return fmt.Errorf("the %s claim is not a scope this resource accepts", ProviderScopeClaim)
+		case !hasScope && subjectType != "human":
+			// Without provider_scope the token is a registration owner's, the resource-scoped form
+			// (STD-IAM-002 §3.1.1, ADR-IAM-003), and an owner is a person.
+			return fmt.Errorf("a token without %s must name a human", ProviderScopeClaim)
 		}
 
 		// §3.2 — elevated assurance is mandatory for privileged, in both scope forms. Without
@@ -154,7 +159,15 @@ func Authenticate(verifier TokenVerifier) (fhttp.Middleware, error) {
 			// Principal can carry different values — which would let the same caller claim two
 			// idempotency keys and defeat the deduplication the key exists for.
 			principal, _ := claims.String(PrincipalIDClaim)
-			next.ServeHTTP(w, r.WithContext(WithCallerScope(r.Context(), "principal:"+principal)))
+			ctx := WithCallerScope(r.Context(), "principal:"+principal)
+			// provider_scope present means a provider: the Requirement accepts it only naming
+			// provider:identity-control. Absent, the caller is a registration owner, whose authority
+			// is read per route from the ownership records (TDD-identity-control-003 §Registration
+			// Ownership).
+			if claims.Has(ProviderScopeClaim) {
+				ctx = withProvider(ctx)
+			}
+			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}, nil
 }

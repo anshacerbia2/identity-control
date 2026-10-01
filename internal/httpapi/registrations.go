@@ -55,6 +55,13 @@ type Registrar interface {
 
 	// ExpiringKeys is the key expiry warning (TDD-identity-control-003 §Key Expiry Warnings).
 	ExpiringKeys(ctx context.Context) (registration.Expiring, error)
+
+	// Ownership (ADR-IAM-003, TDD-identity-control-003 §Registration Ownership).
+	Owns(ctx context.Context, principal, registrationID id.UUID) (bool, error)
+	Mine(ctx context.Context, principal id.UUID) ([]registration.Registration, error)
+	Owners(ctx context.Context, registrationID id.UUID) ([]registration.Owner, error)
+	GrantOwner(ctx context.Context, change registration.OwnershipChange) ([]registration.Owner, error)
+	RevokeOwner(ctx context.Context, change registration.OwnershipChange) ([]registration.Owner, error)
 }
 
 // Registrations serves the registration and drift routes.

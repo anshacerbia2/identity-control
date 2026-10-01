@@ -119,7 +119,7 @@ func TestMutationSucceedsOnceACallerIsAuthenticated(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/v1/principals",
 		strings.NewReader(`{"username":"operator","subject_type":"human"}`))
 	request.Header.Set(httpapi.IdempotencyHeader, "key-0001")
-	request = request.WithContext(httpapi.WithCallerScope(request.Context(), "svc:admin-api"))
+	request = request.WithContext(httpapi.WithProvider(httpapi.WithCallerScope(request.Context(), "svc:admin-api")))
 
 	routes(t, &stubProber{}).ServeHTTP(w, request)
 

@@ -84,9 +84,16 @@ func registrationsHandler(t *testing.T, stub *stubReconciler) http.Handler {
 	return built.Mount(identity, identity)
 }
 
+// asPrincipal establishes a provider caller, as a token naming provider:identity-control does.
 func asPrincipal(t *testing.T, r *http.Request) (*http.Request, id.UUID) {
 	principal := mustUUID(t)
-	return r.WithContext(httpapi.WithCallerScope(r.Context(), "principal:"+principal.String())), principal
+	ctx := httpapi.WithProvider(httpapi.WithCallerScope(r.Context(), "principal:"+principal.String()))
+	return r.WithContext(ctx), principal
+}
+
+// asOwner establishes a registration owner's caller: a token without provider_scope (ADR-IAM-003).
+func asOwner(r *http.Request, principal id.UUID) *http.Request {
+	return r.WithContext(httpapi.WithCallerScope(r.Context(), "principal:"+principal.String()))
 }
 
 func serve(handler http.Handler, r *http.Request) *httptest.ResponseRecorder {
@@ -322,6 +329,10 @@ type stubRegistrar struct {
 	change registration.StateChange
 
 	expiring registration.Expiring
+
+	// The ownership surface: who owns what, and what it was asked.
+	owners  map[id.UUID]id.UUID
+	granted *registration.OwnershipChange
 }
 
 func (s *stubRegistrar) lifecycle(action string, change registration.StateChange) (registration.Registration, error) {
@@ -347,6 +358,34 @@ func (s *stubRegistrar) Retire(_ context.Context, change registration.StateChang
 
 func (s *stubRegistrar) ExpiringKeys(context.Context) (registration.Expiring, error) {
 	return s.expiring, s.err
+}
+
+func (s *stubRegistrar) Owns(_ context.Context, principal, registrationID id.UUID) (bool, error) {
+	return s.owners[registrationID] == principal, nil
+}
+
+func (s *stubRegistrar) Mine(_ context.Context, principal id.UUID) ([]registration.Registration, error) {
+	out := []registration.Registration{}
+	for registrationID, owner := range s.owners {
+		if owner == principal {
+			out = append(out, registration.Registration{ID: registrationID, ClientKey: "owned", State: "active"})
+		}
+	}
+	return out, nil
+}
+
+func (s *stubRegistrar) Owners(_ context.Context, registrationID id.UUID) ([]registration.Owner, error) {
+	return []registration.Owner{{Registration: registrationID, Principal: s.owners[registrationID], Active: true}}, s.err
+}
+
+func (s *stubRegistrar) GrantOwner(_ context.Context, change registration.OwnershipChange) ([]registration.Owner, error) {
+	s.granted = &change
+	return []registration.Owner{{Registration: change.RegistrationID, Principal: change.Principal, Active: true}}, s.err
+}
+
+func (s *stubRegistrar) RevokeOwner(_ context.Context, change registration.OwnershipChange) ([]registration.Owner, error) {
+	s.granted = &change
+	return []registration.Owner{}, s.err
 }
 
 func (s *stubRegistrar) Adopt(_ context.Context, req registration.AdoptRequest) (registration.AdoptResult, error) {
