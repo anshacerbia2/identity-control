@@ -3,6 +3,7 @@ package httpapi
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -177,4 +178,31 @@ func bearerToken(r *http.Request) (string, bool) {
 		return "", false
 	}
 	return credential, true
+}
+
+// ReportTokenType wraps a verifier for IDENTITY_TOKEN_TYPE=report. A token whose header typ is not
+// at+jwt is accepted, as the verifier without RequireAccessTokenType accepts it, and logged with the
+// client it was issued to, so an operator sees which clients still need the token profile before the
+// server moves to enforce (TDD-identity-control-001 §Caller Token). The log carries no claim value
+// but the client identifier.
+func ReportTokenType(verifier TokenVerifier, logger *slog.Logger) TokenVerifier {
+	return reportingVerifier{verifier: verifier, logger: logger}
+}
+
+type reportingVerifier struct {
+	verifier TokenVerifier
+	logger   *slog.Logger
+}
+
+func (v reportingVerifier) Verify(token string) (verify.Claims, error) {
+	claims, err := v.verifier.Verify(token)
+	if err != nil {
+		return claims, err
+	}
+	if typ := claims.TokenType(); !strings.EqualFold(typ, "at+jwt") && !strings.EqualFold(typ, "application/at+jwt") {
+		client, _ := claims.String("azp")
+		v.logger.Warn("a caller's token is not typed at+jwt; IDENTITY_TOKEN_TYPE=enforce would refuse it",
+			slog.String("typ", typ), slog.String("client", client))
+	}
+	return claims, nil
 }
