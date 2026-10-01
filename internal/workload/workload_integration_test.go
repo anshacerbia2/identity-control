@@ -434,3 +434,105 @@ func TestAWorkloadIsReassigned(t *testing.T) {
 		t.Errorf("%d change record(s), %v", changes, err)
 	}
 }
+
+func (h *harness) exec(statement string, args ...any) {
+	h.t.Helper()
+	if err := h.pool.InTx(context.Background(), func(ctx context.Context, tx db.Tx) error {
+		_, err := tx.Exec(ctx, statement, args...)
+		return err
+	}); err != nil {
+		h.t.Fatalf("%s: %v", statement, err)
+	}
+}
+
+func (h *harness) count(statement string, args ...any) int {
+	h.t.Helper()
+	var n int
+	if err := h.pool.InTx(context.Background(), func(ctx context.Context, tx db.Tx) error {
+		return tx.QueryRow(ctx, statement, args...).Scan(&n)
+	}); err != nil {
+		h.t.Fatalf("%s: %v", statement, err)
+	}
+	return n
+}
+
+// The workload lifecycle (TDD-identity-control-004 §Suspension, Restoration, and Retirement): a
+// suspension disables the client, a restore needs an owner and writes the client back, and a
+// retirement after a suspension deletes the client and retires the Principal.
+func TestAWorkloadIsSuspendedRestoredAndRetired(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	created, err := h.service.Create(ctx, h.request("lifecycle-job"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := LifecycleRequest{PrincipalID: created.PrincipalID, ChangedBy: h.caller, Reason: "the export moves to a new bank"}
+	client := h.clientsNamed("lifecycle-job")[0]
+
+	if _, err := h.service.Retire(ctx, req); !errors.Is(err, ErrInvalidTransition) {
+		t.Errorf("retiring an active workload answered %v, want ErrInvalidTransition", err)
+	}
+	if _, err := h.service.Restore(ctx, req); !errors.Is(err, ErrInvalidTransition) {
+		t.Errorf("restoring an active workload answered %v, want ErrInvalidTransition", err)
+	}
+	if _, err := h.service.Suspend(ctx, LifecycleRequest{PrincipalID: created.PrincipalID, ChangedBy: h.caller}); !errors.Is(err, ErrInvalid) {
+		t.Errorf("a suspension without a reason answered %v, want ErrInvalid", err)
+	}
+	// The registration lifecycle still refuses a workload's client.
+	if _, err := h.registrar.Suspend(ctx, registration.StateChange{RegistrationID: created.RegistrationID,
+		ChangedBy: h.caller, Reason: "r"}); !errors.Is(err, registration.ErrWorkloadLifecycle) {
+		t.Errorf("the registration lifecycle on a workload's client answered %v", err)
+	}
+
+	suspended, err := h.service.Suspend(ctx, req)
+	if err != nil || suspended.State != StateSuspended {
+		t.Fatalf("suspend: %+v, %v", suspended, err)
+	}
+	if stored, _ := h.clients.Client(client.ID); stored.Enabled || stored.NotBefore == 0 {
+		t.Errorf("after the suspension the client is enabled=%t not-before=%d", stored.Enabled, stored.NotBefore)
+	}
+	if again, err := h.service.Suspend(ctx, req); err != nil || again.State != StateSuspended {
+		t.Errorf("a repeated suspension answered %+v, %v", again, err)
+	}
+
+	// A restore needs an owner: one that has left is reassigned first.
+	h.exec(`UPDATE identity.principal_mapping SET state = 'retired' WHERE principal_id = $1`, h.owner.String())
+	if _, err := h.service.Restore(ctx, req); !errors.Is(err, ErrOwnerNotEligible) {
+		t.Errorf("restoring an unowned workload answered %v, want ErrOwnerNotEligible", err)
+	}
+	h.exec(`UPDATE identity.principal_mapping SET state = 'active' WHERE principal_id = $1`, h.owner.String())
+	restored, err := h.service.Restore(ctx, req)
+	if err != nil || restored.State != StateActive {
+		t.Fatalf("restore: %+v, %v", restored, err)
+	}
+	if stored, _ := h.clients.Client(client.ID); !stored.Enabled || len(h.clients.Keys(client.ID)) == 0 {
+		t.Errorf("after the restore the client is enabled=%t with %d key(s)", stored.Enabled, len(h.clients.Keys(client.ID)))
+	}
+
+	if _, err := h.service.Suspend(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	retired, err := h.service.Retire(ctx, req)
+	if err != nil || retired.State != StateRetired {
+		t.Fatalf("retire: %+v, %v", retired, err)
+	}
+	if len(h.clientsNamed("lifecycle-job")) != 0 {
+		t.Error("the retired workload's client is still in the kernel")
+	}
+	if _, state, _ := h.mapping(created.PrincipalID); state != "retired" {
+		t.Errorf("the retired workload's Principal is %s, want retired", state)
+	}
+	if live := h.count(`SELECT count(*) FROM identity.client_key WHERE registration_id = $1 AND state <> 'revoked'`,
+		created.RegistrationID.String()); live != 0 {
+		t.Errorf("%d key(s) of the retired workload are not revoked", live)
+	}
+	if again, err := h.service.Retire(ctx, req); err != nil || again.State != StateRetired {
+		t.Errorf("a repeated retirement answered %+v, %v", again, err)
+	}
+	// Suspend, restore, suspend, retire: four changes, each naming who asked and why.
+	if changes := h.count(`SELECT count(*) FROM identity.registration_state_change
+	    WHERE registration_id = $1 AND changed_by = $2 AND reason = $3`,
+		created.RegistrationID.String(), h.caller.String(), req.Reason); changes != 4 {
+		t.Errorf("%d state change(s) recorded, want 4", changes)
+	}
+}

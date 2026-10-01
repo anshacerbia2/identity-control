@@ -21,6 +21,30 @@ type stubWorkloadService struct {
 	err        error
 	created    *workload.CreateRequest
 	reassigned *workload.ReassignRequest
+	lifecycle  map[string]workload.LifecycleRequest
+}
+
+func (s *stubWorkloadService) act(action string, req workload.LifecycleRequest) (workload.Workload, error) {
+	if s.lifecycle == nil {
+		s.lifecycle = map[string]workload.LifecycleRequest{}
+	}
+	s.lifecycle[action] = req
+	if s.err != nil {
+		return workload.Workload{}, s.err
+	}
+	return workload.Workload{PrincipalID: req.PrincipalID, State: action}, nil
+}
+
+func (s *stubWorkloadService) Suspend(_ context.Context, req workload.LifecycleRequest) (workload.Workload, error) {
+	return s.act("suspend", req)
+}
+
+func (s *stubWorkloadService) Restore(_ context.Context, req workload.LifecycleRequest) (workload.Workload, error) {
+	return s.act("restore", req)
+}
+
+func (s *stubWorkloadService) Retire(_ context.Context, req workload.LifecycleRequest) (workload.Workload, error) {
+	return s.act("retire", req)
 }
 
 func (s *stubWorkloadService) Create(_ context.Context, req workload.CreateRequest) (workload.Workload, error) {
@@ -182,7 +206,7 @@ func TestAWorkloadIsReassignedWithAReason(t *testing.T) {
 		want               int
 	}{
 		"no reason":         {path, body, "", http.StatusBadRequest},
-		"an unknown action": {"/v1/workloads/" + principalID.String() + ":retire", body, "r", http.StatusNotFound},
+		"an unknown action": {"/v1/workloads/" + principalID.String() + ":delete", body, "r", http.StatusNotFound},
 		"no owner":          {path, `{}`, "r", http.StatusBadRequest},
 		"a malformed id":    {"/v1/workloads/nope:reassign", body, "r", http.StatusBadRequest},
 	} {
@@ -212,6 +236,47 @@ func TestAWorkloadIsReassignedWithAReason(t *testing.T) {
 	}
 }
 
+// The lifecycle actions (TDD-identity-control-004 §Suspension, Restoration, and Retirement) take the
+// workload, the caller and the reason, and map the service's refusals.
+func TestAWorkloadIsSuspendedRestoredAndRetiredWithAReason(t *testing.T) {
+	principalID := mustUUID(t)
+	for _, action := range []string{"suspend", "restore", "retire"} {
+		path := "/v1/workloads/" + principalID.String() + ":" + action
+		service := &stubWorkloadService{}
+		r, caller := asPrincipal(t, httptest.NewRequest(http.MethodPost, path, nil))
+		r.Header.Set(httpapi.AdministrativeReasonHeader, "the job is decommissioned")
+		if w := serve(workloadHandler(t, service), r); w.Code != http.StatusOK {
+			t.Fatalf("%s: status %d: %s", action, w.Code, w.Body)
+		}
+		if got := service.lifecycle[action]; got.PrincipalID != principalID || got.ChangedBy != caller ||
+			got.Reason != "the job is decommissioned" {
+			t.Errorf("%s = %+v", action, got)
+		}
+
+		unreasoned := &stubWorkloadService{}
+		r, _ = asPrincipal(t, httptest.NewRequest(http.MethodPost, path, nil))
+		if w := serve(workloadHandler(t, unreasoned), r); w.Code != http.StatusBadRequest || unreasoned.lifecycle != nil {
+			t.Errorf("%s without a reason answered %d, want 400", action, w.Code)
+		}
+	}
+	for name, c := range map[string]struct {
+		err  error
+		want int
+	}{
+		"a workload in the wrong state": {workload.ErrInvalidTransition, http.StatusConflict},
+		"an owner that has left":        {workload.ErrOwnerNotEligible, http.StatusBadRequest},
+		"a client gone from the kernel": {registration.ErrInvalidTransition, http.StatusConflict},
+		"an unknown workload":           {workload.ErrNotFound, http.StatusNotFound},
+		"the kernel is down":            {keycloak.ErrUnavailable, http.StatusServiceUnavailable},
+	} {
+		r, _ := asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/workloads/"+principalID.String()+":restore", nil))
+		r.Header.Set(httpapi.AdministrativeReasonHeader, "r")
+		if w := serve(workloadHandler(t, &stubWorkloadService{err: c.err}), r); w.Code != c.want {
+			t.Errorf("%s answered %d, want %d", name, w.Code, c.want)
+		}
+	}
+}
+
 func TestEveryWorkloadRouteRequiresAnAuthenticatedPrincipal(t *testing.T) {
 	service := &stubWorkloadService{}
 	handler := workloadHandler(t, service)
@@ -220,6 +285,8 @@ func TestEveryWorkloadRouteRequiresAnAuthenticatedPrincipal(t *testing.T) {
 		httptest.NewRequest(http.MethodPost, "/v1/workloads", strings.NewReader(workloadBody(principalID))),
 		httptest.NewRequest(http.MethodGet, "/v1/workloads/"+principalID, nil),
 		httptest.NewRequest(http.MethodPost, "/v1/workloads/"+principalID+":reassign", strings.NewReader(`{}`)),
+		httptest.NewRequest(http.MethodPost, "/v1/workloads/"+principalID+":suspend", nil),
+		httptest.NewRequest(http.MethodPost, "/v1/workloads/"+principalID+":retire", nil),
 	} {
 		if w := serve(handler, r); w.Code != http.StatusUnauthorized {
 			t.Errorf("%s %s answered %d without a caller, want 401", r.Method, r.URL.Path, w.Code)

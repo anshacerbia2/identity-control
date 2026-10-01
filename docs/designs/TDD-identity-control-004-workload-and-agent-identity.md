@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-004
   title: Workload and Bounded Agent Identity
   owner: Core Platform Team
-  version: 1.3.0
+  version: 1.4.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-11
-  last_reviewed: 2026-09-30
+  last_reviewed: 2026-10-01
   parent_sad: SAD-001
 ---
 
@@ -104,9 +104,9 @@ a cryptographic one.
 | `WorkloadReconciler` | `internal/reconcile` | Orphan sweep, unused-workload detection |
 
 **Built so far.** `WorkloadProvisioner` is built: creation, pending-workload recovery, and reading a
-workload. Of `OwnershipRegistry`, reassignment is built. Orphan detection needs the owner-lifecycle
-events this service does not consume yet, and the suspension it leads to needs the registration
-lifecycle (`TDD-identity-control-003`, `:suspend` and `:retire`). `AgentDelegationService`,
+workload. Of `OwnershipRegistry`, reassignment and the lifecycle (§Suspension, Restoration, and
+Retirement) are built. Orphan detection needs the owner-lifecycle events this service does not
+consume yet; the suspension it leads to is the one built here. `AgentDelegationService`,
 `WorkloadReconciler`, unused detection and periodic review are not built, and an `agent` workload is
 refused until delegation is.
 
@@ -257,9 +257,9 @@ it.
 POST   /v1/workloads                                   built
 GET    /v1/workloads/{principal_id}                    built
 POST   /v1/workloads/{principal_id}:reassign           built
-POST   /v1/workloads/{principal_id}:suspend
-POST   /v1/workloads/{principal_id}:restore
-POST   /v1/workloads/{principal_id}:retire
+POST   /v1/workloads/{principal_id}:suspend           built
+POST   /v1/workloads/{principal_id}:restore           built
+POST   /v1/workloads/{principal_id}:retire            built
 GET    /v1/workloads:orphaned
 GET    /v1/workloads:unused
 
@@ -395,6 +395,61 @@ Suspending a workload also disables its client, which stops the next exchange ou
 A compromised workload key is revoked instead: its public key is removed from the client, and
 the kernel refuses it on the next request (`TDD-identity-control-003` §Client Key Rotation).
 
+### Suspension, Restoration, and Retirement
+
+A workload stops the way a registration does (`ADR-IAM-001 §5.13`): a suspension that can be undone,
+and a retirement only after one. Its client cannot be stopped through the registration lifecycle,
+which refuses a workload's client (`TDD-identity-control-003`), because the client and the
+Principal stop together: deleting the client deletes its service-account user, and that user is
+the workload's Principal in the kernel.
+
+| Action | From | Workload | Its registration and client | Its Principal |
+| :-- | :-- | :-- | :-- | :-- |
+| `:suspend` | `active`, `orphaned` | `suspended` | suspended: the client disabled and its not-before set | unchanged |
+| `:restore` | `suspended` | `active` | active: the registered keys, redirect URIs and lifespan written, the client enabled | unchanged |
+| `:retire` | `suspended` | `retired` | retired: its keys removed and revoked, the client deleted | mapping `retired` |
+
+```text
+suspend(workload, reason):
+    lock the workload; refuse unless active or orphaned
+    suspend its registration in the same transaction        -- recorded before the kernel
+    record the workload suspended
+    commit, then disable the client and set its not-before  -- the sweep converges a failure
+
+restore(workload, reason):
+    lock the workload; refuse unless suspended
+    refuse unless its owner is still an active human Principal: reassign first
+    restore its registration, writing the client, in the same transaction
+    record the workload active, its orphaned_at cleared
+
+retire(workload, reason):
+    lock the workload; refuse unless suspended
+    retire its registration, deleting the client, in the same transaction
+    record the Principal's mapping retired
+    record the workload retired
+```
+
+- **A suspension changes the kernel after it commits**, as a registration's does: the record is
+  desired state, and a kernel call that fails leaves a suspended registration the sweep disables.
+  A restore and a retirement change the kernel inside the transaction that records them, so a
+  failure leaves the workload suspended. Every failure errs toward the stop.
+- **An access token already issued lives out its class.** The `workload` audience's `L3` lifetime
+  is nine minutes (STD-IAM-002 §3.3), and a workload holds no refresh token, so a suspension stops
+  the next client-credentials exchange and every token within nine minutes.
+- **A restore needs an owner.** Restoring a workload whose owner has left would put a credential back
+  into use that nobody answers for, which is what an orphan is. The owner is reassigned first, then
+  the workload restored.
+- **A retirement retires the Principal.** Its mapping moves to `retired`, the terminal state of
+  `TDD-identity-control-001`, so the dangling sweep, which reads active mappings, does not report a
+  Principal whose kernel user was deleted on purpose. The `principal_id` is never reissued, and every
+  record naming it stays.
+- **Every action requires `X-Administrative-Reason`.** The change is recorded in the registration's
+  insert-only `registration_state_change`, which names who asked and why; a workload and its
+  registration are one-to-one, so that history is the workload's.
+- **A retirement is offered only after a suspension**, for the reason `ADR-IAM-001 §5.13` gives,
+  from Google Cloud's and AWS's guidance on service accounts and access keys: a dependency nobody
+  knew about breaks during the suspension, while the workload can still be restored.
+
 ### Unused Workload Detection
 
 ```text
@@ -494,6 +549,14 @@ Pending-workload recovery runs on the registration sweep's schedule
   revoked context.
 - Measured enforcement stays within propagation plus the class `L3` lifetime.
 - Suspending a workload disables its client, and the next exchange fails.
+- `:suspend` is refused for a `pending`, `suspended` or `retired` workload; `:restore` and `:retire`
+  for one that is not `suspended`. A repeat of a suspension changes nothing.
+- A restore writes the registered keys back and enables the client, and is refused while the owner
+  is not an active human Principal.
+- A retirement deletes the client, revokes its keys, and retires the Principal's mapping, which the
+  dangling sweep then does not report.
+- A lifecycle action without a reason is refused, and each one is recorded with who asked and why.
+- The registration lifecycle still refuses a workload's client.
 - Revoking a workload's key makes the next assertion signed with it fail.
 
 ### Agents
