@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-003
   title: Protocol Client and Protected-Resource Registration
   owner: Core Platform Team
-  version: 1.18.0
+  version: 1.19.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -428,7 +428,11 @@ GET    /v1/registrations/{registration_id}/drift-exceptions
 GET    /v1/registrations/{registration_id}/findings
 GET    /v1/registrations:drift
 GET    /v1/registrations:expiring-keys
+GET    /v1/registrations:mine
 POST   /v1/registrations:reconcile
+POST   /v1/registrations/{registration_id}/owners
+GET    /v1/registrations/{registration_id}/owners
+POST   /v1/registrations/{registration_id}/owners/{principal_id}:revoke
 ```
 
 `GET /v1/registrations` lists the configured realm's registrations, one page at a time, in
@@ -993,6 +997,63 @@ retire(registration, reason, caller):
   carries the workload's identity (`identity-kernel` compat run 36765561606). The workload lifecycle
   stops the client and its Principal together (`TDD-identity-control-004`).
 
+### Registration Ownership
+
+`ADR-IAM-003` gives a registration owners, so an application team can act on its own client. This
+is its first slice: owners, the token that carries one, and the routes an owner may call. Proposals
+for production changes and application developer standing follow.
+
+```sql
+CREATE TABLE identity.registration_owner (
+    ownership_id    UUID        PRIMARY KEY,
+    registration_id UUID        NOT NULL REFERENCES identity.client_registration(registration_id),
+    principal_id    UUID        NOT NULL,
+    granted_by      UUID        NOT NULL,
+    grant_reason    TEXT        NOT NULL CHECK (btrim(grant_reason) <> ''),
+    granted_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    revoked_at      TIMESTAMPTZ,
+    revoked_by      UUID,
+    revoke_reason   TEXT,
+    CONSTRAINT registration_owner_revocation_check
+        CHECK ((revoked_at IS NULL) = (revoked_by IS NULL)
+           AND (revoked_at IS NULL) = (revoke_reason IS NULL))
+);
+CREATE UNIQUE INDEX registration_owner_active
+    ON identity.registration_owner (registration_id, principal_id) WHERE revoked_at IS NULL;
+```
+
+The runtime role holds no `DELETE` on the table and `UPDATE` only on the three revocation columns, so
+who was made an owner, by whom and why is never rewritten, and a revoked ownership stays as the
+record.
+
+**An owner is an active human Principal, checked when it is read.** Granting refuses a Principal
+whose mapping is not an active `human` one. Every ownership read joins the owner's mapping and
+counts it only while the mapping is active, so a Principal retired or quarantined confers nothing
+from the next request, without a sweep having to revoke anything.
+
+**Granting and revoking are a provider's**, each with `X-Administrative-Reason`. A revocation in
+production is refused when it would leave the registration fewer than two active owners
+(`ADR-IAM-003 §5.1`); whether the deployment is production is
+`IDENTITY_ENVIRONMENT`. A retired registration takes no new owner.
+
+**The caller.** A token naming `provider:identity-control` is a provider's, as before. A token
+without `provider_scope` is an owner's (`TDD-identity-control-001` §Caller Token): a person, with
+`acr` and `auth_time`. Authentication establishes which, and then:
+
+| Route | Provider | Owner |
+| :-- | :-- | :-- |
+| `GET /v1/registrations:mine` | its own owned registrations | its own owned registrations |
+| `GET /v1/registrations/{id}`, `/keys`, `/findings`, `/owners` | any | owned only |
+| `POST /v1/registrations/{id}/keys` (rotate), `/keys/{key_id}:revoke` | any | owned only |
+| `POST /v1/registrations/{id}:suspend`, `:restore` | any | owned only |
+| `POST /v1/registrations/{id}:retire`, owners, adoption, registration, reconcile, every Principal and workload route | yes | 403 |
+
+An owner route reads the ownership of the registration in its path and answers 404 for one the
+caller does not own, so an owner cannot learn which other registrations exist. Every other route
+refuses an owner before reading a record, in one place, so a route added later is a provider's
+unless it is listed here. An owner's action is recorded under the owner's `principal_id`, as a
+provider's is.
+
 ## Configuration
 
 | Variable | Default | Purpose |
@@ -1001,6 +1062,7 @@ retire(registration, reason, caller):
 | `IDENTITY_CLIENT_KEY_ROTATION_OVERLAP` | `168h` (7 days) | Window during which the new and the retiring key are both accepted. Shorter than the lifetime, or startup is refused |
 | `IDENTITY_REGISTRATION_RECONCILE_INTERVAL` | `1h` | Drift sweep cadence. Admin-event retention in `identity-kernel` (7 days) must exceed it, or a change would lose its attribution before a sweep reads it |
 | `IDENTITY_UNMANAGED_CLIENTS` | `report` | `report` records and alerts a Keycloak client no registration describes; `disable` also disables it. Production runs `disable`, once its bootstrap clients are adopted |
+| `IDENTITY_ENVIRONMENT` | `production` | `production` or `non-production`. In production, a registration keeps at least two owners (`ADR-IAM-003 §5.1`). Production by default, so a deployment that forgets to set it gets the stricter rule |
 | `IDENTITY_APPLICATION_AUTHORITY` | `manual` | Becomes the Software Catalog authority name once chartered |
 | `IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID` | none, required | The registration path's own Admin API client, `identity-control-registration` |
 | `IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_KEY_FILE` | none, required | Its PEM private key, from the secret manager as a file; never the Principal path's |
@@ -1113,6 +1175,17 @@ retire(registration, reason, caller):
   and disabled in `disable`.
 - The kernel's built-in clients and this service's own Admin API clients are never recorded.
 - The finding converges once the client is registered or deleted.
+
+### Ownership
+
+- A provider grants an owner with a reason; a workload, an inactive Principal, or a retired
+  registration is refused, and a second active ownership of the same Principal is refused.
+- An owner reads, rotates and revokes keys of, and suspends and restores, a registration it owns;
+  another registration answers 404, and a provider-only route answers 403 without reading a record.
+- An owner whose Principal is retired or quarantined confers nothing at the next request.
+- In production, revoking an ownership that would leave fewer than two is refused.
+- A token without `provider_scope` that names a workload, lacks `acr` or `auth_time`, or carries
+  `tenant_id` is refused.
 
 ### Lifecycle
 

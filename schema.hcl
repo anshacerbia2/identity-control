@@ -1305,3 +1305,90 @@ table "registration_state_change" {
     expr = "(from_state = 'active' AND to_state IN ('suspended', 'retired')) OR (from_state = 'suspended' AND to_state IN ('active', 'retired'))"
   }
 }
+
+// The owners of a registration (ADR-IAM-003, TDD-identity-control-003 §Registration Ownership): the
+// people who may act on it besides a provider. Nothing is deleted: grants.sql leaves the runtime role
+// UPDATE on the three revocation columns only, so who was made an owner, by whom and why is never
+// rewritten.
+table "registration_owner" {
+  schema  = schema.identity
+  comment = "Who may act on a registration besides a provider, granted and revoked with a reason. TDD-identity-control-003."
+
+  column "ownership_id" {
+    null = false
+    type = uuid
+  }
+
+  column "registration_id" {
+    null = false
+    type = uuid
+  }
+
+  column "principal_id" {
+    null = false
+    type = uuid
+  }
+
+  column "granted_by" {
+    null = false
+    type = uuid
+  }
+
+  column "grant_reason" {
+    null = false
+    type = text
+  }
+
+  column "granted_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+
+  column "revoked_at" {
+    null = true
+    type = timestamptz
+  }
+
+  column "revoked_by" {
+    null = true
+    type = uuid
+  }
+
+  column "revoke_reason" {
+    null = true
+    type = text
+  }
+
+  primary_key {
+    columns = [column.ownership_id]
+  }
+
+  foreign_key "registration_owner_registration_id_fkey" {
+    columns     = [column.registration_id]
+    ref_columns = [table.client_registration.column.registration_id]
+    on_update   = NO_ACTION
+    on_delete   = NO_ACTION
+  }
+
+  // One active ownership per Principal and registration, read by ON CONFLICT on a grant.
+  index "registration_owner_active" {
+    unique  = true
+    columns = [column.registration_id, column.principal_id]
+    where   = "revoked_at IS NULL"
+  }
+
+  // The owned-registrations read, by Principal.
+  index "registration_owner_principal" {
+    columns = [column.principal_id]
+    where   = "revoked_at IS NULL"
+  }
+
+  check "registration_owner_reason_check" {
+    expr = "btrim(grant_reason) <> ''"
+  }
+
+  check "registration_owner_revocation_check" {
+    expr = "((revoked_at IS NULL) = (revoked_by IS NULL)) AND ((revoked_at IS NULL) = (revoke_reason IS NULL))"
+  }
+}

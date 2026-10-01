@@ -145,6 +145,7 @@ func run() error {
 		PendingRecoveryAfter: cfg.PendingRecoveryAfter,
 		KeyLifetime:          cfg.ClientKeyLifetime,
 		RotationOverlap:      cfg.ClientKeyRotationOverlap,
+		Production:           cfg.Production,
 	}, logger)
 	if err != nil {
 		return fmt.Errorf("registration service: %w", err)

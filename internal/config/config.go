@@ -72,6 +72,11 @@ type Config struct {
 	// for an estate whose bootstrap clients are not adopted yet (TDD-identity-control-003).
 	DisableUnmanagedClients bool
 
+	// Production is IDENTITY_ENVIRONMENT=production, the default: a registration keeps at least two
+	// owners (ADR-IAM-003 §5.1). Production unless stated, so a deployment that forgets to say
+	// gets the stricter rule.
+	Production bool
+
 	// TokenIssuer and TokenAudience are the verifier's contract. The issuer is compared for
 	// exact equality, so a value with a stray trailing slash rejects every token rather than
 	// accepting a wrong one.
@@ -178,6 +183,13 @@ func Load() (Config, error) {
 		problems = append(problems, errors.New("IDENTITY_CLIENT_KEY_ROTATION_OVERLAP must be shorter than IDENTITY_CLIENT_KEY_LIFETIME, or a key would retire after it expired"))
 	}
 
+	switch environment := stringOr("IDENTITY_ENVIRONMENT", "production"); environment {
+	case "production":
+		cfg.Production = true
+	case "non-production":
+	default:
+		problems = append(problems, fmt.Errorf("IDENTITY_ENVIRONMENT is %q; it is production or non-production", environment))
+	}
 	switch mode := stringOr("IDENTITY_UNMANAGED_CLIENTS", "report"); mode {
 	case "report":
 	case "disable":

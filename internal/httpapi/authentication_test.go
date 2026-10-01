@@ -297,17 +297,18 @@ func TestEveryRejectionProducesTheSameDocument(t *testing.T) {
 	}
 
 	rejected := map[string]string{
-		"bad signature":   forged(t),
-		"wrong audience":  token(t, withClaims(map[string]any{"aud": []string{"organization-control"}})),
-		"expired":         token(t, withClaims(map[string]any{"exp": authNow.Add(-time.Hour).Unix()})),
-		"no principal_id": token(t, withClaims(map[string]any{"principal_id": nil})),
-		"no subject_type": token(t, withClaims(map[string]any{"subject_type": nil})),
-		"unknown subject": token(t, withClaims(map[string]any{"subject_type": "service"})),
-		"no provider":     token(t, withClaims(map[string]any{"provider_scope": nil})),
-		"tenant present":  token(t, withClaims(map[string]any{"tenant_id": "019235f1-0000-7000-8000-000000000001"})),
-		"no acr":          token(t, withClaims(map[string]any{"acr": nil})),
-		"no auth_time":    token(t, withClaims(map[string]any{"auth_time": nil})),
-		"malformed":       "not.a.token",
+		"bad signature":           forged(t),
+		"wrong audience":          token(t, withClaims(map[string]any{"aud": []string{"organization-control"}})),
+		"expired":                 token(t, withClaims(map[string]any{"exp": authNow.Add(-time.Hour).Unix()})),
+		"no principal_id":         token(t, withClaims(map[string]any{"principal_id": nil})),
+		"no subject_type":         token(t, withClaims(map[string]any{"subject_type": nil})),
+		"unknown subject":         token(t, withClaims(map[string]any{"subject_type": "service"})),
+		"no provider, a workload": token(t, withClaims(map[string]any{"provider_scope": nil, "subject_type": "workload"})),
+		"empty provider":          token(t, withClaims(map[string]any{"provider_scope": ""})),
+		"tenant present":          token(t, withClaims(map[string]any{"tenant_id": "019235f1-0000-7000-8000-000000000001"})),
+		"no acr":                  token(t, withClaims(map[string]any{"acr": nil})),
+		"no auth_time":            token(t, withClaims(map[string]any{"auth_time": nil})),
+		"malformed":               "not.a.token",
 	}
 
 	var bodies []string
@@ -345,13 +346,13 @@ func TestEveryRejectionProducesTheSameDocument(t *testing.T) {
 // claims were absent together would pass a combined test and let a single-claim omission through.
 func TestRequirementRejectsEveryMissingMandatoryClaim(t *testing.T) {
 	cases := map[string]map[string]any{
-		"no claims at all":     {"principal_id": nil, "subject_type": nil, "provider_scope": nil, "acr": nil, "auth_time": nil},
-		"no principal_id":      {"principal_id": nil},
-		"no subject_type":      {"subject_type": nil},
-		"unknown subject type": {"subject_type": "agent"},
-		"no provider_scope":    {"provider_scope": nil},
-		"no acr":               {"acr": nil},
-		"no auth_time":         {"auth_time": nil},
+		"no claims at all":              {"principal_id": nil, "subject_type": nil, "provider_scope": nil, "acr": nil, "auth_time": nil},
+		"no principal_id":               {"principal_id": nil},
+		"no subject_type":               {"subject_type": nil},
+		"unknown subject type":          {"subject_type": "agent"},
+		"no provider_scope, a workload": {"provider_scope": nil, "subject_type": "workload"},
+		"no acr":                        {"acr": nil},
+		"no auth_time":                  {"auth_time": nil},
 	}
 
 	for name, overrides := range cases {
@@ -380,7 +381,6 @@ func TestRequirementRejectsEveryMissingMandatoryClaim(t *testing.T) {
 func TestScopeFormMustBeUnambiguous(t *testing.T) {
 	cases := map[string]map[string]any{
 		"both claims present": {"tenant_id": "019235f1-0000-7000-8000-000000000001"},
-		"neither claim":       {"provider_scope": nil},
 		"tenant only":         {"provider_scope": nil, "tenant_id": "019235f1-0000-7000-8000-000000000001"},
 	}
 
@@ -499,5 +499,33 @@ func TestEnforceModeRefusesATokenNotTypedAtJWT(t *testing.T) {
 		if w.Code != want {
 			t.Errorf("typ %s answered %d, want %d", typ, w.Code, want)
 		}
+	}
+}
+
+// A token without provider_scope is a registration owner's (ADR-IAM-003, STD-IAM-002 §3.1.1's
+// resource-scoped form): a person, accepted, and not marked a provider, so only the owner routes
+// serve it.
+func TestATokenWithoutProviderScopeIsAnOwnersAndNotAProviders(t *testing.T) {
+	middleware, err := httpapi.Authenticate(realVerifier(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, c := range map[string]struct {
+		overrides map[string]any
+		provider  bool
+	}{
+		"a provider": {nil, true},
+		"an owner":   {map[string]any{"provider_scope": nil}, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var seen, reached bool
+			handler := middleware(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+				reached, seen = true, httpapi.IsProvider(r.Context())
+			}))
+			handler.ServeHTTP(httptest.NewRecorder(), bearerRequest("Bearer "+token(t, withClaims(c.overrides))))
+			if !reached || seen != c.provider {
+				t.Errorf("reached=%t provider=%t, want reached and provider=%t", reached, seen, c.provider)
+			}
+		})
 	}
 }

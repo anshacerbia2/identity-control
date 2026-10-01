@@ -321,3 +321,38 @@ func TestTheTokenTypeIsReportedUnlessEnforcementIsAsked(t *testing.T) {
 		}
 	}
 }
+
+// IDENTITY_ENVIRONMENT is production unless stated (ADR-IAM-003 §5.1), so a deployment that forgets
+// to say gets the two-owner rule.
+func TestTheEnvironmentIsProductionUnlessStated(t *testing.T) {
+	for _, c := range []struct {
+		value      string
+		production bool
+		ok         bool
+	}{
+		{"", true, true},
+		{"production", true, true},
+		{"non-production", false, true},
+		{"staging", false, false},
+	} {
+		t.Setenv("IDENTITY_DATABASE_URL", "postgres://runtime@localhost:5432/identity")
+		t.Setenv("IDENTITY_KEYCLOAK_REALM", "scnehaux")
+		t.Setenv("IDENTITY_KEYCLOAK_BASE_URL", "https://identity.example.com")
+		t.Setenv("IDENTITY_KEYCLOAK_CLIENT_ID", "identity-control")
+		t.Setenv("IDENTITY_KEYCLOAK_CLIENT_KEY_FILE", "/keys/identity-control.pem")
+		t.Setenv("IDENTITY_TOKEN_ISSUER", "https://identity.example.com/realms/scnehaux")
+		t.Setenv("IDENTITY_TOKEN_AUDIENCE", "identity-control")
+		t.Setenv("IDENTITY_JWKS_URL", "https://identity.example.com/realms/scnehaux/protocol/openid-connect/certs")
+		t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID", "identity-control-registration")
+		t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_KEY_FILE", "/keys/identity-control-registration.pem")
+		t.Setenv("IDENTITY_ENVIRONMENT", c.value)
+
+		cfg, err := config.Load()
+		if c.ok && (err != nil || cfg.Production != c.production) {
+			t.Errorf("%q: production %t, err %v; want %t", c.value, cfg.Production, err, c.production)
+		}
+		if !c.ok && err == nil {
+			t.Errorf("%q was accepted", c.value)
+		}
+	}
+}

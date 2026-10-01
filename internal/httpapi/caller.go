@@ -55,3 +55,22 @@ func idempotencyKey(r *http.Request) (string, bool) {
 	}
 	return key, true
 }
+
+type providerKey struct{}
+
+// withProvider records that the authenticated caller holds provider authority. Only the
+// authentication middleware sets it, from a verified provider_scope.
+func withProvider(ctx context.Context) context.Context {
+	return context.WithValue(ctx, providerKey{}, true)
+}
+
+// WithProvider is withProvider for tests in other packages, which establish a caller without a
+// token, as WithCallerScope is.
+func WithProvider(ctx context.Context) context.Context { return withProvider(ctx) }
+
+// IsProvider reports whether the caller holds provider authority. A caller without it is a
+// registration owner, served only by the owner routes.
+func IsProvider(ctx context.Context) bool {
+	provider, _ := ctx.Value(providerKey{}).(bool)
+	return provider
+}
