@@ -226,11 +226,25 @@ Content-Type: application/json
 ```
 
 The answer is the plan. `adoptable: true` means the client runs as declared. A `token_lifespan`,
-`audience_scope` or `enabled` difference is converged only if named in `"converge": [...]`; a
+`audience_scope`, `enabled` or `token_format` difference is converged only if named in
+`"converge": [...]`. A client a script made before the token profile differs in `token_format` (no
+at+jwt attribute, no `client_id` mapper) and `audience_scope` (the realm's old default scopes, which
+put email, names and roles into its access tokens), so name both:
+`"converge":["token_format","audience_scope"]`. A
 `redirect_uris` or `client_keys` difference means the declaration is wrong, and is fixed in the
 declaration, never in the console. Then send the same body without `dry_run` and with an
 `Idempotency-Key`. Once the BFF and the caller are adopted, set `IDENTITY_UNMANAGED_CLIENTS=disable`
 in `.env` and restart the service.
+
+## The token profile, on a server that ran before it
+
+A client registered or adopted before the token profile (`TDD-identity-control-003` §Profiles)
+lacks the at+jwt attribute and the `client_id` mapper, and holds the realm's old default scopes.
+The first sweep after the upgrade records each such client `unattributed` in `token_format` and
+`audience_scope`, because no admin event explains a difference that predates the comparison. Apply
+the registered state once per finding, from the Admin Portal's registration page or with
+`POST /v1/registrations:reconcile` naming the findings and a reason. The clients' access tokens then
+carry `typ` `at+jwt` and `client_id`, and no email, names, or roles.
 
 ## Keys, and moving a server from secrets to keys
 

@@ -182,7 +182,10 @@ try {
     $callerJwk = @{ kty = "RSA"; n = (ConvertTo-Base64Url $callerPublic.Modulus); e = (ConvertTo-Base64Url $callerPublic.Exponent) }
 } finally { $callerRsa.Dispose() }
 $declaration = @{ client_key = "identity-control-caller"; profile = "confidential"; audience_class = "privileged"
-    application_ref = "identity-control-dev"; redirect_uris = @("http://127.0.0.1:8099/callback"); public_keys = @($callerJwk) }
+    application_ref = "identity-control-dev"; redirect_uris = @("http://127.0.0.1:8099/callback"); public_keys = @($callerJwk)
+    # The script made the caller before the token profile: no at+jwt attribute, no client_id mapper, and
+    # the realm's scopes rather than its own. Both converge as part of the adoption.
+    converge = @("token_format", "audience_scope") }
 $reasonHeader = "smoke: the development caller comes under registration"
 function Send-Adopt($body, $idempotencyKey) {
     $request = New-Object System.Net.Http.HttpRequestMessage("POST", "$api/v1/registrations:adopt")

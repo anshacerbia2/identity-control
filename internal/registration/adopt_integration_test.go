@@ -17,7 +17,9 @@ import (
 )
 
 // bootstrapped puts a client in the kernel as a bootstrap script leaves it: confidential, holding the
-// given keys by client-jwt, with the internal managed scope, and no registration.
+// given keys by client-jwt, with the token profile a confidential internal client holds, and no
+// registration. legacy leaves it as one made before the token profile: no at+jwt attribute, no
+// client_id mapper, and the realm's old default scopes.
 func (h *harness) bootstrapped(clientKey string, keys ...testKeyPair) keycloak.ClientUUID {
 	h.t.Helper()
 	var held []keycloak.JWK
@@ -31,9 +33,16 @@ func (h *harness) bootstrapped(clientKey string, keys ...testKeyPair) keycloak.C
 	client := keycloak.ClientUUID("kc-" + clientKey)
 	h.kernel.Put(keycloak.Client{ID: client, ClientID: clientKey, Enabled: true,
 		RedirectURIs: []string{"https://bff.example.com/callback"}, AccessTokenLifespan: 240,
-		Credential: keycloak.ClientCredential{Authenticator: "client-jwt", HeldJWKS: true, Keys: held}})
-	h.kernel.AttachScope(client, "scope-internal")
+		Credential: keycloak.ClientCredential{Authenticator: "client-jwt", HeldJWKS: true, Keys: held},
+		RFC9068:    true, ClientIDClaim: clientKey})
+	desired, _ := DesiredScopes(ProfileConfidential, "internal")
+	h.kernel.HoldScopes(client, desired.Default, desired.Optional)
 	return client
+}
+
+func (h *harness) legacy(client keycloak.ClientUUID) {
+	h.kernel.ConsoleChange("", client, func(c *keycloak.Client) { c.RFC9068, c.ClientIDClaim = false, "" })
+	h.kernel.HoldScopes(client, []string{"acr", "basic", "email", "profile", "scnehaux-internal"}, nil)
 }
 
 func (h *harness) adoption(clientKey string, keys ...testKeyPair) AdoptRequest {
@@ -219,4 +228,48 @@ func TestAnAdoptionRefusesWhatItCannotTake(t *testing.T) {
 			t.Errorf("%s answered %v, want ErrInvalid", name, err)
 		}
 	}
+}
+
+// A client a bootstrap script made before the token profile differs in token_format and
+// audience_scope. Unnamed, the adoption is refused; named, both converge before the record: the
+// at+jwt attribute and the client_id mapper are written, profile and email are detached, and the
+// sign-in scope is attached as an optional one.
+func TestABootstrapClientMadeBeforeTheTokenProfileConvergesWhenNamed(t *testing.T) {
+	h := newHarness(t)
+	key := testKey(t)
+	client := h.bootstrapped("legacy-bff", key)
+	h.legacy(client)
+
+	refused, err := h.service.Adopt(context.Background(), h.adoption("legacy-bff", key))
+	if !errors.Is(err, ErrNotAdoptable) || !planDiffers(refused.Plan, ClassTokenFormat) ||
+		!planDiffers(refused.Plan, ClassAudienceScope) {
+		t.Fatalf("an unnamed legacy adoption answered %+v, %v", refused, err)
+	}
+
+	req := h.adoption("legacy-bff", key)
+	req.Converge = []string{ClassTokenFormat, ClassAudienceScope}
+	adopted, err := h.service.Adopt(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := h.live(client)
+	defaults, _ := h.kernel.DefaultClientScopes(context.Background(), testRealm, client)
+	optional, _ := h.kernel.OptionalClientScopes(context.Background(), testRealm, client)
+	if !live.RFC9068 || live.ClientIDClaim != "legacy-bff" ||
+		!sameIDs(defaults, "acr", "basic", "scnehaux-internal") || !sameIDs(optional, "scnehaux-profile") {
+		t.Errorf("after the adoption: %+v, default %v, optional %v", live, defaults, optional)
+	}
+	if _, _, converged := h.adoptions(adopted.Registration.ID); !slices.Equal(converged,
+		[]string{ClassAudienceScope, ClassTokenFormat}) {
+		t.Errorf("converged %v", converged)
+	}
+}
+
+func planDiffers(plan Plan, class string) bool {
+	for _, difference := range plan.Differences {
+		if difference.FieldClass == class {
+			return difference.Differs
+		}
+	}
+	return false
 }
