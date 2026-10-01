@@ -19,7 +19,7 @@ func TestEachProfileHoldsItsScopeSets(t *testing.T) {
 	}{
 		{ProfileConfidential, "internal", []string{"acr", "basic", "scnehaux-internal"}, []string{"scnehaux-profile"}, true},
 		{ProfilePublic, "external", []string{"acr", "basic", "scnehaux-external"}, []string{}, true},
-		{ProfileWorkload, "workload", []string{"basic", "scnehaux-workload"}, []string{}, true},
+		{ProfileWorkload, "workload", []string{"basic", "scnehaux-workload", "service_account"}, []string{}, true},
 		{ProfileResource, "internal", nil, nil, false},
 	} {
 		got, governed := DesiredScopes(c.profile, c.class)

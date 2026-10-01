@@ -396,7 +396,7 @@ func TestRecreateBuildsADeletedClientAgain(t *testing.T) {
 	if _, after := h.state(registration.ID); after != string(client) || after == before {
 		t.Errorf("kc_client_id is %s after recreation, want the new client %s", after, client)
 	}
-	if spec, scopes, ok := h.kernel.Spec(client); !ok || !spec.Public || len(scopes) != 1 {
+	if spec, scopes, ok := h.kernel.Spec(client); !ok || !spec.Public || !sameIDs(scopes, "scope-acr", "scope-basic", "scope-internal") {
 		t.Errorf("recreated client spec %+v scopes %v", spec, scopes)
 	}
 }

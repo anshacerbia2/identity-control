@@ -156,8 +156,8 @@ func TestAWorkloadWaitsForTheKernelsWorkloadScope(t *testing.T) {
 	}
 	_, client := h.state(workload.ID)
 	if spec, scopes, _ := h.kernel.Spec(keycloak.ClientUUID(client)); !spec.Workload || len(spec.RedirectURIs) != 0 ||
-		len(spec.Keys) != 1 || !sameIDs(scopes, "scope-basic", "scope-workload") {
-		t.Errorf("workload spec = %+v, scopes %v; want basic and the managed scope, and no acr or profile", spec, scopes)
+		len(spec.Keys) != 1 || !sameIDs(scopes, "scope-basic", "scope-service-account", "scope-workload") {
+		t.Errorf("workload spec = %+v, scopes %v; want basic, service_account and the managed scope, and no acr or profile", spec, scopes)
 	}
 
 	// A confidential client keeps acr, which STD-IAM-002 permits outside the workload profile, and loses

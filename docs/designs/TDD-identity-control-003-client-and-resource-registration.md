@@ -521,15 +521,17 @@ of scopes** (STD-IAM-002 §3.2, §3.2.1):
 | :-- | :-- | :-- |
 | `access.token.header.type.rfc9068` attribute | `true`, so its access tokens carry `typ` `at+jwt` | `true` |
 | `client_id` mapper | a hardcoded claim naming its `client_key`, in access tokens | the same |
-| Default client scopes | exactly `basic`, `acr`, and its managed audience scope | exactly `basic` and its managed audience scope |
+| Default client scopes | exactly `basic`, `acr`, and its managed audience scope | exactly `basic`, `service_account`, and its managed audience scope |
 | Optional client scopes | `scnehaux-profile` for a confidential client, else none | none |
 
 The kernel writes the at+jwt header only for a client that carries the attribute, and `client_id`
 only into a service-account token, so both are set per client (identity-kernel compat run
 36775603547). The scope sets are closed because a scope the client holds is a claim surface: the
 kernel's built-in `profile`, `email`, `roles` and `web-origins` put personal data and roles into an
-access token, `acr` puts `acr=1` into a client credentials token, and `service_account` writes a
-workload's network address. A scope outside the set is detached; a missing one is attached. A scope
+access token, and `acr` puts `acr=1` into a client credentials token. A workload holds
+`service_account`: the kernel attaches it again on every update of a client with service accounts
+(identity-control#30 found a detachment undone by the next key rotation), and `identity-kernel`
+declares it with its `client_id` mapper alone, so it writes no network address. A scope outside the set is detached; a missing one is attached. A scope
 the realm does not declare is skipped, except the managed audience scope, whose absence refuses the
 registration. The sets are applied wherever the managed scope is attached: creation, pending
 recovery, recreation, and adoption.
@@ -979,7 +981,7 @@ retire(registration, reason, caller):
 - Every registration receives exactly one managed audience scope.
 - A registered client holds exactly its default and optional scope sets of §Profiles after
   creation, recovery, and recreation alike: a built-in `profile`, `email`, `roles` or `web-origins`
-  scope is detached, a workload holds neither `acr` nor `service_account`, and only a confidential
+  scope is detached, a workload holds `service_account` and not `acr`, and only a confidential
   client holds `scnehaux-profile`, as an optional scope.
 - A registered client other than a resource carries the at+jwt attribute and a `client_id` mapper
   naming its `client_key`; a resource carries neither.

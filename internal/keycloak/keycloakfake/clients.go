@@ -78,7 +78,8 @@ func NewRegistry(serviceAccount string) *Registry {
 		optionalScopes: map[keycloak.ClientUUID][]string{},
 		Scopes: map[string]string{"scnehaux-internal": "scope-internal", "scnehaux-provider": "scope-provider",
 			"scnehaux-external": "scope-external", "basic": "scope-basic", "acr": "scope-acr",
-			"scnehaux-profile": "scope-sign-in", "profile": "scope-profile", "email": "scope-email"}}
+			"scnehaux-profile": "scope-sign-in", "profile": "scope-profile", "email": "scope-email",
+			"service_account": "scope-service-account"}}
 }
 
 var _ keycloak.ClientRegistry = (*Registry)(nil)

@@ -24,6 +24,10 @@ const (
 	// ScopeProfile gives a first-party BFF the name it shows, in its ID token only. A confidential
 	// client holds it as an optional scope and requests it at sign-in.
 	ScopeProfile = "scnehaux-profile"
+	// ScopeServiceAccount is the kernel's built-in scope for a client with service accounts. The
+	// kernel attaches it again on every update of such a client, so a workload holds it; identity-kernel
+	// declares it with its client_id mapper alone, so it writes no network address.
+	ScopeServiceAccount = "service_account"
 )
 
 // ScopeSets are a client's default and optional client scopes, by name.
@@ -39,7 +43,9 @@ func DesiredScopes(profile, audienceClass string) (ScopeSets, bool) {
 		return ScopeSets{}, false
 	}
 	desired := ScopeSets{Default: []string{ScopeBasic, managedScopes[audienceClass]}, Optional: []string{}}
-	if profile != ProfileWorkload {
+	if profile == ProfileWorkload {
+		desired.Default = append(desired.Default, ScopeServiceAccount)
+	} else {
 		desired.Default = append(desired.Default, ScopeACR)
 	}
 	if profile == ProfileConfidential {
