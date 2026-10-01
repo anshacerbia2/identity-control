@@ -1580,3 +1580,126 @@ table "application_developer" {
     expr = "((revoked_at IS NULL) = (revoked_by IS NULL)) AND ((revoked_at IS NULL) = (revoke_reason IS NULL))"
   }
 }
+
+table "registration_request" {
+  schema  = schema.identity
+  comment = "A production registration asked for, then approved by a provider other than its proposer, or decided against. TDD-identity-control-003."
+
+  column "request_id" {
+    null = false
+    type = uuid
+  }
+
+  column "realm" {
+    null = false
+    type = text
+  }
+
+  column "client_key" {
+    null = false
+    type = text
+  }
+
+  // The registration document as POST /v1/registrations takes it, a public key reduced to its
+  // public members.
+  column "request" {
+    null = false
+    type = jsonb
+  }
+
+  column "owners" {
+    null = false
+    type = sql("uuid[]")
+  }
+
+  column "proposed_by" {
+    null = false
+    type = uuid
+  }
+
+  column "proposal_reason" {
+    null = false
+    type = text
+  }
+
+  column "proposed_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+
+  column "state" {
+    null    = false
+    type    = text
+    default = "proposed"
+  }
+
+  column "decided_by" {
+    null = true
+    type = uuid
+  }
+
+  column "decision_reason" {
+    null = true
+    type = text
+  }
+
+  column "decided_at" {
+    null = true
+    type = timestamptz
+  }
+
+  column "registration_id" {
+    null = true
+    type = uuid
+  }
+
+  primary_key {
+    columns = [column.request_id]
+  }
+
+  foreign_key "registration_request_registration_id_fkey" {
+    columns     = [column.registration_id]
+    ref_columns = [table.client_registration.column.registration_id]
+    on_update   = NO_ACTION
+    on_delete   = NO_ACTION
+  }
+
+  // One open request per client_key: two would race to register the same client.
+  index "registration_request_open" {
+    unique  = true
+    columns = [column.realm, column.client_key]
+    where   = "state = 'proposed'"
+  }
+
+  // A proposer's own requests.
+  index "registration_request_proposer" {
+    columns = [column.proposed_by]
+  }
+
+  check "registration_request_state_check" {
+    expr = "state IN ('proposed', 'approved', 'rejected', 'withdrawn')"
+  }
+
+  check "registration_request_owners_check" {
+    expr = "cardinality(owners) >= 2"
+  }
+
+  check "registration_request_reason_check" {
+    expr = "btrim(proposal_reason) <> ''"
+  }
+
+  check "registration_request_decision_check" {
+    expr = "((state = 'proposed') = (decided_at IS NULL)) AND ((decided_at IS NULL) = (decided_by IS NULL)) AND ((decided_at IS NULL) = (decision_reason IS NULL))"
+  }
+
+  check "registration_request_registration_check" {
+    expr = "(state = 'approved') = (registration_id IS NOT NULL)"
+  }
+
+  // NIST AC-5 in the database: a production registration is never recorded approved by its
+  // proposer.
+  check "registration_request_separation_check" {
+    expr = "(state <> 'approved') OR (decided_by <> proposed_by)"
+  }
+}

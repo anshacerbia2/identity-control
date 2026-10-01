@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -100,7 +101,9 @@ func TestEveryAPIRouteIsWrapped(t *testing.T) {
 		if pattern == "GET /v1/registrations:mine" || pattern == "GET /v1/registrations:standing" {
 			continue // the caller's own ownerships and standing, for any caller
 		}
-		if pattern == "POST /v1/registrations" && strings.HasPrefix(handler, "creator(") {
+		creatorRoutes := []string{"POST /v1/registrations", "POST /v1/registration-requests",
+			"GET /v1/registration-requests:mine", "POST /v1/registration-requests/{request_action}"}
+		if slices.Contains(creatorRoutes, pattern) && strings.HasPrefix(handler, "creator(") {
 			continue // a provider, or an application developer within its bounds
 		}
 		if !strings.HasPrefix(handler, "p(") && !strings.HasPrefix(handler, "owned(") {

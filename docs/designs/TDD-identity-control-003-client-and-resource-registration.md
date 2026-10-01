@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-003
   title: Protocol Client and Protected-Resource Registration
   owner: Core Platform Team
-  version: 1.22.0
+  version: 1.23.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -443,6 +443,12 @@ POST   /v1/registrations/{registration_id}/changes/{change_id}:withdraw
 GET    /v1/application-developers
 POST   /v1/application-developers
 POST   /v1/application-developers/{principal_id}:revoke
+POST   /v1/registration-requests
+GET    /v1/registration-requests
+GET    /v1/registration-requests:mine
+POST   /v1/registration-requests/{request_id}:approve
+POST   /v1/registration-requests/{request_id}:reject
+POST   /v1/registration-requests/{request_id}:withdraw
 ```
 
 `GET /v1/registrations` lists the configured realm's registrations, one page at a time, in
@@ -1062,6 +1068,8 @@ without `provider_scope` is an owner's (`TDD-identity-control-001` §Caller Toke
 | `POST .../changes/{change_id}:withdraw` | its own proposal | its own proposal, on a registration it owns |
 | `POST .../changes/{change_id}:approve`, `:reject`, `GET /v1/registrations:changes` | yes, not its own proposal | 403 |
 | `POST /v1/registrations` | any | an application developer, in non-production, within §Application Developers |
+| `POST /v1/registration-requests`, `GET /v1/registration-requests:mine`, `:withdraw` | its own | an application developer, its own |
+| `GET /v1/registration-requests`, `:approve`, `:reject` | yes, not its own request | 403 |
 | `POST /v1/registrations/{id}:retire`, owners, application developers, adoption, reconcile, every Principal and workload route | yes | 403 |
 
 An owner route reads the ownership of the registration in its path and answers 404 for one the
@@ -1166,13 +1174,84 @@ answer was lost is not refused as a conflict with itself.
 oldest first: the approval queue. Each change carries its registration's `client_key`, so the
 queue reads without a second request. Every command takes `X-Administrative-Reason`.
 
+### Registration Requests
+
+`ADR-IAM-003 §5.3` creates a production registration only by approval: an application developer
+proposes it, naming at least two owners, and a provider other than the proposer approves it. A
+request is that proposal, held until it is decided.
+
+```sql
+CREATE TABLE identity.registration_request (
+    request_id      UUID        PRIMARY KEY,
+    realm           TEXT        NOT NULL,
+    client_key      TEXT        NOT NULL,
+    request         JSONB       NOT NULL,
+    owners          UUID[]      NOT NULL CHECK (cardinality(owners) >= 2),
+    proposed_by     UUID        NOT NULL,
+    proposal_reason TEXT        NOT NULL CHECK (btrim(proposal_reason) <> ''),
+    proposed_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    state           TEXT        NOT NULL DEFAULT 'proposed'
+        CHECK (state IN ('proposed', 'approved', 'rejected', 'withdrawn')),
+    decided_by      UUID,
+    decision_reason TEXT,
+    decided_at      TIMESTAMPTZ,
+    registration_id UUID REFERENCES identity.client_registration(registration_id),
+    CONSTRAINT registration_request_decision_check
+        CHECK ((state = 'proposed') = (decided_at IS NULL)
+           AND (decided_at IS NULL) = (decided_by IS NULL)
+           AND (decided_at IS NULL) = (decision_reason IS NULL)),
+    CONSTRAINT registration_request_registration_check
+        CHECK ((state = 'approved') = (registration_id IS NOT NULL)),
+    CONSTRAINT registration_request_separation_check
+        CHECK (state <> 'approved' OR decided_by <> proposed_by)
+);
+CREATE UNIQUE INDEX registration_request_open
+    ON identity.registration_request (realm, client_key) WHERE state = 'proposed';
+```
+
+`request` is the registration document as `POST /v1/registrations` takes it, and a confidential
+client's public key with it. A private key is refused when proposed, as at registration, so none is
+stored. The runtime role holds `UPDATE` only on `state`, the decision columns and
+`registration_id`, and no `DELETE`.
+
+```text
+propose(document, owners, reason), in production only:
+    validate the document as registration does
+    hold it to §Application Developers' bounds when the proposer is a developer, production aside
+    refuse fewer than two distinct owners, or an owner who is not an active person   400
+    refuse a client_key an active registration holds                                 409
+    the same proposal retried by its proposer is answered with it                    200
+    refuse while another request for the same client_key is open                     409
+
+approve(request, caller, reason):                provider only, not the proposer   403
+    register the document as the proposer's, under the request as its Idempotency-Key,
+    and in the transaction that reserves it:
+        grant each named owner, refusing one no longer an active person
+        record the request approved, naming the registration
+    a retry of the same approval by the same provider is answered with it
+reject(request, caller, reason):                 provider only, not the proposer
+withdraw(request, caller, reason):               the proposer only
+```
+
+**The approval and the registration commit together.** The request is recorded approved, and its
+owners granted, in the same transaction that reserves the registration. A kernel that does not then
+confirm the client leaves the registration `pending`, which recovery completes (§Validation).
+A client_key a Keycloak client already holds retires it, as registration does, and the request
+stays the record of what was approved.
+
+**Outside production there is nothing to request**: an application developer registers directly,
+and the API says so. A provider still creates production registrations directly, and
+§Open Questions records whether it should request them too.
+
+`GET /v1/registration-requests` is the approval queue, oldest first. `:mine` lists the caller's own
+requests, newest first, at most 100.
+
 ### Application Developers
 
 `ADR-IAM-003 §5.3` lets a provider grant a person **application developer** standing, as Entra's
 Application Developer role grants creating registrations once self-service is restricted. Such a
 person creates non-production registrations and becomes their first owner. This slice is that
-standing and that creation. A production registration is created by approval, which follows: until
-it is built, a provider creates production registrations.
+standing and that creation. A production registration is created by approval (§Registration Requests).
 
 ```sql
 CREATE TABLE identity.application_developer (
@@ -1200,7 +1279,7 @@ creating registrations at the next request.
 ```text
 register(request) by a caller without provider_scope:
     refuse unless the caller holds active application developer standing        403, before reading
-    refuse in production: a production registration is created by approval        403
+    refuse in production: a production registration is requested, then approved    403
     refuse the workload profile: a workload is created through /v1/workloads       403
     refuse the privileged and workload audience classes                            403
     refuse an audience naming a resource the caller does not own                   403
@@ -1389,6 +1468,17 @@ two creates nothing.
 - A caller without the standing, or whose Principal is no longer active, is refused before the body
   is read.
 
+### Registration Requests
+
+- A request outside production, with fewer than two owners, an owner who is not an active person,
+  or a document registration refuses, is refused, and nothing is recorded.
+- A developer's request is held to its bounds; the same request retried returns it; a second open
+  request for the same client_key is refused.
+- The proposer's approval is refused, by the service and by the database. Another provider's
+  approval creates the registration, grants its owners and records the request approved, together.
+- An owner who stopped being an active person refuses the approval, and nothing is created.
+- Only the proposer withdraws; a provider rejects with a reason.
+
 ### Lifecycle
 
 - A suspension disables the client and sets its not-before to the second after it, records the
@@ -1507,7 +1597,12 @@ compromised client key, expired client key recovery, and registration drift repa
 
 ### Open Questions
 
-1. The Application reference authority. `manual` is the interim, and every registration
+1. Whether a provider's own production registration should be requested and approved too.
+   `ADR-IAM-003 §5.3` says a production registration is created only by approval. Today a provider
+   creates one directly, as the workload path and adoption do; requiring approval of them changes
+   both, and is the owner's decision.
+
+2. The Application reference authority. `manual` is the interim, and every registration
    carrying it is tracked as debt. When Software Catalog is chartered, the authority
    name changes and existing references are reconciled against it rather than
    re-entered.

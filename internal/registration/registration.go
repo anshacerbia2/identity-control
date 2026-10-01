@@ -88,6 +88,11 @@ type Request struct {
 	// and it becomes the registration's first owner.
 	Developer bool
 
+	// reserved runs in the transaction that reserves the registration, after it is recorded
+	// pending: an approved request grants its owners and records its approval there, so the two
+	// commit together (TDD-identity-control-003 §Registration Requests).
+	reserved func(ctx context.Context, tx db.Tx, registration Registration) error
+
 	ClientKey      string   `json:"client_key"`
 	Profile        string   `json:"profile"`
 	AudienceClass  string   `json:"audience_class"`
@@ -360,8 +365,16 @@ func (s *Service) Register(ctx context.Context, req Request) (Registration, erro
 			return json.Unmarshal(claim.Body, &registration)
 		}
 		registration, err = s.Reserve(ctx, tx, prepared)
-		if err != nil || !req.Developer {
+		if err != nil {
 			return err
+		}
+		if req.reserved != nil {
+			if err := req.reserved(ctx, tx, registration); err != nil {
+				return err
+			}
+		}
+		if !req.Developer {
+			return nil
 		}
 		return s.claimAsDeveloper(ctx, tx, req, registration.ID)
 	})

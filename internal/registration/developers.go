@@ -218,10 +218,17 @@ func (s *Service) RevokeApplicationDeveloper(ctx context.Context, change Develop
 // developerScope refuses what an application developer may not register, before anything is read
 // or written. The audience's ownership is checked in the transaction that records the registration.
 func (s *Service) developerScope(req Request) error {
+	if s.cfg.Production {
+		return fmt.Errorf("%w: a production registration is requested, then approved by a provider: POST /v1/registration-requests",
+			ErrDeveloperScope)
+	}
+	return developerBounds(req)
+}
+
+// developerBounds is what an application developer may register, wherever it is registered.
+func developerBounds(req Request) error {
 	refuse := func(rule string) error { return fmt.Errorf("%w: %s", ErrDeveloperScope, rule) }
 	switch {
-	case s.cfg.Production:
-		return refuse("a production registration is created by a provider, until it can be created by approval")
 	case req.Profile == ProfileWorkload:
 		return refuse("a workload is created by a provider through /v1/workloads")
 	case !slices.Contains(developerAudienceClasses, req.AudienceClass):
@@ -241,14 +248,8 @@ func (s *Service) claimAsDeveloper(ctx context.Context, tx db.Tx, req Request, r
 	if !developer {
 		return ErrNotDeveloper
 	}
-	if len(req.Audience) > 0 {
-		var owned int
-		if err := tx.QueryRow(ctx, ownsAllStatement, string(s.cfg.Realm), req.RegisteredBy.String(), req.Audience).Scan(&owned); err != nil {
-			return fmt.Errorf("registration: read the audience's owners: %w", err)
-		}
-		if owned != len(uniqueStrings(req.Audience)) {
-			return fmt.Errorf("%w: an application developer's audience names only resources it owns", ErrDeveloperScope)
-		}
+	if err := s.ownsAudience(ctx, tx, req); err != nil {
+		return err
 	}
 	ownershipID, err := s.newID()
 	if err != nil {
