@@ -334,6 +334,12 @@ type stubRegistrar struct {
 	owners  map[id.UUID]id.UUID
 	granted *registration.OwnershipChange
 	readErr error // what Owns and Mine answer
+
+	// The change surface's record of what it was asked.
+	proposal   *registration.Proposal
+	decision   *registration.Decision
+	asProvider bool
+	replayed   bool
 }
 
 func (s *stubRegistrar) lifecycle(action string, change registration.StateChange) (registration.Registration, error) {
@@ -390,6 +396,25 @@ func (s *stubRegistrar) GrantOwner(_ context.Context, change registration.Owners
 func (s *stubRegistrar) RevokeOwner(_ context.Context, change registration.OwnershipChange) ([]registration.Owner, error) {
 	s.granted = &change
 	return []registration.Owner{}, s.err
+}
+
+func (s *stubRegistrar) ProposeChange(_ context.Context, proposal registration.Proposal) (registration.Change, bool, error) {
+	s.proposal = &proposal
+	return registration.Change{Registration: proposal.RegistrationID, RedirectURIs: proposal.RedirectURIs, State: "proposed"},
+		!s.replayed, s.err
+}
+
+func (s *stubRegistrar) DecideChange(_ context.Context, decision registration.Decision, provider bool) (registration.Change, error) {
+	s.decision, s.asProvider = &decision, provider
+	return registration.Change{ID: decision.ChangeID, Registration: decision.RegistrationID, State: "applied"}, s.err
+}
+
+func (s *stubRegistrar) Changes(_ context.Context, registrationID id.UUID) ([]registration.Change, error) {
+	return []registration.Change{{Registration: registrationID, State: "proposed"}}, s.err
+}
+
+func (s *stubRegistrar) OpenChanges(context.Context) ([]registration.Change, error) {
+	return []registration.Change{}, s.readErr
 }
 
 func (s *stubRegistrar) Adopt(_ context.Context, req registration.AdoptRequest) (registration.AdoptResult, error) {

@@ -40,6 +40,7 @@ BEGIN
               ('identity.registration_adoption'),
               ('identity.registration_state_change'),
               ('identity.registration_owner'),
+              ('identity.registration_change'),
               ('identity.principal_relink'),
               ('identity.principal_finding'),
               ('platform.outbox'),
@@ -134,6 +135,12 @@ REVOKE UPDATE, DELETE, TRUNCATE ON identity.registration_state_change FROM ident
 -- table-level UPDATE is revoked before the column-level one is granted, as for client_key.
 REVOKE UPDATE, DELETE, TRUNCATE ON identity.registration_owner FROM identity_runtime;
 GRANT UPDATE (revoked_at, revoked_by, revoke_reason) ON identity.registration_owner TO identity_runtime;
+
+-- A change says who asked for which redirect URIs against which version, and why (ADR-IAM-003
+-- §5.2). Its content and its proposer are never rewritten and nothing deletes one: only its
+-- decision is written after the proposal.
+REVOKE UPDATE, DELETE, TRUNCATE ON identity.registration_change FROM identity_runtime;
+GRANT UPDATE (state, decided_by, decision_reason, decided_at) ON identity.registration_change TO identity_runtime;
 
 -- A relink record says who moved a Principal to a new Keycloak user and why, so it is insert-only.
 -- A dangling-mapping finding is evidence that a user disappeared, kept after it is resolved.

@@ -1392,3 +1392,126 @@ table "registration_owner" {
     expr = "((revoked_at IS NULL) = (revoked_by IS NULL)) AND ((revoked_at IS NULL) = (revoke_reason IS NULL))"
   }
 }
+
+table "registration_change" {
+  schema  = schema.identity
+  comment = "A change to a registration's redirect URIs, proposed, then applied or decided against. TDD-identity-control-003."
+
+  column "change_id" {
+    null = false
+    type = uuid
+  }
+
+  column "registration_id" {
+    null = false
+    type = uuid
+  }
+
+  // The registration's version the change was proposed against. An approval of a change whose
+  // registration has moved since records it superseded.
+  column "base_version" {
+    null = false
+    type = bigint
+  }
+
+  // The registered set when the change was proposed: the before of the preview the approver sees.
+  column "previous_redirect_uris" {
+    null = false
+    type = sql("text[]")
+  }
+
+  column "redirect_uris" {
+    null = false
+    type = sql("text[]")
+  }
+
+  // Fixed when the change is proposed, from IDENTITY_ENVIRONMENT, so the record states the rule it
+  // was held to.
+  column "approval_required" {
+    null = false
+    type = boolean
+  }
+
+  column "proposed_by" {
+    null = false
+    type = uuid
+  }
+
+  column "proposal_reason" {
+    null = false
+    type = text
+  }
+
+  column "proposed_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+
+  column "state" {
+    null    = false
+    type    = text
+    default = "proposed"
+  }
+
+  column "decided_by" {
+    null = true
+    type = uuid
+  }
+
+  column "decision_reason" {
+    null = true
+    type = text
+  }
+
+  column "decided_at" {
+    null = true
+    type = timestamptz
+  }
+
+  primary_key {
+    columns = [column.change_id]
+  }
+
+  foreign_key "registration_change_registration_id_fkey" {
+    columns     = [column.registration_id]
+    ref_columns = [table.client_registration.column.registration_id]
+    on_update   = NO_ACTION
+    on_delete   = NO_ACTION
+  }
+
+  // One open change per registration: a second would be approved against a version the first moves.
+  index "registration_change_open" {
+    unique  = true
+    columns = [column.registration_id]
+    where   = "state = 'proposed'"
+  }
+
+  // The approval queue, oldest first.
+  index "registration_change_queue" {
+    columns = [column.proposed_at]
+    where   = "state = 'proposed'"
+  }
+
+  check "registration_change_state_check" {
+    expr = "state IN ('proposed', 'applied', 'rejected', 'withdrawn', 'superseded')"
+  }
+
+  check "registration_change_redirects_check" {
+    expr = "cardinality(redirect_uris) > 0"
+  }
+
+  check "registration_change_reason_check" {
+    expr = "btrim(proposal_reason) <> ''"
+  }
+
+  check "registration_change_decision_check" {
+    expr = "((state = 'proposed') = (decided_at IS NULL)) AND ((decided_at IS NULL) = (decided_by IS NULL)) AND ((decided_at IS NULL) = (decision_reason IS NULL))"
+  }
+
+  // NIST AC-5 in the database: a change that required approval is never recorded applied by its
+  // proposer, whatever the code above it does.
+  check "registration_change_separation_check" {
+    expr = "(NOT approval_required) OR (state <> 'applied') OR (decided_by <> proposed_by)"
+  }
+}

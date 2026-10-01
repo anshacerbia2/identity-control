@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-003
   title: Protocol Client and Protected-Resource Registration
   owner: Core Platform Team
-  version: 1.19.0
+  version: 1.20.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-11
-  last_reviewed: 2026-09-30
+  last_reviewed: 2026-10-01
   parent_sad: SAD-001
 ---
 
@@ -433,6 +433,12 @@ POST   /v1/registrations:reconcile
 POST   /v1/registrations/{registration_id}/owners
 GET    /v1/registrations/{registration_id}/owners
 POST   /v1/registrations/{registration_id}/owners/{principal_id}:revoke
+POST   /v1/registrations/{registration_id}/changes
+GET    /v1/registrations/{registration_id}/changes
+GET    /v1/registrations:changes
+POST   /v1/registrations/{registration_id}/changes/{change_id}:approve
+POST   /v1/registrations/{registration_id}/changes/{change_id}:reject
+POST   /v1/registrations/{registration_id}/changes/{change_id}:withdraw
 ```
 
 `GET /v1/registrations` lists the configured realm's registrations, one page at a time, in
@@ -824,9 +830,9 @@ registration never named. Restoring desired state in silence would close the hol
 also hide that anyone tried. So the client is disabled, which stops every new login
 through it, and the changed value is kept for whoever investigates. Only an operator
 lifts the block, with `POST /v1/registrations:reconcile` naming the finding and a
-reason. That restores the desired URIs and re-enables the client. Changing a
-registration's redirect URIs through this API is not designed yet, so until it is,
-restoring desired state is the only way to lift a block.
+reason. That restores the desired URIs and re-enables the client. A registration's
+redirect URIs change through this API by a change, approved where approval is required
+(§Registration Changes), which writes the kernel itself, so a sweep finds nothing to block.
 
 **No attribution, no automatic repair.** An automatic repair can undo an operator's
 emergency fix minutes after they made it, which is a worse incident than the drift
@@ -1000,8 +1006,9 @@ retire(registration, reason, caller):
 ### Registration Ownership
 
 `ADR-IAM-003` gives a registration owners, so an application team can act on its own client. This
-is its first slice: owners, the token that carries one, and the routes an owner may call. Proposals
-for production changes and application developer standing follow.
+is its first slice: owners, the token that carries one, and the routes an owner may call. Changes,
+approved by another provider in production, are §Registration Changes. Application developer
+standing follows.
 
 ```sql
 CREATE TABLE identity.registration_owner (
@@ -1046,6 +1053,9 @@ without `provider_scope` is an owner's (`TDD-identity-control-001` §Caller Toke
 | `GET /v1/registrations/{id}`, `/keys`, `/findings`, `/owners` | any | owned only |
 | `POST /v1/registrations/{id}/keys` (rotate), `/keys/{key_id}:revoke` | any | owned only |
 | `POST /v1/registrations/{id}:suspend`, `:restore` | any | owned only |
+| `POST /v1/registrations/{id}/changes`, `GET .../changes` | any | owned only |
+| `POST .../changes/{change_id}:withdraw` | its own proposal | its own proposal, on a registration it owns |
+| `POST .../changes/{change_id}:approve`, `:reject`, `GET /v1/registrations:changes` | yes, not its own proposal | 403 |
 | `POST /v1/registrations/{id}:retire`, owners, adoption, registration, reconcile, every Principal and workload route | yes | 403 |
 
 An owner route reads the ownership of the registration in its path and answers 404 for one the
@@ -1053,6 +1063,102 @@ caller does not own, so an owner cannot learn which other registrations exist. E
 refuses an owner before reading a record, in one place, so a route added later is a provider's
 unless it is listed here. An owner's action is recorded under the owner's `principal_id`, as a
 provider's is.
+
+### Registration Changes
+
+`ADR-IAM-003 §5.2` lets an owner propose a change to a registration's trust configuration and
+apply it to a non-production registration, and has a provider other than the proposer approve
+it in production. This slice changes **redirect URIs**, the field that decides where an
+authorization code is delivered and the one an attacker with a developer account would change
+(`TDD-identity-experience-004` §Security Notes). Audience and lifetime class follow. The kernel
+carries a client's audience as protocol mappers written at creation, which no patch path writes
+yet, and a resource's lifetime class changes the derived lifespan of every client whose audience
+names it, so each needs its own design.
+
+```sql
+CREATE TABLE identity.registration_change (
+    change_id              UUID        PRIMARY KEY,
+    registration_id        UUID        NOT NULL REFERENCES identity.client_registration(registration_id),
+    base_version           BIGINT      NOT NULL,
+    previous_redirect_uris TEXT[]      NOT NULL,
+    redirect_uris          TEXT[]      NOT NULL CHECK (cardinality(redirect_uris) > 0),
+    approval_required      BOOLEAN     NOT NULL,
+    proposed_by            UUID        NOT NULL,
+    proposal_reason        TEXT        NOT NULL CHECK (btrim(proposal_reason) <> ''),
+    proposed_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+    state                  TEXT        NOT NULL DEFAULT 'proposed'
+        CHECK (state IN ('proposed', 'applied', 'rejected', 'withdrawn', 'superseded')),
+    decided_by             UUID,
+    decision_reason        TEXT,
+    decided_at             TIMESTAMPTZ,
+    CONSTRAINT registration_change_decision_check
+        CHECK ((state = 'proposed') = (decided_at IS NULL)
+           AND (decided_at IS NULL) = (decided_by IS NULL)
+           AND (decided_at IS NULL) = (decision_reason IS NULL)),
+    CONSTRAINT registration_change_separation_check
+        CHECK (NOT approval_required OR state <> 'applied' OR decided_by <> proposed_by)
+);
+CREATE UNIQUE INDEX registration_change_open
+    ON identity.registration_change (registration_id) WHERE state = 'proposed';
+```
+
+`registration_change_separation_check` is AC-5 in the database: a change that required approval
+cannot be recorded as applied by its proposer, whatever the code above it does. Whether approval
+was required is fixed when the change is proposed, from `IDENTITY_ENVIRONMENT`, so the record
+states the rule it was held to. The runtime role holds no `DELETE` on the table and `UPDATE` only
+on `state` and the three decision columns, so a proposal's content and its proposer are never
+rewritten.
+
+```text
+propose(registration, redirect_uris, expected_version, reason, caller):
+    refuse unless the registration is active and its profile is public or confidential
+    refuse unless expected_version is the registration's version         409 version conflict
+    validate each redirect URI as registration does; at least one; no repeats
+    refuse a set equal to the registered one
+    an open proposal by the same caller with the same set is answered    200, the same change
+    refuse while another change to this registration is open            409, naming it
+    record previous_redirect_uris, the registered set, for the preview
+    non-production: apply now, recorded applied by the caller            201
+    production: record it proposed; nothing else changes                 201
+
+approve(change, caller, reason):                      provider only
+    refuse unless the change is proposed                                 409
+    refuse when the caller proposed it                                   403, AC-5
+    when the registration's version moved since base_version:
+        record the change superseded, by the caller, and refuse          409
+    apply                                                                200
+
+reject(change, caller, reason):                       provider only, not its proposer
+withdraw(change, caller, reason):                     its proposer only
+
+apply(change), under the registration's row lock:
+    write redirect_uris and version + 1
+    patch the kernel client's redirect URIs; on failure roll back        503, retry
+    record the change applied, with the caller and the reason
+```
+
+**The kernel is written inside the transaction, as a restore writes it.** A kernel that refuses or
+does not answer rolls the change back, and the proposal stays open for a retry. A kernel that
+accepted the change when the commit then fails leaves the client with URIs desired state does not
+hold. The next sweep blocks it, disables the client, and keeps the new value on the finding for
+inspection. That fails closed, on a path that needs the database to fail between two statements,
+and the operator reconciles and approves again.
+
+**A proposal is pinned to the version it was made against.** The approver sees what the proposer
+saw: `previous_redirect_uris` and `redirect_uris`, the whole set before and after. A registration
+that moved since, by a rotation or another change, changes the preview, so the proposal is
+recorded `superseded` and is proposed again. A key rotation does not move `version`, because it
+changes no field of the registration row, so rotating does not invalidate a waiting proposal.
+
+**One open change per registration.** Two proposals waiting on the same registration would each
+be approved against a version the other moves, so the second is refused until the first is
+decided. A retry of the same proposal by the same caller is answered with it, so a proposal whose
+answer was lost is not refused as a conflict with itself.
+
+`GET /v1/registrations/{id}/changes` lists one registration's changes, newest first, at most 100:
+`{"changes": [...]}`. `GET /v1/registrations:changes` lists every open proposal in the realm,
+oldest first: the approval queue. Each change carries its registration's `client_key`, so the
+queue reads without a second request. Every command takes `X-Administrative-Reason`.
 
 ## Configuration
 
@@ -1062,7 +1168,7 @@ provider's is.
 | `IDENTITY_CLIENT_KEY_ROTATION_OVERLAP` | `168h` (7 days) | Window during which the new and the retiring key are both accepted. Shorter than the lifetime, or startup is refused |
 | `IDENTITY_REGISTRATION_RECONCILE_INTERVAL` | `1h` | Drift sweep cadence. Admin-event retention in `identity-kernel` (7 days) must exceed it, or a change would lose its attribution before a sweep reads it |
 | `IDENTITY_UNMANAGED_CLIENTS` | `report` | `report` records and alerts a Keycloak client no registration describes; `disable` also disables it. Production runs `disable`, once its bootstrap clients are adopted |
-| `IDENTITY_ENVIRONMENT` | `production` | `production` or `non-production`. In production, a registration keeps at least two owners (`ADR-IAM-003 §5.1`). Production by default, so a deployment that forgets to set it gets the stricter rule |
+| `IDENTITY_ENVIRONMENT` | `production` | `production` or `non-production`. In production, a registration keeps at least two owners (`ADR-IAM-003 §5.1`), and a redirect URI change waits for a provider other than its proposer (§Registration Changes). Production by default, so a deployment that forgets to set it gets the stricter rule |
 | `IDENTITY_APPLICATION_AUTHORITY` | `manual` | Becomes the Software Catalog authority name once chartered |
 | `IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID` | none, required | The registration path's own Admin API client, `identity-control-registration` |
 | `IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_KEY_FILE` | none, required | Its PEM private key, from the secret manager as a file; never the Principal path's |
@@ -1187,6 +1293,23 @@ provider's is.
 - A token without `provider_scope` that names a workload, lacks `acr` or `auth_time`, or carries
   `tenant_id` is refused.
 
+### Changes
+
+- A change to redirect URIs that fail registration's rules, that repeat one, or that equal the
+  registered set is refused; so is one against a registration that is not active, or a profile with
+  no redirect URIs.
+- A stale `expected_version` is refused as a version conflict.
+- In non-production, a change is applied at once: desired state, `version` and the kernel client
+  move together, and the change is recorded applied by its proposer.
+- In production, a change waits. Its proposer's approval is refused, by the service and by the
+  database, and another provider's approval applies it.
+- A proposal whose registration moved since is recorded superseded when approved, and nothing is
+  applied.
+- A second open proposal on the same registration is refused; the same proposal retried returns it.
+- A kernel failure while applying leaves desired state, the version and the proposal unchanged.
+- An owner proposes and withdraws on a registration it owns; it cannot approve or reject, or read
+  the queue. A withdrawal by anyone but the proposer is refused.
+
 ### Lifecycle
 
 - A suspension disables the client and sets its not-before to the second after it, records the
@@ -1276,6 +1399,7 @@ authentication.
 | Unattributed divergence | any occurrence | — |
 | Last registration sweep finished | older than 2 intervals | older than 4 intervals, or `unresolved` twice in a row |
 | Registration with `application_authority = manual` | tracked as debt | — |
+| Registration change awaiting approval | older than 3 days | older than 7 days |
 
 Runbooks required before production: unmanaged client triage, client key rotation,
 compromised client key, expired client key recovery, and registration drift repair.
@@ -1296,6 +1420,7 @@ compromised client key, expired client key recovery, and registration drift repa
 | Conforms to | STD-IAM-001 §3.2 — PKCE, exact redirect URIs, no secret in a public client, `private_key_jwt` for confidential and workload clients |
 | Evidence | `identity-kernel` `compat/client_keys_test.go` — key overlap, immediate removal, replay refusal |
 | Conforms to | STD-IAM-002 §3.3 — every protected resource carries exactly one lifetime class |
+| Governed by | ADR-IAM-003 §5.1, §5.2, §5.4 — registration owners; a production change approved by a provider other than its proposer; authority separated by route |
 | Enterprise constraint | PAD-PLT-001 §7.3 — every client and protected resource references an Application |
 | Enterprise constraint | EAD-002 §8 — registration continues on cached or manually recorded metadata |
 | Related design | `TDD-identity-control-001` — the same pending-state recovery pattern |

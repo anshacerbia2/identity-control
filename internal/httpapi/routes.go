@@ -129,6 +129,12 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	api.HandleFunc("POST /v1/registrations/{registration_id}/owners", p(cfg.Registrations.GrantOwner))
 	api.HandleFunc("GET /v1/registrations/{registration_id}/owners", owned(cfg.Registrations.Owners))
 	api.HandleFunc("POST /v1/registrations/{registration_id}/owners/{owner_action}", p(cfg.Registrations.OwnerAction))
+	api.HandleFunc("POST /v1/registrations/{registration_id}/changes", owned(cfg.Registrations.ProposeChange))
+	api.HandleFunc("GET /v1/registrations/{registration_id}/changes", owned(cfg.Registrations.Changes))
+	// An owner reaches a change action only on a registration it owns; approve and reject then
+	// refuse it in the handler, before anything is read, and withdraw is its proposer's.
+	api.HandleFunc("POST /v1/registrations/{registration_id}/changes/{change_action}", owned(cfg.Registrations.ChangeAction))
+	api.HandleFunc("GET /v1/registrations:changes", p(cfg.Registrations.OpenChanges))
 	api.HandleFunc("POST /v1/workloads", p(cfg.Workloads.CreateWorkload))
 	api.HandleFunc("GET /v1/workloads/{target}", p(cfg.Workloads.GetWorkload))
 	api.HandleFunc("POST /v1/workloads/{target}", p(cfg.Workloads.WorkloadAction))
