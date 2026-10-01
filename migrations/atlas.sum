@@ -1,4 +1,4 @@
-h1:ivBi4O5N0q/Il22CLUqzz65U+TvehK4KtIjXwnweRDU=
+h1:VCtuUJzsgPLSb8zzjx/IfpeAprdfLvkaJTnkpnDVQPs=
 20260817151332_baseline_identity_schema.sql h1:GysIRGAJncY8eQTmFIhc3g8FTeFq8dGu9wmdY4kefVQ=
 20260817201931_add_creation_payload.sql h1:ejgDHTQ30FK0/adjz26CYPnLsAJyodOxBHvTI/GOd8M=
 20260820185807_add_bootstrap_ceremony.sql h1:0tiQsqClxrSDiz1Jl+vd6VDStnO/nObLoeKIHBWsX3M=
@@ -13,3 +13,4 @@ h1:ivBi4O5N0q/Il22CLUqzz65U+TvehK4KtIjXwnweRDU=
 20261001100000_compare_token_profile.sql h1:zK83JsQ/BZ6f6B0jJl/meCDTffDWWVSRSYNLbBbmtfA=
 20261001200000_add_registration_owner.sql h1:rxccpSRaMnVYM0fEC9onAASvk0eVcmuI85JUWyAlYRY=
 20261001220000_add_registration_change.sql h1:oyusFKa9VTPdZpCYxRCUFH3krDuWLPao2wu9PcKQ8Gc=
+20261001230000_add_application_developer.sql h1:ZKWCgaUhHc0QFEYo+vjGcijs+Qv4ZxUnr1EoitxRLrk=

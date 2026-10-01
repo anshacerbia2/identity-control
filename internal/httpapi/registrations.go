@@ -68,6 +68,13 @@ type Registrar interface {
 	DecideChange(ctx context.Context, decision registration.Decision, provider bool) (registration.Change, error)
 	Changes(ctx context.Context, registrationID id.UUID) ([]registration.Change, error)
 	OpenChanges(ctx context.Context) ([]registration.Change, error)
+
+	// Application developer standing (ADR-IAM-003 §5.3, TDD-identity-control-003 §Application
+	// Developers).
+	IsApplicationDeveloper(ctx context.Context, principal id.UUID) (bool, error)
+	ApplicationDevelopers(ctx context.Context) ([]registration.Developer, error)
+	GrantApplicationDeveloper(ctx context.Context, change registration.DeveloperChange) error
+	RevokeApplicationDeveloper(ctx context.Context, change registration.DeveloperChange) error
 }
 
 // Registrations serves the registration and drift routes.
@@ -124,6 +131,9 @@ func (h *Registrations) Register(w http.ResponseWriter, r *http.Request) {
 	scope, _ := CallerScope(r.Context())
 	created, err := h.registrar.Register(r.Context(), registration.Request{
 		CallerScope: scope, IdempotencyKey: key, RegisteredBy: principal,
+		// The route admits a caller without provider authority only on application developer
+		// standing, so that is what such a caller registers on.
+		Developer: !IsProvider(r.Context()),
 		ClientKey: body.ClientKey, Profile: body.Profile, AudienceClass: body.AudienceClass,
 		ApplicationRef: body.ApplicationRef, LifetimeClass: body.LifetimeClass,
 		Audience: body.Audience, RedirectURIs: body.RedirectURIs, PublicKey: body.PublicKey,
@@ -290,6 +300,8 @@ func writeRegistrationError(w http.ResponseWriter, r *http.Request, err error) {
 		// Each message names a rule, never a stored or submitted value: a refused key is never
 		// echoed, and a private one least of all.
 		httpapi.Problem(w, r, httpapi.ValidationFailed, err.Error())
+	case errors.Is(err, registration.ErrDeveloperScope), errors.Is(err, registration.ErrNotDeveloper):
+		httpapi.Problem(w, r, httpapi.Forbidden, err.Error())
 	case errors.Is(err, registration.ErrKeyTaken):
 		httpapi.Problem(w, r, httpapi.StateTransitionRefused,
 			"The client_key is registered, or held by a Keycloak client no registration describes")

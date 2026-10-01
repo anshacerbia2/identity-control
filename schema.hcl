@@ -1515,3 +1515,68 @@ table "registration_change" {
     expr = "(NOT approval_required) OR (state <> 'applied') OR (decided_by <> proposed_by)"
   }
 }
+
+table "application_developer" {
+  schema  = schema.identity
+  comment = "Who may create non-production registrations without provider authority, granted and revoked with a reason. TDD-identity-control-003."
+
+  column "grant_id" {
+    null = false
+    type = uuid
+  }
+
+  column "principal_id" {
+    null = false
+    type = uuid
+  }
+
+  column "granted_by" {
+    null = false
+    type = uuid
+  }
+
+  column "grant_reason" {
+    null = false
+    type = text
+  }
+
+  column "granted_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+
+  column "revoked_at" {
+    null = true
+    type = timestamptz
+  }
+
+  column "revoked_by" {
+    null = true
+    type = uuid
+  }
+
+  column "revoke_reason" {
+    null = true
+    type = text
+  }
+
+  primary_key {
+    columns = [column.grant_id]
+  }
+
+  // One active grant per Principal, read by ON CONFLICT on a grant.
+  index "application_developer_active" {
+    unique  = true
+    columns = [column.principal_id]
+    where   = "revoked_at IS NULL"
+  }
+
+  check "application_developer_reason_check" {
+    expr = "btrim(grant_reason) <> ''"
+  }
+
+  check "application_developer_revocation_check" {
+    expr = "((revoked_at IS NULL) = (revoked_by IS NULL)) AND ((revoked_at IS NULL) = (revoke_reason IS NULL))"
+  }
+}

@@ -340,6 +340,11 @@ type stubRegistrar struct {
 	decision   *registration.Decision
 	asProvider bool
 	replayed   bool
+
+	// The application developer surface.
+	developers map[id.UUID]bool
+	devChange  *registration.DeveloperChange
+	devRevoked bool
 }
 
 func (s *stubRegistrar) lifecycle(action string, change registration.StateChange) (registration.Registration, error) {
@@ -415,6 +420,24 @@ func (s *stubRegistrar) Changes(_ context.Context, registrationID id.UUID) ([]re
 
 func (s *stubRegistrar) OpenChanges(context.Context) ([]registration.Change, error) {
 	return []registration.Change{}, s.readErr
+}
+
+func (s *stubRegistrar) IsApplicationDeveloper(_ context.Context, principal id.UUID) (bool, error) {
+	return s.developers[principal], s.readErr
+}
+
+func (s *stubRegistrar) ApplicationDevelopers(context.Context) ([]registration.Developer, error) {
+	return []registration.Developer{}, s.readErr
+}
+
+func (s *stubRegistrar) GrantApplicationDeveloper(_ context.Context, change registration.DeveloperChange) error {
+	s.devChange = &change
+	return s.err
+}
+
+func (s *stubRegistrar) RevokeApplicationDeveloper(_ context.Context, change registration.DeveloperChange) error {
+	s.devChange, s.devRevoked = &change, true
+	return s.err
 }
 
 func (s *stubRegistrar) Adopt(_ context.Context, req registration.AdoptRequest) (registration.AdoptResult, error) {

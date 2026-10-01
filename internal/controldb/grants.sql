@@ -41,6 +41,7 @@ BEGIN
               ('identity.registration_state_change'),
               ('identity.registration_owner'),
               ('identity.registration_change'),
+              ('identity.application_developer'),
               ('identity.principal_relink'),
               ('identity.principal_finding'),
               ('platform.outbox'),
@@ -141,6 +142,11 @@ GRANT UPDATE (revoked_at, revoked_by, revoke_reason) ON identity.registration_ow
 -- decision is written after the proposal.
 REVOKE UPDATE, DELETE, TRUNCATE ON identity.registration_change FROM identity_runtime;
 GRANT UPDATE (state, decided_by, decision_reason, decided_at) ON identity.registration_change TO identity_runtime;
+
+-- Application developer standing is held as an ownership is (ADR-IAM-003 §5.3): granted with a
+-- reason, never deleted, and only its revocation written after the grant.
+REVOKE UPDATE, DELETE, TRUNCATE ON identity.application_developer FROM identity_runtime;
+GRANT UPDATE (revoked_at, revoked_by, revoke_reason) ON identity.application_developer TO identity_runtime;
 
 -- A relink record says who moved a Principal to a new Keycloak user and why, so it is insert-only.
 -- A dangling-mapping finding is evidence that a user disappeared, kept after it is resolved.
