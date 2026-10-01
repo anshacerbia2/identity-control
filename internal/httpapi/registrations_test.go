@@ -320,6 +320,8 @@ type stubRegistrar struct {
 	// The lifecycle surface's record of what it was asked.
 	action string
 	change registration.StateChange
+
+	expiring registration.Expiring
 }
 
 func (s *stubRegistrar) lifecycle(action string, change registration.StateChange) (registration.Registration, error) {
@@ -341,6 +343,10 @@ func (s *stubRegistrar) Restore(_ context.Context, change registration.StateChan
 
 func (s *stubRegistrar) Retire(_ context.Context, change registration.StateChange) (registration.Registration, error) {
 	return s.lifecycle("retire", change)
+}
+
+func (s *stubRegistrar) ExpiringKeys(context.Context) (registration.Expiring, error) {
+	return s.expiring, s.err
 }
 
 func (s *stubRegistrar) Adopt(_ context.Context, req registration.AdoptRequest) (registration.AdoptResult, error) {
@@ -875,5 +881,43 @@ func TestTheLifecycleRoutesMapTheRegistrarsErrors(t *testing.T) {
 		if w := serve(registrarHandler(t, registrar), r); w.Code != c.want || !strings.Contains(w.Body.String(), c.body) {
 			t.Errorf("%s answered %d, want %d: %s", name, w.Code, c.want, w.Body)
 		}
+	}
+}
+
+// The key expiry warning is read by an authenticated caller and answers what the registrar reports
+// (TDD-identity-control-003 §Key Expiry Warnings).
+func TestExpiringKeysAreReportedToAnAuthenticatedCaller(t *testing.T) {
+	expires := time.Now().UTC().Add(48 * time.Hour)
+	keyID := mustUUID(t)
+	registrar := &stubRegistrar{expiring: registration.Expiring{WarningDays: 14, CriticalDays: 3,
+		Registrations: []registration.ExpiringKey{{RegistrationID: mustUUID(t), ClientKey: "identity-experience-bff",
+			Profile: "confidential", Severity: registration.SeverityCritical, KeyID: &keyID, KID: "laptop", ExpiresAt: &expires}}}}
+	handler := registrarHandler(t, registrar)
+
+	if w := serve(handler, httptest.NewRequest(http.MethodGet, "/v1/registrations:expiring-keys", nil)); w.Code != http.StatusUnauthorized {
+		t.Errorf("without a caller the route answered %d, want 401", w.Code)
+	}
+	r, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, "/v1/registrations:expiring-keys", nil))
+	w := serve(handler, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", w.Code, w.Body)
+	}
+	var body struct {
+		WarningDays   int `json:"warning_days"`
+		Registrations []struct {
+			ClientKey string `json:"client_key"`
+			Severity  string `json:"severity"`
+			KID       string `json:"kid"`
+		} `json:"registrations"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.WarningDays != 14 || len(body.Registrations) != 1 || body.Registrations[0].Severity != "critical" ||
+		body.Registrations[0].KID != "laptop" {
+		t.Errorf("answered %s", w.Body)
+	}
+	if strings.Contains(w.Body.String(), "public_jwk") || strings.Contains(w.Body.String(), `"n"`) {
+		t.Errorf("the warning carried key material: %s", w.Body)
 	}
 }
