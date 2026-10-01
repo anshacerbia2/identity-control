@@ -83,6 +83,11 @@ type Request struct {
 	// accountability rests here.
 	RegisteredBy id.UUID
 
+	// Developer is a caller registering on application developer standing rather than provider
+	// authority (TDD-identity-control-003 §Application Developers): what it may register is bounded,
+	// and it becomes the registration's first owner.
+	Developer bool
+
 	ClientKey      string   `json:"client_key"`
 	Profile        string   `json:"profile"`
 	AudienceClass  string   `json:"audience_class"`
@@ -327,6 +332,11 @@ func (s *Service) Register(ctx context.Context, req Request) (Registration, erro
 	if strings.TrimSpace(req.CallerScope) == "" || strings.TrimSpace(req.IdempotencyKey) == "" {
 		return Registration{}, fmt.Errorf("%w: a caller and an Idempotency-Key are required", ErrInvalid)
 	}
+	if req.Developer {
+		if err := s.developerScope(req); err != nil {
+			return Registration{}, err
+		}
+	}
 	prepared, err := s.Prepare(ctx, req)
 	if err != nil {
 		return Registration{}, err
@@ -350,7 +360,10 @@ func (s *Service) Register(ctx context.Context, req Request) (Registration, erro
 			return json.Unmarshal(claim.Body, &registration)
 		}
 		registration, err = s.Reserve(ctx, tx, prepared)
-		return err
+		if err != nil || !req.Developer {
+			return err
+		}
+		return s.claimAsDeveloper(ctx, tx, req, registration.ID)
 	})
 	if err != nil || replay {
 		return registration, err

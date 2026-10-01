@@ -100,6 +100,9 @@ func TestEveryAPIRouteIsWrapped(t *testing.T) {
 		if pattern == "GET /v1/registrations:mine" {
 			continue // the caller's own ownerships, for any caller
 		}
+		if pattern == "POST /v1/registrations" && strings.HasPrefix(handler, "creator(") {
+			continue // a provider, or an application developer within its bounds
+		}
 		if !strings.HasPrefix(handler, "p(") && !strings.HasPrefix(handler, "owned(") {
 			t.Errorf("%s is served by %s, neither providerOnly nor owned", pattern, handler)
 		}

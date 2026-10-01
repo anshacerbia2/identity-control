@@ -104,13 +104,14 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	// Every route is a provider's unless it is an owner route (ADR-IAM-003, TDD-identity-control-003
 	// §Registration Ownership). providerOnly refuses an owner before a handler reads anything, and
 	// owned admits an owner only to a registration it owns.
-	p, owned := providerOnly, cfg.Registrations.owned
+	p, owned, creator := providerOnly, cfg.Registrations.owned, cfg.Registrations.creator
 	api := http.NewServeMux()
 	api.HandleFunc("POST /v1/principals", p(cfg.Principals.CreatePrincipal))
 	api.HandleFunc("POST /v1/principals/{target}", p(cfg.Principals.PrincipalAction))
 	api.HandleFunc("GET /v1/principals:dangling", p(cfg.Principals.Dangling))
 	api.HandleFunc("POST /v1/principals:reconcile", p(cfg.Principals.Reconcile))
-	api.HandleFunc("POST /v1/registrations", p(cfg.Registrations.Register))
+	// A provider registers anything; an application developer registers within its bounds.
+	api.HandleFunc("POST /v1/registrations", creator(cfg.Registrations.Register))
 	api.HandleFunc("GET /v1/registrations", p(cfg.Registrations.ListRegistrations))
 	api.HandleFunc("GET /v1/registrations:mine", cfg.Registrations.Mine)
 	api.HandleFunc("GET /v1/registrations/{registration_id}", owned(cfg.Registrations.GetRegistration))
@@ -135,6 +136,9 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	// refuse it in the handler, before anything is read, and withdraw is its proposer's.
 	api.HandleFunc("POST /v1/registrations/{registration_id}/changes/{change_action}", owned(cfg.Registrations.ChangeAction))
 	api.HandleFunc("GET /v1/registrations:changes", p(cfg.Registrations.OpenChanges))
+	api.HandleFunc("GET /v1/application-developers", p(cfg.Registrations.ApplicationDevelopers))
+	api.HandleFunc("POST /v1/application-developers", p(cfg.Registrations.GrantApplicationDeveloper))
+	api.HandleFunc("POST /v1/application-developers/{developer_action}", p(cfg.Registrations.DeveloperAction))
 	api.HandleFunc("POST /v1/workloads", p(cfg.Workloads.CreateWorkload))
 	api.HandleFunc("GET /v1/workloads/{target}", p(cfg.Workloads.GetWorkload))
 	api.HandleFunc("POST /v1/workloads/{target}", p(cfg.Workloads.WorkloadAction))

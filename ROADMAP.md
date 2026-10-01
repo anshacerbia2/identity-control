@@ -504,7 +504,17 @@ Acceptance criteria, also from RESPONSE-4 §4:
   - A proposal is pinned to the version it was made against: one whose registration moved is recorded superseded when approved. There is one open change per registration, and the same proposal retried returns it.
   - An owner proposes and withdraws on a registration it owns. Approving, rejecting and the queue are a provider's, and an owner is refused before anything is read.
   - Changes waiting past three days log at WARN, and past seven at ERROR, before each sweep.
-  - Not built yet: audience and lifetime-class changes (the kernel carries audience as protocol mappers written at creation, and a lifetime class changes every client whose audience names it), application developer standing and creation (ADR-IAM-003 §5.3), and the Developer Console and Admin Portal screens for changes.
+  - The Developer Console proposes and withdraws, and the Admin Portal approves and rejects, in identity-experience#22.
+  - Not built yet: audience and lifetime-class changes. The kernel carries a client's audience as protocol mappers written at creation, and a lifetime class changes every client whose audience names it.
+- ✅ **Application developer standing, non-production creation** (ADR-IAM-003 §5.3; TDD-003 1.21.0 §Application Developers): `identity.application_developer`, and `GET`/`POST /v1/application-developers` and `:revoke`, a provider's.
+  - The standing is granted and revoked by a provider with a reason. It is held only by an active human Principal, counted only while the mapping is active, and insert-only but for its revocation columns.
+  - `POST /v1/registrations` admits a caller holding the standing. A caller without it is refused before the body is read. Such a caller registers only:
+    - in non-production;
+    - a public, confidential or resource profile;
+    - the `internal` or `external` class. `privileged` carries the provider-scope claim surface, and a workload goes through `/v1/workloads`.
+    - an audience naming only resources it owns.
+  - It becomes the registration's first owner in the same transaction. The standing is read again there, so one revoked between the two reads creates nothing.
+  - Not built yet: production creation by approval, naming at least two owners (ADR-IAM-003 §5.3); the screens for granting the standing and for registering.
 - ✅ **Workload lifecycle** (TDD-004 1.4.0 §Suspension, Restoration, and Retirement): `POST /v1/workloads/{id}:suspend`, `:restore` and `:retire`, each with a reason.
   - The client and the Principal stop together: the workload lifecycle holds the workload's row lock and changes its registration in the same transaction, through the registration package's `…WorkloadWithin` seams, because the registration lifecycle still refuses a workload's client.
   - A suspension commits, then disables the client and sets its not-before. A restore is refused while the owner is not an active human Principal (reassign first), and writes the client back inside its transaction. A retirement, only after a suspension, deletes the client, revokes its keys, and retires the Principal's mapping, so the dangling sweep does not report the deleted service-account user.

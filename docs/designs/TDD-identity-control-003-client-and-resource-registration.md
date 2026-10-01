@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-003
   title: Protocol Client and Protected-Resource Registration
   owner: Core Platform Team
-  version: 1.20.0
+  version: 1.21.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -439,6 +439,9 @@ GET    /v1/registrations:changes
 POST   /v1/registrations/{registration_id}/changes/{change_id}:approve
 POST   /v1/registrations/{registration_id}/changes/{change_id}:reject
 POST   /v1/registrations/{registration_id}/changes/{change_id}:withdraw
+GET    /v1/application-developers
+POST   /v1/application-developers
+POST   /v1/application-developers/{principal_id}:revoke
 ```
 
 `GET /v1/registrations` lists the configured realm's registrations, one page at a time, in
@@ -1007,8 +1010,8 @@ retire(registration, reason, caller):
 
 `ADR-IAM-003` gives a registration owners, so an application team can act on its own client. This
 is its first slice: owners, the token that carries one, and the routes an owner may call. Changes,
-approved by another provider in production, are §Registration Changes. Application developer
-standing follows.
+approved by another provider in production, are §Registration Changes. Who may create a
+registration without being a provider is §Application Developers.
 
 ```sql
 CREATE TABLE identity.registration_owner (
@@ -1056,7 +1059,8 @@ without `provider_scope` is an owner's (`TDD-identity-control-001` §Caller Toke
 | `POST /v1/registrations/{id}/changes`, `GET .../changes` | any | owned only |
 | `POST .../changes/{change_id}:withdraw` | its own proposal | its own proposal, on a registration it owns |
 | `POST .../changes/{change_id}:approve`, `:reject`, `GET /v1/registrations:changes` | yes, not its own proposal | 403 |
-| `POST /v1/registrations/{id}:retire`, owners, adoption, registration, reconcile, every Principal and workload route | yes | 403 |
+| `POST /v1/registrations` | any | an application developer, in non-production, within §Application Developers |
+| `POST /v1/registrations/{id}:retire`, owners, application developers, adoption, reconcile, every Principal and workload route | yes | 403 |
 
 An owner route reads the ownership of the registration in its path and answers 404 for one the
 caller does not own, so an owner cannot learn which other registrations exist. Every other route
@@ -1159,6 +1163,62 @@ answer was lost is not refused as a conflict with itself.
 `{"changes": [...]}`. `GET /v1/registrations:changes` lists every open proposal in the realm,
 oldest first: the approval queue. Each change carries its registration's `client_key`, so the
 queue reads without a second request. Every command takes `X-Administrative-Reason`.
+
+### Application Developers
+
+`ADR-IAM-003 §5.3` lets a provider grant a person **application developer** standing, as Entra's
+Application Developer role grants creating registrations once self-service is restricted. Such a
+person creates non-production registrations and becomes their first owner. This slice is that
+standing and that creation. A production registration is created by approval, which follows: until
+it is built, a provider creates production registrations.
+
+```sql
+CREATE TABLE identity.application_developer (
+    grant_id      UUID        PRIMARY KEY,
+    principal_id  UUID        NOT NULL,
+    granted_by    UUID        NOT NULL,
+    grant_reason  TEXT        NOT NULL CHECK (btrim(grant_reason) <> ''),
+    granted_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    revoked_at    TIMESTAMPTZ,
+    revoked_by    UUID,
+    revoke_reason TEXT,
+    CONSTRAINT application_developer_revocation_check
+        CHECK ((revoked_at IS NULL) = (revoked_by IS NULL)
+           AND (revoked_at IS NULL) = (revoke_reason IS NULL))
+);
+CREATE UNIQUE INDEX application_developer_active
+    ON identity.application_developer (principal_id) WHERE revoked_at IS NULL;
+```
+
+The standing is held as an ownership is: granted and revoked by a provider with
+`X-Administrative-Reason`, insert-only but for its revocation columns, held only by an active human
+Principal, and counted only while the Principal's mapping is active, so a person who leaves stops
+creating registrations at the next request.
+
+```text
+register(request) by a caller without provider_scope:
+    refuse unless the caller holds active application developer standing        403, before reading
+    refuse in production: a production registration is created by approval        403
+    refuse the workload profile: a workload is created through /v1/workloads       403
+    refuse the privileged and workload audience classes                            403
+    refuse an audience naming a resource the caller does not own                   403
+    validate and create as a provider's registration is created
+    in the same transaction as the reservation, record the caller as its first owner
+```
+
+**`privileged` stays a provider's.** That class carries the provider-scope claim surface
+(§Profiles), so a client registered in it is issued tokens the Identity Control API serves as a
+provider's. Letting an application developer create one would let them make themselves a
+provider.
+
+**An audience names only the caller's own resources.** A client's audience decides which resource
+accepts its tokens, and the resource's owners did not agree to a client they do not know. A
+provider registers a client for another team's resource until that resource's owners can approve
+one, which is the same approval a production change takes.
+
+The standing is checked twice: before the request is read, where every provider route is refused,
+and again inside the transaction that records the registration, so a standing revoked between the
+two creates nothing.
 
 ## Configuration
 
@@ -1309,6 +1369,17 @@ queue reads without a second request. Every command takes `X-Administrative-Reas
 - A kernel failure while applying leaves desired state, the version and the proposal unchanged.
 - An owner proposes and withdraws on a registration it owns; it cannot approve or reject, or read
   the queue. A withdrawal by anyone but the proposer is refused.
+
+### Application Developers
+
+- A provider grants and revokes the standing with a reason; a workload, an inactive Principal, or
+  a second active grant is refused.
+- An application developer creates a public, confidential or resource registration in
+  non-production and becomes its first owner.
+- Production, the workload profile, the `privileged` and `workload` classes, and an audience naming
+  a resource the developer does not own are each refused, and nothing is recorded.
+- A caller without the standing, or whose Principal is no longer active, is refused before the body
+  is read.
 
 ### Lifecycle
 
