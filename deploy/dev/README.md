@@ -234,7 +234,10 @@ put email, names and roles into its access tokens), so name both:
 `redirect_uris` or `client_keys` difference means the declaration is wrong, and is fixed in the
 declaration, never in the console. Then send the same body without `dry_run` and with an
 `Idempotency-Key`. Once the BFF and the caller are adopted, set `IDENTITY_UNMANAGED_CLIENTS=disable`
-in `.env` and restart the service.
+in `.env` and recreate the service with `docker compose up -d identity-control`; a restart keeps the
+environment the container was created with. `IDENTITY_TOKEN_TYPE=enforce` goes the same way, once
+the log no longer reports a token not typed at+jwt. `compose.yaml` passes both to the container,
+defaulting to `report`, and passes nothing it does not list.
 
 ## The token profile, on a server that ran before it
 
