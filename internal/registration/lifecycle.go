@@ -167,26 +167,7 @@ func (s *Service) Suspend(ctx context.Context, change StateChange) (Registration
 		return Registration{}, err
 	}
 	err := s.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
-		locked, err := s.lockLifecycle(ctx, tx, change.RegistrationID)
-		if err != nil {
-			return err
-		}
-		switch {
-		case locked.profile == ProfileWorkload:
-			return ErrWorkloadLifecycle
-		case locked.profile == ProfileResource:
-			return fmt.Errorf("%w: a resource holds no credential and is issued no token; it is retired, not suspended",
-				ErrInvalidTransition)
-		case locked.state == StateSuspended:
-			return nil
-		case locked.state != StateActive:
-			return fmt.Errorf("%w: only an active registration is suspended; this one is %s", ErrInvalidTransition, locked.state)
-		}
-		at := s.now()
-		if _, err := tx.Exec(ctx, suspendStatement, change.RegistrationID.String(), at); err != nil {
-			return fmt.Errorf("registration: suspend: %w", err)
-		}
-		return s.recordChange(ctx, tx, change, StateActive, StateSuspended, at)
+		return s.suspendWithin(ctx, tx, change, false)
 	})
 	if err != nil {
 		return Registration{}, err
@@ -197,6 +178,61 @@ func (s *Service) Suspend(ctx context.Context, change StateChange) (Registration
 	s.logger.WarnContext(ctx, "a client registration was suspended",
 		slog.String("registration_id", change.RegistrationID.String()), slog.String("by", change.ChangedBy.String()))
 	return s.Get(ctx, change.RegistrationID)
+}
+
+// suspendWithin records the registration suspended in the caller's transaction. Whether it is a
+// workload's decides who may ask: the registration lifecycle refuses a workload's client, and the
+// workload lifecycle stops nothing else.
+func (s *Service) suspendWithin(ctx context.Context, tx db.Tx, change StateChange, workload bool) error {
+	locked, err := s.lockLifecycle(ctx, tx, change.RegistrationID)
+	if err != nil {
+		return err
+	}
+	if err := ownerOfLifecycle(locked.profile, workload); err != nil {
+		return err
+	}
+	switch {
+	case locked.profile == ProfileResource:
+		return fmt.Errorf("%w: a resource holds no credential and is issued no token; it is retired, not suspended",
+			ErrInvalidTransition)
+	case locked.state == StateSuspended:
+		return nil
+	case locked.state != StateActive:
+		return fmt.Errorf("%w: only an active registration is suspended; this one is %s", ErrInvalidTransition, locked.state)
+	}
+	at := s.now()
+	if _, err := tx.Exec(ctx, suspendStatement, change.RegistrationID.String(), at); err != nil {
+		return fmt.Errorf("registration: suspend: %w", err)
+	}
+	return s.recordChange(ctx, tx, change, StateActive, StateSuspended, at)
+}
+
+// ownerOfLifecycle refuses a lifecycle action asked through the wrong path: a workload's client
+// through the registration lifecycle, or any other client through the workload lifecycle.
+func ownerOfLifecycle(profile string, workload bool) error {
+	switch {
+	case !workload && profile == ProfileWorkload:
+		return ErrWorkloadLifecycle
+	case workload && profile != ProfileWorkload:
+		return fmt.Errorf("%w: the registration is not a workload's", ErrInvalidTransition)
+	}
+	return nil
+}
+
+// SuspendWorkloadWithin suspends a workload's registration in the workload lifecycle's transaction
+// (TDD-identity-control-004 §Suspension, Restoration, and Retirement). The client is disabled by
+// ConvergeSuspension once that transaction commits, as Suspend does for any other client.
+func (s *Service) SuspendWorkloadWithin(ctx context.Context, tx db.Tx, change StateChange) error {
+	if err := change.validate(); err != nil {
+		return err
+	}
+	return s.suspendWithin(ctx, tx, change, true)
+}
+
+// ConvergeSuspension disables a suspended registration's client and sets its not-before. The
+// workload lifecycle calls it after its transaction commits.
+func (s *Service) ConvergeSuspension(ctx context.Context, registrationID id.UUID) error {
+	return s.convergeSuspension(ctx, registrationID)
 }
 
 // Restore writes the registration's registered redirect URIs, keys and lifespan to its client,
@@ -211,49 +247,9 @@ func (s *Service) Restore(ctx context.Context, change StateChange) (Registration
 	}
 	restored := false
 	err := s.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
-		locked, err := s.lockLifecycle(ctx, tx, change.RegistrationID)
-		if err != nil {
-			return err
-		}
-		switch {
-		case locked.profile == ProfileWorkload:
-			return ErrWorkloadLifecycle
-		case locked.profile == ProfileResource:
-			return fmt.Errorf("%w: a resource is never suspended, so it is never restored", ErrInvalidTransition)
-		case locked.state == StateActive:
-			return nil
-		case locked.state != StateSuspended:
-			return fmt.Errorf("%w: only a suspended registration is restored; this one is %s", ErrInvalidTransition, locked.state)
-		}
-		if _, err := tx.Exec(ctx, restoreStatement, change.RegistrationID.String()); err != nil {
-			return fmt.Errorf("registration: restore: %w", err)
-		}
-		if err := s.recordChange(ctx, tx, change, StateSuspended, StateActive, s.now()); err != nil {
-			return err
-		}
-		if locked.client == "" {
-			restored = true
-			return nil
-		}
-		patch, err := s.activePatch(ctx, tx, change.RegistrationID)
-		if err != nil {
-			return err
-		}
-		if _, err := call(ctx, s.cfg.CallTimeout, func(ctx context.Context) (struct{}, error) {
-			return struct{}{}, s.kernel.PatchClient(ctx, s.cfg.Realm, locked.client, patch)
-		}); err != nil {
-			if errors.Is(err, keycloak.ErrNotFound) {
-				return fmt.Errorf("%w: the client is missing from the kernel; a suspended registration whose client is gone is retired",
-					ErrInvalidTransition)
-			}
-			return fmt.Errorf("registration: restore the client: %w", err)
-		}
-		if _, err := tx.Exec(ctx, resolveRestoredStatement, change.RegistrationID.String(), s.now(),
-			change.ChangedBy.String(), "restored: "+strings.TrimSpace(change.Reason)); err != nil {
-			return fmt.Errorf("registration: resolve the restored findings: %w", err)
-		}
-		restored = true
-		return nil
+		var err error
+		restored, err = s.restoreWithin(ctx, tx, change, false)
+		return err
 	})
 	if err != nil {
 		return Registration{}, err
@@ -263,6 +259,61 @@ func (s *Service) Restore(ctx context.Context, change StateChange) (Registration
 			slog.String("registration_id", change.RegistrationID.String()), slog.String("by", change.ChangedBy.String()))
 	}
 	return s.Get(ctx, change.RegistrationID)
+}
+
+// RestoreWorkloadWithin restores a workload's registration, writing its client, in the workload
+// lifecycle's transaction.
+func (s *Service) RestoreWorkloadWithin(ctx context.Context, tx db.Tx, change StateChange) error {
+	if err := change.validate(); err != nil {
+		return err
+	}
+	_, err := s.restoreWithin(ctx, tx, change, true)
+	return err
+}
+
+func (s *Service) restoreWithin(ctx context.Context, tx db.Tx, change StateChange, workload bool) (bool, error) {
+	locked, err := s.lockLifecycle(ctx, tx, change.RegistrationID)
+	if err != nil {
+		return false, err
+	}
+	if err := ownerOfLifecycle(locked.profile, workload); err != nil {
+		return false, err
+	}
+	switch {
+	case locked.profile == ProfileResource:
+		return false, fmt.Errorf("%w: a resource is never suspended, so it is never restored", ErrInvalidTransition)
+	case locked.state == StateActive:
+		return false, nil
+	case locked.state != StateSuspended:
+		return false, fmt.Errorf("%w: only a suspended registration is restored; this one is %s", ErrInvalidTransition, locked.state)
+	}
+	if _, err := tx.Exec(ctx, restoreStatement, change.RegistrationID.String()); err != nil {
+		return false, fmt.Errorf("registration: restore: %w", err)
+	}
+	if err := s.recordChange(ctx, tx, change, StateSuspended, StateActive, s.now()); err != nil {
+		return false, err
+	}
+	if locked.client == "" {
+		return true, nil
+	}
+	patch, err := s.activePatch(ctx, tx, change.RegistrationID)
+	if err != nil {
+		return false, err
+	}
+	if _, err := call(ctx, s.cfg.CallTimeout, func(ctx context.Context) (struct{}, error) {
+		return struct{}{}, s.kernel.PatchClient(ctx, s.cfg.Realm, locked.client, patch)
+	}); err != nil {
+		if errors.Is(err, keycloak.ErrNotFound) {
+			return false, fmt.Errorf("%w: the client is missing from the kernel; a suspended registration whose client is gone is retired",
+				ErrInvalidTransition)
+		}
+		return false, fmt.Errorf("registration: restore the client: %w", err)
+	}
+	if _, err := tx.Exec(ctx, resolveRestoredStatement, change.RegistrationID.String(), s.now(),
+		change.ChangedBy.String(), "restored: "+strings.TrimSpace(change.Reason)); err != nil {
+		return false, fmt.Errorf("registration: resolve the restored findings: %w", err)
+	}
+	return true, nil
 }
 
 // activePatch is an active registration's desired client: its redirect URIs, lifespan and keys as
@@ -323,60 +374,9 @@ func (s *Service) Retire(ctx context.Context, change StateChange) (Registration,
 	}
 	retired := false
 	err := s.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
-		locked, err := s.lockLifecycle(ctx, tx, change.RegistrationID)
-		if err != nil {
-			return err
-		}
-		switch {
-		case locked.profile == ProfileWorkload:
-			return ErrWorkloadLifecycle
-		case locked.state == StateRetired:
-			return nil
-		case locked.profile == ProfileResource:
-			if locked.state != StateActive {
-				return fmt.Errorf("%w: only an active resource is retired; this one is %s", ErrInvalidTransition, locked.state)
-			}
-			dependents, err := s.dependents(ctx, tx, locked.clientKey)
-			if err != nil {
-				return err
-			}
-			if len(dependents) > 0 {
-				return &ResourceInUseError{Dependents: dependents}
-			}
-		case locked.state != StateSuspended:
-			return fmt.Errorf("%w: a client is suspended before it is retired; this one is %s", ErrInvalidTransition, locked.state)
-		}
-
-		if locked.client != "" {
-			if keyed(locked.profile) {
-				none := []keycloak.JWK{}
-				if _, err := call(ctx, s.cfg.CallTimeout, func(ctx context.Context) (struct{}, error) {
-					return struct{}{}, s.kernel.PatchClient(ctx, s.cfg.Realm, locked.client, keycloak.ClientPatch{Keys: &none})
-				}); err != nil && !errors.Is(err, keycloak.ErrNotFound) {
-					return fmt.Errorf("registration: remove the client's keys: %w", err)
-				}
-			}
-			if _, err := call(ctx, s.cfg.CallTimeout, func(ctx context.Context) (struct{}, error) {
-				return struct{}{}, s.kernel.DeleteClient(ctx, s.cfg.Realm, locked.client)
-			}); err != nil && !errors.Is(err, keycloak.ErrNotFound) {
-				return fmt.Errorf("registration: delete the client: %w", err)
-			}
-		}
-
-		at := s.now()
-		tag, err := tx.Exec(ctx, retireStatement, change.RegistrationID.String(), at, locked.state)
-		if err != nil {
-			return fmt.Errorf("registration: retire: %w", err)
-		}
-		if tag.RowsAffected() != 1 {
-			return fmt.Errorf("registration: retire: the registration changed under its lock")
-		}
-		if _, err := tx.Exec(ctx, revokeRetiredKeysStatement, change.RegistrationID.String(), at,
-			change.ChangedBy.String()); err != nil {
-			return fmt.Errorf("registration: revoke the retired keys: %w", err)
-		}
-		retired = true
-		return s.recordChange(ctx, tx, change, locked.state, StateRetired, at)
+		var err error
+		retired, err = s.retireWithin(ctx, tx, change, false)
+		return err
 	})
 	if err != nil {
 		return Registration{}, err
@@ -386,6 +386,73 @@ func (s *Service) Retire(ctx context.Context, change StateChange) (Registration,
 			slog.String("registration_id", change.RegistrationID.String()), slog.String("by", change.ChangedBy.String()))
 	}
 	return s.Get(ctx, change.RegistrationID)
+}
+
+// RetireWorkloadWithin retires a suspended workload's registration, deleting its client and with it
+// the service-account user, in the workload lifecycle's transaction, which retires the Principal too.
+func (s *Service) RetireWorkloadWithin(ctx context.Context, tx db.Tx, change StateChange) error {
+	if err := change.validate(); err != nil {
+		return err
+	}
+	_, err := s.retireWithin(ctx, tx, change, true)
+	return err
+}
+
+func (s *Service) retireWithin(ctx context.Context, tx db.Tx, change StateChange, workload bool) (bool, error) {
+	locked, err := s.lockLifecycle(ctx, tx, change.RegistrationID)
+	if err != nil {
+		return false, err
+	}
+	if err := ownerOfLifecycle(locked.profile, workload); err != nil {
+		return false, err
+	}
+	switch {
+	case locked.state == StateRetired:
+		return false, nil
+	case locked.profile == ProfileResource:
+		if locked.state != StateActive {
+			return false, fmt.Errorf("%w: only an active resource is retired; this one is %s", ErrInvalidTransition, locked.state)
+		}
+		dependents, err := s.dependents(ctx, tx, locked.clientKey)
+		if err != nil {
+			return false, err
+		}
+		if len(dependents) > 0 {
+			return false, &ResourceInUseError{Dependents: dependents}
+		}
+	case locked.state != StateSuspended:
+		return false, fmt.Errorf("%w: a client is suspended before it is retired; this one is %s", ErrInvalidTransition, locked.state)
+	}
+
+	if locked.client != "" {
+		if keyed(locked.profile) {
+			none := []keycloak.JWK{}
+			if _, err := call(ctx, s.cfg.CallTimeout, func(ctx context.Context) (struct{}, error) {
+				return struct{}{}, s.kernel.PatchClient(ctx, s.cfg.Realm, locked.client, keycloak.ClientPatch{Keys: &none})
+			}); err != nil && !errors.Is(err, keycloak.ErrNotFound) {
+				return false, fmt.Errorf("registration: remove the client's keys: %w", err)
+			}
+		}
+		if _, err := call(ctx, s.cfg.CallTimeout, func(ctx context.Context) (struct{}, error) {
+			return struct{}{}, s.kernel.DeleteClient(ctx, s.cfg.Realm, locked.client)
+		}); err != nil && !errors.Is(err, keycloak.ErrNotFound) {
+			return false, fmt.Errorf("registration: delete the client: %w", err)
+		}
+	}
+
+	at := s.now()
+	tag, err := tx.Exec(ctx, retireStatement, change.RegistrationID.String(), at, locked.state)
+	if err != nil {
+		return false, fmt.Errorf("registration: retire: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return false, fmt.Errorf("registration: retire: the registration changed under its lock")
+	}
+	if _, err := tx.Exec(ctx, revokeRetiredKeysStatement, change.RegistrationID.String(), at,
+		change.ChangedBy.String()); err != nil {
+		return false, fmt.Errorf("registration: revoke the retired keys: %w", err)
+	}
+	return true, s.recordChange(ctx, tx, change, locked.state, StateRetired, at)
 }
 
 func (s *Service) dependents(ctx context.Context, tx db.Tx, resource string) ([]string, error) {

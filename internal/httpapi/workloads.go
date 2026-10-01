@@ -21,6 +21,9 @@ type WorkloadService interface {
 	Create(ctx context.Context, req workload.CreateRequest) (workload.Workload, error)
 	Get(ctx context.Context, principalID id.UUID) (workload.Workload, error)
 	Reassign(ctx context.Context, req workload.ReassignRequest) (workload.Workload, error)
+	Suspend(ctx context.Context, req workload.LifecycleRequest) (workload.Workload, error)
+	Restore(ctx context.Context, req workload.LifecycleRequest) (workload.Workload, error)
+	Retire(ctx context.Context, req workload.LifecycleRequest) (workload.Workload, error)
 }
 
 // Workloads serves the workload routes.
@@ -112,8 +115,9 @@ type reassignRequest struct {
 	Owner string `json:"owner_principal_id"`
 }
 
-// WorkloadAction handles POST /v1/workloads/{principal_id}:{action}. The action is part of the last
-// segment, because the mux matches whole segments. :reassign is the only action built.
+// WorkloadAction handles POST /v1/workloads/{principal_id}:{action}: :reassign, :suspend, :restore
+// and :retire. The action is part of the last segment, because the mux matches whole segments. Each
+// requires X-Administrative-Reason.
 func (h *Workloads) WorkloadAction(w http.ResponseWriter, r *http.Request) {
 	principal, ok := callerPrincipal(r)
 	if !ok {
@@ -121,7 +125,10 @@ func (h *Workloads) WorkloadAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	raw, action, _ := strings.Cut(r.PathValue("target"), ":")
-	if action != "reassign" {
+	lifecycle := map[string]func(context.Context, workload.LifecycleRequest) (workload.Workload, error){
+		"suspend": h.service.Suspend, "restore": h.service.Restore, "retire": h.service.Retire,
+	}
+	if _, known := lifecycle[action]; !known && action != "reassign" {
 		httpapi.Problem(w, r, httpapi.NotFound, "No such workload action")
 		return
 	}
@@ -132,7 +139,18 @@ func (h *Workloads) WorkloadAction(w http.ResponseWriter, r *http.Request) {
 	}
 	reason := strings.TrimSpace(r.Header.Get(AdministrativeReasonHeader))
 	if reason == "" {
-		httpapi.Problem(w, r, httpapi.ValidationFailed, "A reassignment requires an X-Administrative-Reason header")
+		httpapi.Problem(w, r, httpapi.ValidationFailed, "A workload action requires an X-Administrative-Reason header")
+		return
+	}
+	if act, ok := lifecycle[action]; ok {
+		// The lifecycle actions take no body: the workload, the caller and the reason are the whole
+		// request (TDD-identity-control-004 §Suspension, Restoration, and Retirement).
+		changed, err := act(r.Context(), workload.LifecycleRequest{PrincipalID: target, ChangedBy: principal, Reason: reason})
+		if err != nil {
+			writeWorkloadError(w, r, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, changed)
 		return
 	}
 	var body reassignRequest
@@ -169,6 +187,10 @@ func writeWorkloadError(w http.ResponseWriter, r *http.Request, err error) {
 		httpapi.Problem(w, r, httpapi.StateTransitionRefused, err.Error())
 	case errors.Is(err, workload.ErrNotFound):
 		httpapi.Problem(w, r, httpapi.NotFound, "No such workload")
+	case errors.Is(err, registration.ErrInvalidTransition):
+		// A lifecycle action its registration refused, such as a restore whose client is gone. The
+		// message names the rule and the state.
+		httpapi.Problem(w, r, httpapi.StateTransitionRefused, err.Error())
 	case errors.Is(err, registration.ErrInvalid), errors.Is(err, registration.ErrScopeUndeclared),
 		errors.Is(err, registration.ErrPrivateKey), errors.Is(err, registration.ErrKeyTaken),
 		errors.Is(err, registration.ErrKeyInUse), errors.Is(err, idempotency.ErrConflict),

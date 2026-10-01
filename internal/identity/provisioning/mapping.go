@@ -213,6 +213,29 @@ func (Repository) Activate(ctx context.Context, tx db.Tx, principalID id.UUID, u
 	return nil
 }
 
+const retireWorkloadStatement = `UPDATE identity.principal_mapping
+SET state = 'retired', version = version + 1
+WHERE principal_id = $1 AND subject_type = 'workload' AND state = 'active'`
+
+// RetireWorkload moves a workload Principal's mapping to retired, in the transaction that deleted its
+// client and with it the service-account user that was its kernel user (TDD-identity-control-004
+// §Suspension, Restoration, and Retirement). Retired is terminal, and the dangling sweep reads only
+// active mappings, so a kernel user deleted on purpose is not reported missing. keycloak_user_id is
+// kept as the record of which user it was.
+func (Repository) RetireWorkload(ctx context.Context, tx db.Tx, principalID id.UUID) error {
+	if db.IsNilTx(tx) {
+		return errors.New("provisioning: a transaction handle is required")
+	}
+	tag, err := tx.Exec(ctx, retireWorkloadStatement, principalID.String())
+	if err != nil {
+		return fmt.Errorf("provisioning: retire the workload mapping: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 const setWorkloadOwnerStatement = `UPDATE identity.principal_mapping
 SET workload_owner = $2, version = version + 1
 WHERE principal_id = $1 AND subject_type = 'workload' AND state = 'active'`

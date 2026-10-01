@@ -19,8 +19,8 @@
 //     Membership, which organization-control grants like any other binding; this service holds no
 //     Membership data and does not need any to create an identity.
 //   - An agent workload is refused: bounded delegation and the act claim are not built.
-//   - Orphan handling, unused detection, suspension and retirement wait on the Membership and
-//     authentication events this service does not consume yet, and on the registration lifecycle.
+//   - Orphan handling and unused detection wait on the Membership and authentication events this
+//     service does not consume yet. Suspension, restoration and retirement are in lifecycle.go.
 package workload
 
 import (
@@ -91,6 +91,13 @@ type Registrar interface {
 	Realize(ctx context.Context, prepared registration.Prepared, reserved registration.Registration,
 		outcome registration.Outcome) (registration.Registration, keycloak.ClientUUID, error)
 	Client(ctx context.Context, registrationID id.UUID) (string, keycloak.ClientUUID, error)
+
+	// The workload lifecycle stops the client through these, inside its own transaction, because
+	// the registration lifecycle refuses a workload's client.
+	SuspendWorkloadWithin(ctx context.Context, tx db.Tx, change registration.StateChange) error
+	RestoreWorkloadWithin(ctx context.Context, tx db.Tx, change registration.StateChange) error
+	RetireWorkloadWithin(ctx context.Context, tx db.Tx, change registration.StateChange) error
+	ConvergeSuspension(ctx context.Context, registrationID id.UUID) error
 }
 
 // Config bounds the service.

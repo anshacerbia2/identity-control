@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-001
   title: Canonical Principal Identifier and Creation Path
   owner: Core Platform Team
-  version: 1.7.0
+  version: 1.7.1
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -263,6 +263,12 @@ survive that. `relink` clears `keycloak_user_id` and returns the mapping to `pen
 The recovery below then does what it does for any pending mapping: it adopts a user
 carrying the identifier, or creates one with the same `principal_id`. Nothing outside
 this table changes, since `organization-control` holds Memberships by `principal_id`.
+
+**A workload's retirement retires its Principal.** A workload's Keycloak user is its client's
+service account, and deleting the client deletes it. The workload lifecycle therefore moves the
+mapping to `retired` in the transaction that deletes the client (`TDD-identity-control-004`
+§Suspension, Restoration, and Retirement). A human Principal's `:retire` is a separate route and is
+not built.
 
 ```sql
 CREATE TABLE identity.principal_relink (
