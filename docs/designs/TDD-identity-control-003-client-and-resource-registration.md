@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-003
   title: Protocol Client and Protected-Resource Registration
   owner: Core Platform Team
-  version: 1.17.0
+  version: 1.18.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -427,6 +427,7 @@ POST   /v1/registrations/{registration_id}/drift-exceptions
 GET    /v1/registrations/{registration_id}/drift-exceptions
 GET    /v1/registrations/{registration_id}/findings
 GET    /v1/registrations:drift
+GET    /v1/registrations:expiring-keys
 POST   /v1/registrations:reconcile
 ```
 
@@ -692,6 +693,44 @@ revoked or has expired takes its next key as the active key directly, with nothi
 
 A client built again, by pending recovery or by an operator recreating a deleted client, holds the
 `active` and `retiring` keys, and no other.
+
+### Key Expiry Warnings
+
+A key that reaches its `expires_at` is removed on schedule, and a client whose only key went with it
+stops authenticating. The BFF is such a client. The warning comes before that, at the thresholds
+§Operational Notes sets: a warning when a key expires within 14 days with no successor registered,
+critical within 3 days.
+
+```text
+expiring(now):
+    for each active registration of a keyed profile:
+        key := its active key, or, with none, its retiring key
+        ends := key.expires_at for the active key, key.retiring_at for a retiring one
+        no key:                    no_key     -- it cannot authenticate now
+        ends before now + 3 days:  critical
+        ends before now + 14 days: warning
+```
+
+**The active key counts.** A rotation makes the new key active and the old one retiring, and a
+registration holds at most one of each, so "no successor registered" is exactly "the active key is
+expiring": once a successor exists, it is the active key. A retiring key beside an active one ends
+with its overlap, on purpose, and warns nobody. A retiring key alone, after the active key was
+revoked mid-rotation, is the client's last accepted key, and its overlap end is what counts.
+
+**Two outputs, no new state.** The rule is evaluated where it is read:
+
+- `GET /v1/registrations:expiring-keys` answers `{"warning_days": 14, "critical_days": 3,
+  "registrations": [...]}`. Each entry names the registration, its `client_key` and profile, the
+  severity, and, when one exists, the active key's `key_id`, `kid` and `expires_at`. Most urgent
+  first: `no_key`, then `critical`, then `warning`, each by `expires_at`. It carries no key
+  material, only the identifiers already in a registration's own key list.
+- The scheduled pass logs each entry before the sweep, at `WARN` for `warning` and `ERROR` for
+  `critical` and `no_key`, naming the `client_key` and the `kid`, so a log alert fires without a
+  metrics pipeline. Exporting it as a metric arrives with this service's OpenTelemetry export, which
+  it does not have yet.
+
+The thresholds are constants, as §Operational Notes states them. A `workload`'s key is included: its
+owner rotates it like any other.
 
 **The mechanism is proven against the pinned kernel.** `identity-kernel`'s
 `compat/client_keys_test.go` tested it against 26.7.4 (compat run 36606481342):
@@ -1015,6 +1054,11 @@ retire(registration, reason, caller):
   changes nothing and answers the keys.
 - A key change the kernel refuses leaves the key rows as they were.
 - A revoked key cannot be registered again, to its client or any other.
+- An active key expiring within 14 days is reported `warning`, within 3 days `critical`, and an
+  active keyed registration holding no active or retiring key `no_key`. A retiring key beside an
+  active one, a key of a suspended or retired registration, and a `public` or `resource`
+  registration are not reported; a retiring key alone is reported by its overlap end.
+- After a rotation, the registration is no longer reported, because its active key is new.
 - A client built again by recovery or by an operator holds exactly its active and retiring keys.
 - The registration credential cannot create, modify, or disable a user, and the Principal path's
   credential cannot create or modify a client. Both are asserted against a live kernel.

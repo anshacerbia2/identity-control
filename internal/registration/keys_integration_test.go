@@ -402,3 +402,74 @@ func TestARefusedRegistrationClosesItsKey(t *testing.T) {
 		t.Errorf("the refused registration's key is %s, want revoked", state)
 	}
 }
+
+func (h *harness) expiringSeverity(clientKey string) string {
+	h.t.Helper()
+	expiring, err := h.service.ExpiringKeys(context.Background())
+	if err != nil {
+		h.t.Fatalf("ExpiringKeys: %v", err)
+	}
+	for _, entry := range expiring.Registrations {
+		if entry.ClientKey == clientKey {
+			return entry.Severity
+		}
+	}
+	return ""
+}
+
+// The key expiry warning (TDD-identity-control-003 §Key Expiry Warnings): only the active key counts,
+// a rotation clears it, a client with no active key is reported, and a suspended one is not.
+func TestAnExpiringActiveKeyIsReportedUntilItIsRotated(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	first, second := testKey(t), testKey(t)
+	registration, _ := h.registerConfidential("expiring-warned", first)
+	start := time.Now().UTC()
+
+	at := func(offset time.Duration) { h.service.now = func() time.Time { return start.Add(offset) } }
+	if severity := h.expiringSeverity("expiring-warned"); severity != "" {
+		t.Errorf("a new key is reported %q", severity)
+	}
+	at(DefaultKeyLifetime - 10*24*time.Hour)
+	if severity := h.expiringSeverity("expiring-warned"); severity != SeverityWarning {
+		t.Errorf("ten days before expiry the key is reported %q, want warning", severity)
+	}
+	at(DefaultKeyLifetime - 2*24*time.Hour)
+	if severity := h.expiringSeverity("expiring-warned"); severity != SeverityCritical {
+		t.Errorf("two days before expiry the key is reported %q, want critical", severity)
+	}
+
+	// A rotation makes the successor the active key; the retiring one warns nobody.
+	if _, _, err := h.service.AddKey(ctx, registration.ID, second.public, h.caller); err != nil {
+		t.Fatal(err)
+	}
+	if severity := h.expiringSeverity("expiring-warned"); severity != "" {
+		t.Errorf("after the rotation the registration is reported %q", severity)
+	}
+
+	// With its active key revoked mid-rotation, the retiring key is the client's last, and it ends
+	// with the overlap; with that revoked too, the client cannot authenticate, and says so.
+	active := byKID(h.keys(registration.ID), second.kid)
+	if _, err := h.service.RevokeKey(ctx, registration.ID, active.ID, h.caller, "the laptop was lost"); err != nil {
+		t.Fatal(err)
+	}
+	if severity := h.expiringSeverity("expiring-warned"); severity != SeverityCritical {
+		t.Errorf("a client holding only its retiring key, two days from expiry, is reported %q, want critical", severity)
+	}
+	retiring := byKID(h.keys(registration.ID), first.kid)
+	if _, err := h.service.RevokeKey(ctx, registration.ID, retiring.ID, h.caller, "the laptop was lost"); err != nil {
+		t.Fatal(err)
+	}
+	if severity := h.expiringSeverity("expiring-warned"); severity != SeverityNoKey {
+		t.Errorf("a client with no key is reported %q, want no_key", severity)
+	}
+
+	// A suspended client is stopped on purpose, and is not reported.
+	if _, err := h.service.Suspend(ctx, StateChange{RegistrationID: registration.ID, ChangedBy: h.caller,
+		Reason: "the BFF is replaced"}); err != nil {
+		t.Fatal(err)
+	}
+	if severity := h.expiringSeverity("expiring-warned"); severity != "" {
+		t.Errorf("a suspended client is reported %q", severity)
+	}
+}

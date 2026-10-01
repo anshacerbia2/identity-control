@@ -52,6 +52,9 @@ type Registrar interface {
 	Suspend(ctx context.Context, change registration.StateChange) (registration.Registration, error)
 	Restore(ctx context.Context, change registration.StateChange) (registration.Registration, error)
 	Retire(ctx context.Context, change registration.StateChange) (registration.Registration, error)
+
+	// ExpiringKeys is the key expiry warning (TDD-identity-control-003 §Key Expiry Warnings).
+	ExpiringKeys(ctx context.Context) (registration.Expiring, error)
 }
 
 // Registrations serves the registration and drift routes.
@@ -487,6 +490,21 @@ func (h *Registrations) Drift(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, status)
+}
+
+// ExpiringKeys handles GET /v1/registrations:expiring-keys: every active keyed registration whose
+// active key expires within the warning threshold, or which holds none, most urgent first.
+func (h *Registrations) ExpiringKeys(w http.ResponseWriter, r *http.Request) {
+	if _, ok := callerPrincipal(r); !ok {
+		httpapi.Problem(w, r, httpapi.AuthenticationRequired, "The request carries no authenticated caller")
+		return
+	}
+	expiring, err := h.registrar.ExpiringKeys(r.Context())
+	if err != nil {
+		httpapi.Problem(w, r, httpapi.Internal, "The expiring keys could not be read")
+		return
+	}
+	writeJSON(w, http.StatusOK, expiring)
 }
 
 type reconcileRequest struct {

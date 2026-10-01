@@ -341,6 +341,26 @@ func scheduleSweeps(ctx context.Context, provisioner *provisioning.Provisioner, 
 		} else if removed > 0 {
 			logger.Info("expired client keys removed", slog.Int("keys", removed))
 		}
+		// The key expiry warning, before the sweep: a log alert can fire on it without a metrics
+		// pipeline (TDD-identity-control-003 §Key Expiry Warnings).
+		if expiring, err := registrar.ExpiringKeys(ctx); err != nil {
+			logger.Error("client key expiry warning could not be read", slog.String("error", err.Error()))
+		} else {
+			for _, key := range expiring.Registrations {
+				level, message := slog.LevelWarn, "a client key expires within the warning threshold and no successor is registered"
+				switch key.Severity {
+				case registration.SeverityCritical:
+					level, message = slog.LevelError, "a client key expires within the critical threshold and no successor is registered"
+				case registration.SeverityNoKey:
+					level, message = slog.LevelError, "a keyed client holds no active key and cannot authenticate"
+				}
+				attrs := []slog.Attr{slog.String("client_key", key.ClientKey), slog.String("severity", key.Severity)}
+				if key.ExpiresAt != nil {
+					attrs = append(attrs, slog.String("kid", key.KID), slog.Time("expires_at", *key.ExpiresAt))
+				}
+				logger.LogAttrs(ctx, level, message, attrs...)
+			}
+		}
 		run, err := reconciler.Sweep(ctx)
 		switch {
 		case errors.Is(err, reconcile.ErrSweepInProgress):
