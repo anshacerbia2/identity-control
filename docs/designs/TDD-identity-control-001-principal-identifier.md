@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-001
   title: Canonical Principal Identifier and Creation Path
   owner: Core Platform Team
-  version: 1.6.0
+  version: 1.7.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -379,6 +379,19 @@ through its `scnehaux-provider` client scope, and this service accepts nothing e
 A token carrying `tenant_id`, lacking `provider_scope`, or naming any other scope is refused. The
 access token lifetime is class `L0`, 240 seconds, and is set on the calling client's
 registration.
+
+**The caller's token is an access token, typed `at+jwt`** (STD-IAM-002 §3.5 step 5, RFC 9068 §4).
+An ID token carries the same issuer and signature, so the header type is what keeps one from
+passing as an access token. `IDENTITY_TOKEN_TYPE` sets how the check runs:
+
+- `report`, the default, accepts a token typed `JWT` or untyped and logs it with its `azp`, so an
+  operator sees which callers' clients still need the token profile (TDD-identity-control-003
+  §Profiles). The log carries no claim value but the client identifier.
+- `enforce` refuses such a token with 401, as every other verification failure is refused.
+
+A server moves to `enforce` once its callers' clients carry the at+jwt attribute: a registered
+client does from its registration, and a client registered or adopted before the profile does once
+an operator applies the registered state. Production runs `enforce`.
 
 ## API / Interface
 

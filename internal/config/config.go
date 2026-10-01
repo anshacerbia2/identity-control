@@ -85,6 +85,11 @@ type Config struct {
 	// TokenMaxSkew tolerates clock drift, capped at 60 seconds by STD-IAM-002 §3.5.
 	TokenMaxSkew time.Duration
 
+	// EnforceAccessTokenType is IDENTITY_TOKEN_TYPE=enforce: a caller's token whose header typ is not
+	// at+jwt is refused. The default, report, accepts it and logs it, for a server whose callers'
+	// clients predate the token profile (TDD-identity-control-001 §Caller Token).
+	EnforceAccessTokenType bool
+
 	// ProvisionTimeout bounds one Admin API call. PendingRecoveryAfter must exceed it, or
 	// recovery searches the kernel for a user the original request is still creating.
 	ProvisionTimeout     time.Duration
@@ -148,6 +153,13 @@ func Load() (Config, error) {
 	}
 
 	cfg.TokenMaxSkew = durationOr("IDENTITY_TOKEN_MAX_SKEW", 30*time.Second, &problems)
+	switch mode := stringOr("IDENTITY_TOKEN_TYPE", "report"); mode {
+	case "report":
+	case "enforce":
+		cfg.EnforceAccessTokenType = true
+	default:
+		problems = append(problems, fmt.Errorf("IDENTITY_TOKEN_TYPE is %q; it is report or enforce", mode))
+	}
 	cfg.ProvisionTimeout = durationOr("IDENTITY_PROVISION_TIMEOUT", 10*time.Second, &problems)
 	cfg.PendingRecoveryAfter = durationOr("IDENTITY_PENDING_RECOVERY_AFTER", 60*time.Second, &problems)
 	cfg.ReconcilePageSize = intOr("IDENTITY_RECONCILE_PAGE_SIZE", 200, &problems)

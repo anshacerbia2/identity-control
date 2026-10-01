@@ -294,3 +294,30 @@ func TestUnmanagedClientsAreReportedUnlessDisablingIsAsked(t *testing.T) {
 		}
 	}
 }
+
+func TestTheTokenTypeIsReportedUnlessEnforcementIsAsked(t *testing.T) {
+	for _, c := range []struct {
+		value   string
+		enforce bool
+		ok      bool
+	}{{"", false, true}, {"report", false, true}, {"enforce", true, true}, {"strict", false, false}} {
+		t.Setenv("IDENTITY_DATABASE_URL", "postgres://runtime@localhost:5432/identity")
+		t.Setenv("IDENTITY_KEYCLOAK_REALM", "scnehaux")
+		t.Setenv("IDENTITY_KEYCLOAK_BASE_URL", "https://identity.example.com")
+		t.Setenv("IDENTITY_KEYCLOAK_CLIENT_ID", "identity-control")
+		t.Setenv("IDENTITY_KEYCLOAK_CLIENT_KEY_FILE", "/keys/identity-control.pem")
+		t.Setenv("IDENTITY_TOKEN_ISSUER", "https://identity.example.com/realms/scnehaux")
+		t.Setenv("IDENTITY_TOKEN_AUDIENCE", "identity-control")
+		t.Setenv("IDENTITY_JWKS_URL", "https://identity.example.com/realms/scnehaux/protocol/openid-connect/certs")
+		t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID", "identity-control-registration")
+		t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_KEY_FILE", "/keys/identity-control-registration.pem")
+		t.Setenv("IDENTITY_TOKEN_TYPE", c.value)
+		cfg, err := config.Load()
+		if c.ok && (err != nil || cfg.EnforceAccessTokenType != c.enforce) {
+			t.Errorf("%q: enforce %v, err %v", c.value, cfg.EnforceAccessTokenType, err)
+		}
+		if !c.ok && err == nil {
+			t.Errorf("%q was accepted", c.value)
+		}
+	}
+}

@@ -6,11 +6,13 @@ package httpapi_test
 // caller scope comes from a claim the issuer signed.
 
 import (
+	"bytes"
 	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -67,6 +69,12 @@ func realVerifier(t *testing.T) *verify.Verifier {
 // token signs a compact token carrying the supplied claims over the valid registered set.
 func token(t *testing.T, extra map[string]any) string {
 	t.Helper()
+	return typedToken(t, "JWT", extra)
+}
+
+// typedToken is token with the header typ given.
+func typedToken(t *testing.T, typ string, extra map[string]any) string {
+	t.Helper()
 
 	payload := map[string]any{
 		"iss": authIssuer,
@@ -87,7 +95,7 @@ func token(t *testing.T, extra map[string]any) string {
 		return base64.RawURLEncoding.EncodeToString(raw)
 	}
 
-	signed := encode(map[string]any{"alg": "PS256", "kid": authKeyID, "typ": "JWT"}) + "." + encode(payload)
+	signed := encode(map[string]any{"alg": "PS256", "kid": authKeyID, "typ": typ}) + "." + encode(payload)
 
 	digest := crypto.SHA256.New()
 	digest.Write([]byte(signed))
@@ -442,4 +450,54 @@ func (c *countingVerifier) Verify(token string) (verify.Claims, error) {
 	c.calls++
 	c.lastToken = token
 	return c.inner.Verify(token)
+}
+
+// IDENTITY_TOKEN_TYPE=report accepts a token typed JWT and logs it with its client; one typed at+jwt
+// is accepted and not logged (TDD-identity-control-001 §Caller Token).
+func TestReportModeLogsATokenNotTypedAtJWT(t *testing.T) {
+	var logged bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logged, nil))
+	verifier := httpapi.ReportTokenType(realVerifier(t), logger)
+	claims := withClaims(map[string]any{"azp": "legacy-bff"})
+
+	if _, err := verifier.Verify(typedToken(t, "JWT", claims)); err != nil {
+		t.Fatalf("report mode refused a JWT-typed token: %v", err)
+	}
+	if !strings.Contains(logged.String(), "not typed at+jwt") || !strings.Contains(logged.String(), `"client":"legacy-bff"`) {
+		t.Errorf("logged %q, want the client named", logged.String())
+	}
+	if strings.Contains(logged.String(), "principal_id") {
+		t.Errorf("the log carries a claim value: %q", logged.String())
+	}
+
+	logged.Reset()
+	if _, err := verifier.Verify(typedToken(t, "at+jwt", claims)); err != nil || logged.Len() != 0 {
+		t.Errorf("an at+jwt token answered %v and logged %q", err, logged.String())
+	}
+}
+
+// IDENTITY_TOKEN_TYPE=enforce refuses a token typed JWT with the same 401 as every verification
+// failure, and accepts one typed at+jwt.
+func TestEnforceModeRefusesATokenNotTypedAtJWT(t *testing.T) {
+	strict, err := verify.New(verify.Config{
+		Issuer: authIssuer, Audience: authAudience, Keys: verify.StaticKeys{authKeyID: &signingKeyForAuth(t).PublicKey},
+		Requirement: httpapi.Requirement(), Now: func() time.Time { return authNow }, RequireAccessTokenType: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	middleware, err := httpapi.Authenticate(strict)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
+	for typ, want := range map[string]int{"JWT": http.StatusUnauthorized, "at+jwt": http.StatusNoContent} {
+		r := httptest.NewRequest(http.MethodGet, "/v1/registrations", nil)
+		r.Header.Set("Authorization", "Bearer "+typedToken(t, typ, validClaims()))
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		if w.Code != want {
+			t.Errorf("typ %s answered %d, want %d", typ, w.Code, want)
+		}
+	}
 }
