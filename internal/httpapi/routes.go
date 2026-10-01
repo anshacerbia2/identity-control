@@ -114,6 +114,7 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	api.HandleFunc("POST /v1/registrations", creator(cfg.Registrations.Register))
 	api.HandleFunc("GET /v1/registrations", p(cfg.Registrations.ListRegistrations))
 	api.HandleFunc("GET /v1/registrations:mine", cfg.Registrations.Mine)
+	api.HandleFunc("GET /v1/registrations:standing", cfg.Registrations.Standing)
 	api.HandleFunc("GET /v1/registrations/{registration_id}", owned(cfg.Registrations.GetRegistration))
 	api.HandleFunc("POST /v1/registrations/{registration_id}",
 		owned(cfg.Registrations.RegistrationAction, "suspend", "restore"))

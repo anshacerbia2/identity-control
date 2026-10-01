@@ -426,6 +426,10 @@ func (s *stubRegistrar) IsApplicationDeveloper(_ context.Context, principal id.U
 	return s.developers[principal], s.readErr
 }
 
+func (s *stubRegistrar) Standing(_ context.Context, principal id.UUID) (registration.Standing, error) {
+	return registration.Standing{ApplicationDeveloper: s.developers[principal], Environment: "non-production"}, s.readErr
+}
+
 func (s *stubRegistrar) ApplicationDevelopers(context.Context) ([]registration.Developer, error) {
 	return []registration.Developer{}, s.readErr
 }

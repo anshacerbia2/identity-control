@@ -147,3 +147,29 @@ func TestStandingRoutesRefuseMalformedRequestsAndMapRefusals(t *testing.T) {
 		t.Errorf("a failed list answered %d, want 500", w.Code)
 	}
 }
+
+func TestAnyCallerReadsItsOwnStanding(t *testing.T) {
+	developer, stranger := mustUUID(t), mustUUID(t)
+	handler := registrarHandler(t, &stubRegistrar{developers: map[id.UUID]bool{developer: true}})
+	read := func() *http.Request { return httptest.NewRequest(http.MethodGet, "/v1/registrations:standing", nil) }
+
+	w := serve(handler, asOwner(read(), developer))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"application_developer":true`) ||
+		!strings.Contains(w.Body.String(), `"provider":false`) || !strings.Contains(w.Body.String(), `"environment":"non-production"`) {
+		t.Errorf("a developer's standing answered %d: %s", w.Code, w.Body)
+	}
+	if w := serve(handler, asOwner(read(), stranger)); !strings.Contains(w.Body.String(), `"application_developer":false`) {
+		t.Errorf("a stranger's standing answered %s", w.Body)
+	}
+	r, _ := asPrincipal(t, read())
+	if w := serve(handler, r); !strings.Contains(w.Body.String(), `"provider":true`) {
+		t.Errorf("a provider's standing answered %s", w.Body)
+	}
+	if w := serve(handler, read()); w.Code != http.StatusUnauthorized {
+		t.Errorf("an anonymous read answered %d, want 401", w.Code)
+	}
+	failing := registrarHandler(t, &stubRegistrar{readErr: errors.New("database down")})
+	if w := serve(failing, asOwner(read(), developer)); w.Code != http.StatusInternalServerError {
+		t.Errorf("a failed read answered %d, want 500", w.Code)
+	}
+}

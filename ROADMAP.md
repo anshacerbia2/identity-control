@@ -514,6 +514,7 @@ Acceptance criteria, also from RESPONSE-4 §4:
     - the `internal` or `external` class. `privileged` carries the provider-scope claim surface, and a workload goes through `/v1/workloads`.
     - an audience naming only resources it owns.
   - It becomes the registration's first owner in the same transaction. The standing is read again there, so one revoked between the two reads creates nothing.
+  - `GET /v1/registrations:standing` answers any caller with its own standing and the environment, so a console offers registration only where the API accepts it.
   - Not built yet: production creation by approval, naming at least two owners (ADR-IAM-003 §5.3); the screens for granting the standing and for registering.
 - ✅ **Workload lifecycle** (TDD-004 1.4.0 §Suspension, Restoration, and Retirement): `POST /v1/workloads/{id}:suspend`, `:restore` and `:retire`, each with a reason.
   - The client and the Principal stop together: the workload lifecycle holds the workload's row lock and changes its registration in the same transaction, through the registration package's `…WorkloadWithin` seams, because the registration lifecycle still refuses a workload's client.

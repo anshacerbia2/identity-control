@@ -45,6 +45,25 @@ func (h *Registrations) creator(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// Standing handles GET /v1/registrations:standing: what the caller may do beyond what it owns, for
+// any authenticated caller, so a console offers only what the API would accept.
+func (h *Registrations) Standing(w http.ResponseWriter, r *http.Request) {
+	principal, ok := callerPrincipal(r)
+	if !ok {
+		httpapi.Problem(w, r, httpapi.AuthenticationRequired, "The request carries no authenticated caller")
+		return
+	}
+	standing, err := h.registrar.Standing(r.Context(), principal)
+	if err != nil {
+		httpapi.Problem(w, r, httpapi.Internal, "The standing could not be read")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"provider": IsProvider(r.Context()), "application_developer": standing.ApplicationDeveloper,
+		"environment": standing.Environment,
+	})
+}
+
 // ApplicationDevelopers handles GET /v1/application-developers, a provider's.
 func (h *Registrations) ApplicationDevelopers(w http.ResponseWriter, r *http.Request) {
 	developers, err := h.registrar.ApplicationDevelopers(r.Context())
