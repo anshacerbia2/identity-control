@@ -93,6 +93,24 @@ details, telemetry — is imported from `foundation-platform` rather than reimpl
 here. Two divergent copies of the dispatcher would produce two different revocation
 enforcement intervals while both systems reported compliance.
 
+## Local development
+
+`make` with no target lists the entry points, which match organization-control's and
+foundation-reference's. `make env` copies `.env.example` to `.env`, which is gitignored and holds
+this machine's values; every credential in `.env.example` is a placeholder.
+
+| Target | Needs |
+| :-- | :-- |
+| `make gates` | Go and a PostgreSQL for `coverage`: everything CI runs |
+| `make test-ci` | PostgreSQL: the whole suite against a CI-shaped database |
+| `make test-unit` | nothing |
+| `make migrate` | PostgreSQL and Atlas: roles, platform schema, migrations, privileges |
+| `make run` | the above and a Keycloak with the realm `identity-kernel` applies |
+| `make bootstrap OPERATOR=... REASON=... USERNAME=...` | a running stack: the one-time ceremony |
+
+The service still reads only its process environment and refuses a wrong value by name, so the
+Makefile is a convenience and changes nothing about a deployment.
+
 ## Designs
 
 | TDD | Subject | Status |
