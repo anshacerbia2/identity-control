@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -417,6 +418,63 @@ func TestPatchClientWritesTheTokenFormat(t *testing.T) {
 		if (c.want == "" && len(mapperCalls) != 0) || (c.want != "" && (len(mapperCalls) != 1 || mapperCalls[0] != c.want)) {
 			t.Errorf("%s: mapper calls %v, want %q", name, mapperCalls, c.want)
 		}
+	}
+}
+
+// The audience mappers become exactly the declared set: the right one kept, a hand-made, edited or
+// custom one deleted, a missing one created, and a client_id mapper untouched
+// (TDD-identity-control-003 §Registration Changes).
+func TestPatchClientMakesTheAudienceExactlyTheSet(t *testing.T) {
+	mappers := `[
+	  {"id":"keep","name":"audience-orders","protocolMapper":"oidc-audience-mapper",
+	   "config":{"included.client.audience":"orders","access.token.claim":"true","id.token.claim":"false"}},
+	  {"id":"handmade","name":"identity-control-audience","protocolMapper":"oidc-audience-mapper",
+	   "config":{"included.client.audience":"identity-control","access.token.claim":"true"}},
+	  {"id":"custom","name":"audience-billing","protocolMapper":"oidc-audience-mapper",
+	   "config":{"included.client.audience":"billing","included.custom.audience":"https://elsewhere","access.token.claim":"true"}},
+	  {"id":"cid","name":"client_id","protocolMapper":"oidc-hardcoded-claim-mapper",
+	   "config":{"claim.name":"client_id","claim.value":"web","access.token.claim":"true"}}]`
+	k := &kernel{}
+	k.route = func(method, path string) (int, string) {
+		switch {
+		case strings.HasSuffix(path, "/protocol-mappers/models") && method == http.MethodGet:
+			return http.StatusOK, mappers
+		case strings.HasSuffix(path, "/protocol-mappers/models") && method == http.MethodPost:
+			return http.StatusCreated, ""
+		case method == http.MethodGet:
+			return http.StatusOK, clientRepresentation
+		default:
+			return http.StatusNoContent, ""
+		}
+	}
+	admin, _ := newAdmin(t, k)
+	audience := []string{"billing", "orders"}
+	lifespan := 240
+	if err := admin.PatchClient(context.Background(), testRealm, "0b1c2d3e",
+		keycloak.ClientPatch{Audience: &audience, AccessTokenLifespan: &lifespan}); err != nil {
+		t.Fatal(err)
+	}
+	var deleted, posted []string
+	for i, call := range k.calls {
+		method, path, _ := strings.Cut(call, " ")
+		switch {
+		case method == http.MethodDelete && strings.Contains(path, "/protocol-mappers/models/"):
+			deleted = append(deleted, path[strings.LastIndex(path, "/")+1:])
+		case method == http.MethodPost && strings.HasSuffix(path, "/protocol-mappers/models"):
+			posted = append(posted, string(k.bodies[i]))
+		}
+	}
+	slices.Sort(deleted)
+	if !slices.Equal(deleted, []string{"custom", "handmade"}) {
+		t.Errorf("deleted %v; want the hand-made and the custom audience mappers, and nothing else", deleted)
+	}
+	if len(posted) != 1 || !strings.Contains(posted[0], `"included.client.audience":"billing"`) {
+		t.Errorf("created %v; want one mapper, for billing", posted)
+	}
+
+	repeated := []string{"orders", "orders"}
+	if err := admin.PatchClient(context.Background(), testRealm, "0b1c2d3e", keycloak.ClientPatch{Audience: &repeated}); err == nil {
+		t.Error("an audience naming a resource twice was sent")
 	}
 }
 

@@ -1,9 +1,9 @@
 package httpapi
 
 // Registration changes at the transport (ADR-IAM-003 §5.2, TDD-identity-control-003 §Registration
-// Changes). An owner proposes and withdraws on a registration it owns; approving and rejecting are
-// a provider's, refused to an owner here before anything is read, and refused to the proposer by
-// the service and the database.
+// Changes). An owner proposes and withdraws a change to the redirect URIs or the audience of a
+// registration it owns; approving and rejecting are a provider's, refused to an owner here before
+// anything is read, and refused to the proposer by the service and the database.
 
 import (
 	"encoding/json"
@@ -18,9 +18,12 @@ import (
 	"github.com/anshacerbia2/identity-control/internal/registration"
 )
 
+// proposeChangeRequest carries redirect_uris or audience, never both. An audience of [] is a change
+// to no resource, which is why it is a pointer: absent and empty are different requests.
 type proposeChangeRequest struct {
-	RedirectURIs    []string `json:"redirect_uris"`
-	ExpectedVersion int64    `json:"expected_version"`
+	RedirectURIs    []string  `json:"redirect_uris"`
+	Audience        *[]string `json:"audience"`
+	ExpectedVersion int64     `json:"expected_version"`
 }
 
 // ProposeChange handles POST /v1/registrations/{registration_id}/changes, with a reason. It answers
@@ -45,8 +48,8 @@ func (h *Registrations) ProposeChange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	change, created, err := h.registrar.ProposeChange(r.Context(), registration.Proposal{
-		RegistrationID: registrationID, RedirectURIs: body.RedirectURIs, ExpectedVersion: body.ExpectedVersion,
-		ProposedBy: principal, Reason: reason})
+		RegistrationID: registrationID, RedirectURIs: body.RedirectURIs, Audience: body.Audience,
+		ExpectedVersion: body.ExpectedVersion, ProposedBy: principal, Reason: reason, Provider: IsProvider(r.Context())})
 	if err != nil {
 		writeChangeError(w, r, err)
 		return
@@ -135,7 +138,7 @@ func writeChangeError(w http.ResponseWriter, r *http.Request, err error) {
 		errors.Is(err, registration.ErrSuperseded), errors.Is(err, registration.ErrInvalidTransition):
 		httpapi.Problem(w, r, httpapi.StateTransitionRefused, err.Error())
 	case errors.Is(err, registration.ErrSelfApproval), errors.Is(err, registration.ErrNotProvider),
-		errors.Is(err, registration.ErrNotProposer):
+		errors.Is(err, registration.ErrNotProposer), errors.Is(err, registration.ErrNotResourceOwner):
 		httpapi.Problem(w, r, httpapi.Forbidden, err.Error())
 	case errors.Is(err, registration.ErrChangeNotFound):
 		httpapi.Problem(w, r, httpapi.NotFound, "No such change")

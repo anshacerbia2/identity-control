@@ -107,7 +107,7 @@ func TestChangeRoutesRefuseMalformedRequests(t *testing.T) {
 			r.Header.Del(httpapi.AdministrativeReasonHeader)
 			return r
 		}(), http.StatusBadRequest},
-		"unknown field":    {changeRequest(http.MethodPost, base, `{"audience":["x"],"expected_version":1}`), http.StatusBadRequest},
+		"unknown field":    {changeRequest(http.MethodPost, base, `{"lifetime_class":"L0","expected_version":1}`), http.StatusBadRequest},
 		"not json":         {changeRequest(http.MethodPost, base, `redirect`), http.StatusBadRequest},
 		"unknown action":   {changeRequest(http.MethodPost, base+"/"+owned.String()+":merge", ""), http.StatusNotFound},
 		"malformed change": {changeRequest(http.MethodPost, base+"/nope:withdraw", ""), http.StatusBadRequest},
@@ -160,5 +160,35 @@ func TestChangeRefusalsAreMappedToTheirStatus(t *testing.T) {
 	q, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, "/v1/registrations:changes", nil))
 	if w := serve(registrarHandler(t, failing), q); w.Code != http.StatusInternalServerError {
 		t.Errorf("a failed queue read answered %d, want 500", w.Code)
+	}
+}
+
+// An audience change carries its list as given, an empty one included, and says whether the
+// proposer is a provider: an owner adds only resources it owns, which the service decides.
+func TestAnAudienceChangeReachesTheServiceAsAsked(t *testing.T) {
+	owner, owned := mustUUID(t), mustUUID(t)
+	registrar := &stubRegistrar{owners: map[id.UUID]id.UUID{owned: owner}}
+	handler := registrarHandler(t, registrar)
+	path := "/v1/registrations/" + owned.String() + "/changes"
+
+	if w := serve(handler, asOwner(changeRequest(http.MethodPost, path, `{"audience":["identity-control-api"],"expected_version":2}`), owner)); w.Code != http.StatusCreated {
+		t.Fatalf("an owner's audience change answered %d: %s", w.Code, w.Body)
+	}
+	got := registrar.proposal
+	if got == nil || got.Audience == nil || len(*got.Audience) != 1 || (*got.Audience)[0] != "identity-control-api" ||
+		got.RedirectURIs != nil || got.Provider {
+		t.Fatalf("the audience change reached the service as %+v", got)
+	}
+
+	if w := serve(handler, asOwner(changeRequest(http.MethodPost, path, `{"audience":[],"expected_version":3}`), owner)); w.Code != http.StatusCreated {
+		t.Fatalf("an empty audience answered %d: %s", w.Code, w.Body)
+	}
+	if got := registrar.proposal; got.Audience == nil || len(*got.Audience) != 0 {
+		t.Errorf("an empty audience reached the service as %v; it must stay distinct from absent", got.Audience)
+	}
+
+	registrar.err = registration.ErrNotResourceOwner
+	if w := serve(handler, asOwner(changeRequest(http.MethodPost, path, `{"audience":["orders-api"],"expected_version":4}`), owner)); w.Code != http.StatusForbidden {
+		t.Errorf("adding a resource the owner does not own answered %d, want 403", w.Code)
 	}
 }

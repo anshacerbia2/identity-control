@@ -124,6 +124,12 @@ type ClientPatch struct {
 	// client_id mapper writing this value. The mapper is created, or rewritten when it writes
 	// anything else.
 	TokenFormat *string
+
+	// Audience makes the client's audience mappers exactly these resources: one audience mapper
+	// each, and every other audience mapper on the client removed, one made by hand included
+	// (TDD-identity-control-003 §Registration Changes). An empty list is a client whose tokens name
+	// no resource.
+	Audience *[]string
 }
 
 // JWK is one public key a confidential or workload client authenticates with: RSA, for signatures,
@@ -368,20 +374,30 @@ func (s ClientSpec) representation() map[string]any {
 	representation["attributes"] = attributes
 	mappers := []map[string]any{clientIDMapper(s.ClientID)}
 	for _, resource := range s.Audience {
-		mappers = append(mappers, map[string]any{
-			"name":           "audience-" + resource,
-			"protocol":       "openid-connect",
-			"protocolMapper": "oidc-audience-mapper",
-			"config": map[string]any{
-				"included.client.audience":  resource,
-				"access.token.claim":        "true",
-				"id.token.claim":            "false",
-				"introspection.token.claim": "true",
-			},
-		})
+		mappers = append(mappers, audienceMapper(resource))
 	}
 	representation["protocolMappers"] = mappers
 	return representation
+}
+
+// audienceMapperType is Keycloak's audience mapper. Its Included Client Audience adds "the client ID
+// of the specified service client as an audience".
+const audienceMapperType = "oidc-audience-mapper"
+
+// audienceMapper names one resource in the client's access tokens and introspection, and not in its
+// ID token, whose audience is the client itself (OpenID Connect Core §2).
+func audienceMapper(resource string) map[string]any {
+	return map[string]any{
+		"name":           "audience-" + resource,
+		"protocol":       "openid-connect",
+		"protocolMapper": audienceMapperType,
+		"config": map[string]any{
+			"included.client.audience":  resource,
+			"access.token.claim":        "true",
+			"id.token.claim":            "false",
+			"introspection.token.claim": "true",
+		},
+	}
 }
 
 // clientIDMapper writes the client's client_id into its access tokens, and nowhere else.
@@ -458,6 +474,15 @@ func (a *Admin) PatchClient(ctx context.Context, realm Realm, client ClientUUID,
 		attributes[AttrRFC9068HeaderType] = "true"
 		representation["attributes"] = attributes
 	}
+	if patch.Audience != nil {
+		seen := map[string]bool{}
+		for _, resource := range *patch.Audience {
+			if strings.TrimSpace(resource) == "" || seen[resource] {
+				return errors.New("keycloak: an audience names each resource once")
+			}
+			seen[resource] = true
+		}
+	}
 	if patch.Keys != nil {
 		if len(*patch.Keys) > MaxClientKeys {
 			return fmt.Errorf("keycloak: a client holds at most %d keys", MaxClientKeys)
@@ -480,12 +505,85 @@ func (a *Admin) PatchClient(ctx context.Context, realm Realm, client ClientUUID,
 		return err
 	}
 	response.Close()
+	// A client's mappers are not written by a PUT of its representation; they have their own
+	// resource.
 	if patch.TokenFormat != nil {
-		// A client's mappers are not written by a PUT of its representation; they have their own
-		// resource.
-		return a.ensureClientIDMapper(ctx, realm, client, *patch.TokenFormat)
+		if err := a.ensureClientIDMapper(ctx, realm, client, *patch.TokenFormat); err != nil {
+			return err
+		}
+	}
+	if patch.Audience != nil {
+		return a.setAudienceMappers(ctx, realm, client, *patch.Audience)
 	}
 	return nil
+}
+
+// setAudienceMappers makes the client's audience mappers exactly one per resource. A mapper is kept
+// only when it is the one audienceMapper writes for a declared resource; any other audience mapper
+// is deleted, so a hand-made or edited one cannot keep a resource in the client's tokens.
+func (a *Admin) setAudienceMappers(ctx context.Context, realm Realm, client ClientUUID, resources []string) error {
+	models := a.clientPath(realm, client) + "/protocol-mappers/models"
+	response, err := a.do(ctx, http.MethodGet, models, nil, nil, false)
+	if err != nil {
+		return err
+	}
+	var existing []map[string]any
+	err = json.Unmarshal(response.body, &existing)
+	response.Close()
+	if err != nil {
+		return fmt.Errorf("keycloak: decode protocol mappers: %w", err)
+	}
+	declared := map[string]bool{}
+	for _, resource := range resources {
+		declared[resource] = true
+	}
+	held := map[string]bool{}
+	for _, mapper := range existing {
+		if stringField(mapper, "protocolMapper") != audienceMapperType {
+			continue
+		}
+		resource := audienceOf(mapper)
+		if declared[resource] && !held[resource] && stringField(mapper, "name") == "audience-"+resource {
+			held[resource] = true
+			continue
+		}
+		// Not marked mutating: a repeated delete answers 404, which is the state wanted.
+		response, err := a.do(ctx, http.MethodDelete, models+"/"+url.PathEscape(stringField(mapper, "id")), nil, nil, false)
+		if err != nil && !errors.Is(err, ErrNotFound) {
+			return err
+		}
+		if err == nil {
+			response.Close()
+		}
+	}
+	for _, resource := range resources {
+		if held[resource] {
+			continue
+		}
+		response, err := a.do(ctx, http.MethodPost, models, nil, audienceMapper(resource), true)
+		if err != nil {
+			return err
+		}
+		response.Close()
+	}
+	return nil
+}
+
+// audienceOf is the resource an audience mapper writes into access tokens, or "" when it writes a
+// custom audience, writes none into the access token, or writes it into the ID token too.
+func audienceOf(mapper map[string]any) string {
+	config, _ := mapper["config"].(map[string]any)
+	if custom, _ := config["included.custom.audience"].(string); custom != "" {
+		return ""
+	}
+	if access, _ := config["access.token.claim"].(string); access != "true" {
+		return ""
+	}
+	if idToken, _ := config["id.token.claim"].(string); idToken == "true" {
+		return ""
+	}
+	resource, _ := config["included.client.audience"].(string)
+	return resource
 }
 
 // ensureClientIDMapper creates the client_id mapper, or rewrites one that writes another value.

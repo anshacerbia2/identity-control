@@ -224,6 +224,11 @@ func (r *Registry) PatchClient(ctx context.Context, _ keycloak.Realm, client key
 	if patch.TokenFormat != nil {
 		stored.RFC9068, stored.ClientIDClaim = true, *patch.TokenFormat
 	}
+	if patch.Audience != nil {
+		spec := r.specs[client]
+		spec.Audience = append([]string{}, *patch.Audience...)
+		r.specs[client] = spec
+	}
 	if patch.Keys != nil {
 		spec := r.specs[client]
 		if spec.Public {
