@@ -256,9 +256,15 @@ carry `typ` `at+jwt` and `client_id`, and no email, names, or roles.
 A server whose ceremony ran before `ADR-IAM-001 §5.11` rule 5 has no `identity-control-api`
 resource, and its callers' tokens name the Admin API client `identity-control`, which
 STD-IAM-002 §3.1 prohibits. Move it in this order, because each step needs a token the step before
-still accepts:
+still accepts, and the audience change needs the new binary while the old audience is verified:
 
-1. **Register the resource by resuming the ceremony**, with the operator, username and email on
+1. **The kernel first.** Pull identity-kernel and `docker compose up -d` there: realm-apply removes
+   the `provider_scope` mapper (identity-kernel TDD-001 1.9.0). The new binary refuses a token that
+   carries the claim, and the ceremony's Principal still holds the attribute.
+2. **Migrate, and run the new binary on the old audience.** Pull this repository, put
+   `IDENTITY_TOKEN_AUDIENCE=identity-control` in `.env`, and
+   `docker compose up -d --build identity-control`. The migrate job runs first.
+3. **Register the resource by resuming the ceremony**, with the operator, username and email on
    record (`bootstrap.sh` used `bootstrap-operator` and `bootstrap-operator@scnehaux.local`). Do not
    rerun `bootstrap.sh`; run only its first step:
 
@@ -267,11 +273,10 @@ still accepts:
      -username bootstrap-operator -email bootstrap-operator@scnehaux.local -resume '<recorded operator>'
    ```
 
-2. **Move each caller's audience while the running service still verifies the old one.** With a
-   token from the running service, propose an audience change on the adopted caller and the BFF
-   (`TDD-identity-control-003` §Registration Changes). A development server applies it at once, and
-   the apply replaces the hand-made `identity-control-audience` mapper with
-   `audience-identity-control-api`:
+4. **Move each caller's audience.** With a token from the running service, propose an audience
+   change on the adopted caller and the BFF (`TDD-identity-control-003` §Registration Changes). A
+   development server applies it at once, and the apply replaces the hand-made
+   `identity-control-audience` mapper with `audience-identity-control-api`:
 
    ```http
    POST /v1/registrations/{registration_id}/changes
@@ -281,12 +286,12 @@ still accepts:
    {"audience":["identity-control-api"],"expected_version":<the registration's version>}
    ```
 
-   From here, new tokens name `identity-control-api` and the running service refuses them.
+   `GET /v1/registrations` lists both with their `registration_id` and `version`. A caller that is
+   not adopted yet is adopted first, with `"audience":[]`, and then moved. From here, new tokens
+   name `identity-control-api` and the running service refuses them.
 
-3. **Recreate the service** so it verifies the new audience: `docker compose up -d identity-control`.
-   `compose.yaml` now sets `IDENTITY_TOKEN_AUDIENCE=identity-control-api`.
-
-A caller that is not adopted yet is adopted first, with `"audience":[]`, and then moved by step 2.
+5. **Verify the new audience.** Remove `IDENTITY_TOKEN_AUDIENCE` from `.env` and
+   `docker compose up -d identity-control`. A fresh token now works.
 
 ## Keys, and moving a server from secrets to keys
 

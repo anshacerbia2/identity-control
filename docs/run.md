@@ -99,7 +99,7 @@ Then register this service's two clients against it:
 ```
 
 This registers the service client, with `manage-users` and `view-users` only, and the harness
-caller: Authorization Code with PKCE, the provider scope attached, `identity-control` in `aud`,
+caller: Authorization Code with PKCE, the provider scope attached, `identity-control-api` in `aud`,
 and a 240-second token. It removes the client-management roles an earlier version granted.
 
 It creates no user. Issuing a `principal_id` is the Identity Control Service's authority and
