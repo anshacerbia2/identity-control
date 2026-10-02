@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-006
   title: Provider Authority from Organization's Records
   owner: Core Platform Team
-  version: 1.1.0
+  version: 1.2.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -175,6 +175,12 @@ letter, if any, closes as `SUPERSEDED` (`TDD-organization-control-005`).
 issuer and audience, names `subject_type` `workload`, and its `principal_id` equals
 `IDENTITY_DELIVERY_PRINCIPAL_ID`. Every other route refuses a workload token as before, and this
 route refuses every other caller.
+
+**Each side's audience is the other's resource registration.** Organization Control's workload is
+registered with audience `identity-control-api`, and this service's with `organization-control-api`
+(STD-IAM-002 §3.1). Both are created through `POST /v1/workloads` once the two resources are
+registered, which is what TDD-identity-control-003 §Registration Changes makes possible for the
+callers already configured.
 
 ## Algorithms / Logic
 
