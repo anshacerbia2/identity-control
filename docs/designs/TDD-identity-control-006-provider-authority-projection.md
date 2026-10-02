@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-006
   title: Provider Authority from Organization's Records
   owner: Core Platform Team
-  version: 1.0.0
+  version: 1.1.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -244,6 +244,12 @@ provider(principal_id, now):
   for the old profile.
 - A caller that is not a provider is an owner, as before (`TDD-identity-control-003` §Registration
   Ownership).
+- **A decision that cannot be read answers `503` (`dependency-unavailable`).** Serving the caller
+  as an owner would turn an unreadable record into a silent downgrade, and serving it as a provider
+  would fail open.
+- **A provider and an owner present the same token**: `principal_id` (a UUID, the key the decision
+  reads), `subject_type` `human`, `acr` and `auth_time`. A workload's token is refused on every route
+  but the intake.
 
 ### The Ceremony's Grant
 
@@ -252,9 +258,16 @@ The bootstrap ceremony creates the first Principal before any Organization grant
 (`ADR-ORG-002 §5.4`):
 
 - `identity.bootstrap_ceremony` gains `principal_id`, written in the ceremony's insert-only row.
+  The ceremony mints the identifier when it claims the row and creates that Principal, so a
+  resumed ceremony creates the same one. A ceremony performed before the column existed created
+  the first Principal into an empty registry, so the migration records the earliest mapping. A row
+  that still names no one, claimed before the column and never completed, is refused on resume: it
+  cannot be rewritten to name anyone.
 - The ceremony grant is honored until the projection holds an active emergency grant for anyone.
   At that moment it is retired by an insert into `identity.ceremony_grant_retirement (id = 1,
-  retired_at, by_grant_id)`, which is insert-only like the ceremony row. From then on provider
+  retired_at, by_grant_id)`, which is insert-only like the ceremony row. The insert runs in the
+  transaction that projects the grant, from an event or a snapshot, so the retirement and the
+  emergency grant that replaces it commit together. From then on provider
   authority comes from Organization's record alone.
 - The ceremony no longer writes the kernel attribute `scnehaux_provider_scope`.
 
