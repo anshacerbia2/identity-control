@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/anshacerbia2/foundation-platform/id"
@@ -147,9 +148,22 @@ func TestAnAudienceChangeTheKernelRefusesIsNotRecorded(t *testing.T) {
 	ctx := context.Background()
 	h.resource("aud-fail-api", "L1")
 	registration := h.publicClient("aud-fail")
+	logs := h.captureLogs()
 	h.kernel.FailPatch = keycloak.ErrUnavailable
 	if _, _, err := h.service.ProposeChange(ctx, h.audienceProposal(registration, h.caller, true, "aud-fail-api")); err == nil {
 		t.Fatal("a change the kernel refused was applied")
+	}
+	// The caller is told only to retry, so the cause is in the log, naming the registration.
+	if got := logs.String(); !strings.Contains(got, "a registration change was not applied") ||
+		!strings.Contains(got, registration.ID.String()) || !strings.Contains(got, "unavailable") {
+		t.Errorf("the refused change logged %q", got)
+	}
+	logs.Reset()
+	if _, _, err := h.service.ProposeChange(ctx, h.audienceProposal(registration, h.caller, true, "aud-nobody")); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("an invalid change answered %v", err)
+	}
+	if logs.Len() != 0 {
+		t.Errorf("a refusal the caller is told about precisely was logged: %q", logs.String())
 	}
 	h.kernel.FailPatch = nil
 	got, _ := h.service.Get(ctx, registration.ID)
