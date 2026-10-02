@@ -164,7 +164,7 @@ POST /v1/deliveries        Organization Control's workload only
 | Applied | `202` | `applied` |
 | Already applied (`inbox.Guard` saw the event) | `202` | `applied` |
 | Superseded (a higher version is held) | `202` | none |
-| Unknown type, malformed payload, another scope | `422` | none |
+| Not a CloudEvents envelope, unknown type, malformed payload, another scope | `400` (`validation-failed`) | none |
 | Not Organization Control's workload | `401` / `403` | none |
 
 The marker follows `ADR-GLB-016 §5.4`: it is emitted only where the assertion "this consumer holds
@@ -183,7 +183,7 @@ route refuses every other caller.
 ```text
 in one transaction:
     inbox.Guard(identity-control, event_id, type): seen -> 202 applied
-    decode the payload: malformed, unknown type, scope other than provider:identity-control -> 422
+    decode the payload: malformed, unknown type, scope other than provider:identity-control -> 400
     read the held grant_version for grant_id, FOR UPDATE
     held >= event's version -> 202, no marker (superseded)
     upsert the grant's whole state; set applied_mark = greatest(applied_mark, streamposition)
@@ -271,7 +271,8 @@ The bootstrap ceremony creates the first Principal before any Organization grant
 
 - An event is applied once: a duplicate answers applied without a second write, and a lower or
   equal version answers 202 with no marker and leaves the held state.
-- An unknown type, a malformed payload or another scope answers 422. A caller other than
+- An unknown type, a malformed payload or another scope answers 400, which the dispatcher reads as
+  poison. A caller other than
   Organization Control's workload is refused, and the intake refuses no route but its own.
 - A snapshot replaces the projection by version and marks a grant it omits revoked.
 - Freshness: fresh within the budget, stale past it, stale while security debt is reported, stale
