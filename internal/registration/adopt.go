@@ -216,6 +216,9 @@ func (s *Service) Adopt(ctx context.Context, req AdoptRequest) (AdoptResult, err
 	}
 	s.logger.WarnContext(ctx, "a client created outside this service was adopted",
 		slog.String("client_key", req.ClientKey), slog.String("adopted_by", req.RegisteredBy.String()))
+	if result.Registration != nil {
+		s.reportDirect(ctx, "adoption", *result.Registration)
+	}
 	return result, nil
 }
 

@@ -509,7 +509,29 @@ func (s *Service) Realize(ctx context.Context, prepared Prepared, registration R
 	}); err != nil {
 		return Registration{}, "", err
 	}
+	// An approved request was decided by a second provider; anything else in production a provider
+	// registered alone, which is reported each time (ADR-IAM-003 §5.3).
+	if prepared.req.reserved == nil && !prepared.req.Developer {
+		path := "registration"
+		if active.Profile == ProfileWorkload {
+			path = "workload"
+		}
+		s.reportDirect(ctx, path, active)
+	}
 	return active, client, nil
+}
+
+// reportDirect reports a production registration a provider created alone (ADR-IAM-003 §5.3,
+// §5.7): a log line a review or an alert reads, until provider authority itself takes a second
+// person's approval to activate.
+func (s *Service) reportDirect(ctx context.Context, path string, registration Registration) {
+	if !s.cfg.Production {
+		return
+	}
+	s.logger.WarnContext(ctx, "a provider registered a production client directly, without a second person's approval",
+		slog.String("path", path), slog.String("client_key", registration.ClientKey),
+		slog.String("registration_id", registration.ID.String()),
+		slog.String("registered_by", registration.RegisteredBy.String()))
 }
 
 // scope gives the client its scope sets (tokenprofile.go): exactly its default and optional scopes,
