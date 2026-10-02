@@ -20,6 +20,7 @@
       "internal/httpapi",
       "internal/identity/provisioning",
       "internal/keycloak",
+      "internal/providerauthority",
       "internal/reconcile",
       "internal/registration",
       "internal/workload"
@@ -67,9 +68,16 @@
       "internal/registration"
     ],
 
+    "_comment_providerauthority": [
+      "internal/providerauthority is the projection of Organization's provider:identity-control",
+      "grants (TDD-identity-control-006). It reaches no internal package: the inbox guard and the",
+      "envelope are foundation-platform's."
+    ],
+    "internal/providerauthority": [],
     "internal/httpapi": [
       "internal/identity/provisioning",
       "internal/keycloak",
+      "internal/providerauthority",
       "internal/reconcile",
       "internal/registration",
       "internal/workload"

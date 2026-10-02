@@ -498,3 +498,22 @@ func TestRegistrationConstraintsHold(t *testing.T) {
 }
 
 var errRollback = errors.New("rolled back by the test")
+
+// TestTheProviderProjectionIsNeverDeleted holds TDD-identity-control-006's rule: the projection is
+// replaced by version and never deleted, so a revoked grant stays as the record a late, older event
+// is discarded against.
+func TestTheProviderProjectionIsNeverDeleted(t *testing.T) {
+	pool, ctx := openPool(t)
+	for _, table := range []string{"identity.provider_grant", "identity.provider_projection"} {
+		for _, privilege := range []string{"SELECT", "INSERT", "UPDATE"} {
+			if !queryBool(t, pool, ctx, `SELECT has_table_privilege($1, $2, $3)`, runtimeRole, table, privilege) {
+				t.Errorf("%s lacks %s on %s; the projection cannot be written", runtimeRole, privilege, table)
+			}
+		}
+		for _, privilege := range []string{"DELETE", "TRUNCATE"} {
+			if queryBool(t, pool, ctx, `SELECT has_table_privilege($1, $2, $3)`, runtimeRole, table, privilege) {
+				t.Errorf("%s holds %s on %s; a revoked grant must stay to discard a late event", runtimeRole, privilege, table)
+			}
+		}
+	}
+}

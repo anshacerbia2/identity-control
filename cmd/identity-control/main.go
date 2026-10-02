@@ -31,6 +31,7 @@ import (
 	"github.com/anshacerbia2/identity-control/internal/httpapi"
 	"github.com/anshacerbia2/identity-control/internal/identity/provisioning"
 	"github.com/anshacerbia2/identity-control/internal/keycloak"
+	"github.com/anshacerbia2/identity-control/internal/providerauthority"
 	"github.com/anshacerbia2/identity-control/internal/reconcile"
 	"github.com/anshacerbia2/identity-control/internal/registration"
 	"github.com/anshacerbia2/identity-control/internal/workload"
@@ -193,23 +194,47 @@ func run() error {
 		return fmt.Errorf("principal handler: %w", err)
 	}
 
-	surface, err := httpapi.Routes(httpapi.RoutesConfig{
-		Principals:    principals,
-		Registrations: registrations,
-		Workloads:     workloadHandler,
-		Database:      pool,
-		Telemetry:     telemetry,
-	})
-	if err != nil {
-		return fmt.Errorf("routes: %w", err)
-	}
-
 	// The key source performs no fetch here. A cold replica loads the key set on its first
 	// verification, and NewJWKS deliberately touches no network so the composition root decides
 	// when that happens rather than the linker.
 	keys, err := verify.NewJWKS(verify.JWKSConfig{URL: cfg.JWKSURL})
 	if err != nil {
 		return fmt.Errorf("jwks source: %w", err)
+	}
+
+	// The provider authority projection's intake (TDD-identity-control-006). It verifies its own
+	// caller, Organization Control's workload, with the same issuer, audience and keys and a claim
+	// rule that admits that workload alone. Unconfigured, the intake answers 503.
+	routesConfig := httpapi.RoutesConfig{
+		Principals:    principals,
+		Registrations: registrations,
+		Workloads:     workloadHandler,
+		Database:      pool,
+		Telemetry:     telemetry,
+	}
+	if !cfg.DeliveryPrincipal.IsNil() {
+		projection, err := providerauthority.New(pool)
+		if err != nil {
+			return fmt.Errorf("provider authority projection: %w", err)
+		}
+		deliveryVerifier, err := verify.New(verify.Config{
+			Issuer: cfg.TokenIssuer, Audience: cfg.TokenAudience, Keys: keys,
+			Requirement:            httpapi.DeliveryRequirement(cfg.DeliveryPrincipal),
+			MaxSkew:                cfg.TokenMaxSkew,
+			RequireAccessTokenType: cfg.EnforceAccessTokenType,
+		})
+		if err != nil {
+			return fmt.Errorf("delivery verifier: %w", err)
+		}
+		routesConfig.Deliveries, routesConfig.DeliveryVerifier = projection, deliveryVerifier
+		logger.Info("the provider authority intake admits Organization Control's workload",
+			slog.String("principal_id", cfg.DeliveryPrincipal.String()))
+	} else {
+		logger.Warn("IDENTITY_DELIVERY_PRINCIPAL_ID is unset; the provider authority intake accepts no delivery")
+	}
+	surface, err := httpapi.Routes(routesConfig)
+	if err != nil {
+		return fmt.Errorf("routes: %w", err)
 	}
 
 	// The claim rule is this service's, because STD-IAM-002 §3.5 states it in terms of a claim
