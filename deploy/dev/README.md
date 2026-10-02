@@ -283,7 +283,7 @@ still accepts, and the audience change needs the new binary while the old audien
 
    ```http
    POST /v1/registrations/{registration_id}/changes
-   X-Administrative-Reason: move to the API's own resource (STD-IAM-002 §3.1)
+   X-Administrative-Reason: move to the API's own resource (STD-IAM-002 section 3.1)
    Content-Type: application/json
 
    {"audience":["identity-control-api"],"expected_version":<the registration's version>}

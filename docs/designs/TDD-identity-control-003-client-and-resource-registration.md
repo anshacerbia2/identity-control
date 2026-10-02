@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-003
   title: Protocol Client and Protected-Resource Registration
   owner: Core Platform Team
-  version: 1.26.0
+  version: 1.27.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -411,6 +411,13 @@ A runtime that could rewrite `public_jwk` could swap a registered key for one wh
 holds, and the next rebuild of the kernel's JWKS would install it.
 
 ## API / Interface
+
+**`X-Administrative-Reason` is visible US-ASCII.** Every route that records a reason takes it from
+this header, and a value holding any octet outside visible US-ASCII, space and horizontal tab is
+refused with `400 validation-failed` before the handler runs (STD-GLB-001 §Request Header Values,
+RFC 9110 §5.5). Such octets carry no encoding the service could rely on. Stored as text, they once
+reached PostgreSQL as invalid UTF-8, and the request failed as an unexplained `503`. A failure that
+is not the kernel's answers `500`, never the kernel's `503`.
 
 ```text
 POST   /v1/registrations

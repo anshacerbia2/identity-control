@@ -14,6 +14,7 @@ import (
 	"github.com/anshacerbia2/foundation-platform/id"
 
 	"github.com/anshacerbia2/identity-control/internal/httpapi"
+	"github.com/anshacerbia2/identity-control/internal/keycloak"
 	"github.com/anshacerbia2/identity-control/internal/registration"
 )
 
@@ -126,18 +127,19 @@ func TestChangeRoutesRefuseMalformedRequests(t *testing.T) {
 func TestChangeRefusalsAreMappedToTheirStatus(t *testing.T) {
 	owner, owned := mustUUID(t), mustUUID(t)
 	for err, want := range map[error]int{
-		fmt.Errorf("%w: rule", registration.ErrInvalid):     http.StatusBadRequest,
-		registration.ErrVersionConflict:                     http.StatusConflict,
-		registration.ErrChangeOpen:                          http.StatusConflict,
-		registration.ErrChangeDecided:                       http.StatusConflict,
-		registration.ErrSuperseded:                          http.StatusConflict,
-		registration.ErrInvalidTransition:                   http.StatusConflict,
-		registration.ErrSelfApproval:                        http.StatusForbidden,
-		registration.ErrNotProposer:                         http.StatusForbidden,
-		registration.ErrNotProvider:                         http.StatusForbidden,
-		registration.ErrChangeNotFound:                      http.StatusNotFound,
-		registration.ErrNotFound:                            http.StatusNotFound,
-		errors.New("registration: write the redirect URIs"): http.StatusServiceUnavailable,
+		fmt.Errorf("%w: rule", registration.ErrInvalid): http.StatusBadRequest,
+		registration.ErrVersionConflict:                 http.StatusConflict,
+		registration.ErrChangeOpen:                      http.StatusConflict,
+		registration.ErrChangeDecided:                   http.StatusConflict,
+		registration.ErrSuperseded:                      http.StatusConflict,
+		registration.ErrInvalidTransition:               http.StatusConflict,
+		registration.ErrSelfApproval:                    http.StatusForbidden,
+		registration.ErrNotProposer:                     http.StatusForbidden,
+		registration.ErrNotProvider:                     http.StatusForbidden,
+		registration.ErrChangeNotFound:                  http.StatusNotFound,
+		registration.ErrNotFound:                        http.StatusNotFound,
+		fmt.Errorf("registration: write the redirect URIs: %w", keycloak.ErrUnavailable): http.StatusServiceUnavailable,
+		errors.New("registration: record the change"):                                    http.StatusInternalServerError,
 	} {
 		registrar := &stubRegistrar{owners: map[id.UUID]id.UUID{owned: owner}, err: err}
 		handler := registrarHandler(t, registrar)
@@ -190,5 +192,27 @@ func TestAnAudienceChangeReachesTheServiceAsAsked(t *testing.T) {
 	registrar.err = registration.ErrNotResourceOwner
 	if w := serve(handler, asOwner(changeRequest(http.MethodPost, path, `{"audience":["orders-api"],"expected_version":4}`), owner)); w.Code != http.StatusForbidden {
 		t.Errorf("adding a resource the owner does not own answered %d, want 403", w.Code)
+	}
+}
+
+// A failure the kernel caused may pass on a retry and answers 503; any other is not the kernel's and
+// answers 500, so the message never blames a kernel that was not called.
+func TestAChangeFailureNamesWhoseItIs(t *testing.T) {
+	owner, owned := mustUUID(t), mustUUID(t)
+	registrar := &stubRegistrar{owners: map[id.UUID]id.UUID{owned: owner}}
+	handler := registrarHandler(t, registrar)
+	path := "/v1/registrations/" + owned.String() + "/changes"
+	for name, c := range map[string]struct {
+		err  error
+		want int
+	}{
+		"the kernel":   {fmt.Errorf("registration: write the audience to the client: %w", keycloak.ErrUnavailable), http.StatusServiceUnavailable},
+		"the database": {errors.New("registration: record the change: invalid byte sequence"), http.StatusInternalServerError},
+	} {
+		registrar.err = c.err
+		w := serve(handler, asOwner(changeRequest(http.MethodPost, path, `{"audience":["orders-api"],"expected_version":1}`), owner))
+		if w.Code != c.want {
+			t.Errorf("%s answered %d, want %d", name, w.Code, c.want)
+		}
 	}
 }
