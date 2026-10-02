@@ -27,6 +27,11 @@ type RoutesConfig struct {
 	Database      Prober
 	Telemetry     *observability.Telemetry
 
+	// Deliveries applies Organization's provider grant events, and DeliveryVerifier admits the
+	// delivering workload alone (TDD-identity-control-006). Either nil, the intake answers 503.
+	Deliveries       Applier
+	DeliveryVerifier TokenVerifier
+
 	// ReadinessTimeout bounds the dependency check. It is well below any orchestrator probe
 	// interval so a slow database produces a failed probe rather than a hung one.
 	ReadinessTimeout time.Duration
@@ -48,6 +53,10 @@ type Surface struct {
 
 	// API is every route that acts on behalf of a caller. It requires an authenticated caller.
 	API http.Handler
+
+	// Deliveries is the acceptance API Organization Control's dispatcher posts to. It verifies its
+	// own caller, the delivering workload, and no caller route's authentication applies to it.
+	Deliveries http.Handler
 }
 
 // Routes builds the HTTP surface.
@@ -150,17 +159,23 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	api.HandleFunc("GET /v1/workloads/{target}", p(cfg.Workloads.GetWorkload))
 	api.HandleFunc("POST /v1/workloads/{target}", p(cfg.Workloads.WorkloadAction))
 
-	return Surface{Probes: probes, API: api}, nil
+	return Surface{Probes: probes, API: api, Deliveries: deliveryIntake(cfg.DeliveryVerifier, cfg.Deliveries)}, nil
 }
 
 // Mount joins the two halves onto one root mux, each behind the chain its half requires.
 //
 // The probe patterns are literal and method-qualified, so Go's mux precedence gives them
 // priority over the catch-all without either half being able to shadow the other.
+//
+// The delivery intake takes the probe chain -- observability and timeout, no caller authentication --
+// because it verifies its own caller, which no caller route would admit.
 func (s Surface) Mount(probeChain, apiChain func(http.Handler) http.Handler) http.Handler {
 	root := http.NewServeMux()
 	root.Handle("GET /healthz", probeChain(s.Probes))
 	root.Handle("GET /readyz", probeChain(s.Probes))
+	if s.Deliveries != nil {
+		root.Handle("POST /v1/deliveries", probeChain(s.Deliveries))
+	}
 	root.Handle("/", apiChain(s.API))
 	return root
 }

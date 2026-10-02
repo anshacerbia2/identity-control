@@ -43,6 +43,8 @@ BEGIN
               ('identity.registration_change'),
               ('identity.application_developer'),
               ('identity.registration_request'),
+              ('identity.provider_grant'),
+              ('identity.provider_projection'),
               ('identity.principal_relink'),
               ('identity.principal_finding'),
               ('platform.outbox'),
@@ -159,6 +161,11 @@ GRANT UPDATE (state, decided_by, decision_reason, decided_at, registration_id) O
 -- A dangling-mapping finding is evidence that a user disappeared, kept after it is resolved.
 REVOKE UPDATE, DELETE, TRUNCATE ON identity.principal_relink FROM identity_runtime;
 REVOKE DELETE, TRUNCATE ON identity.principal_finding FROM identity_runtime;
+-- The provider authority projection (TDD-identity-control-006): written by the delivery intake and
+-- the bootstrap, replaced by version, never deleted. A revoked grant stays as the record a late,
+-- older event is discarded against.
+REVOKE DELETE, TRUNCATE ON identity.provider_grant FROM identity_runtime;
+REVOKE DELETE, TRUNCATE ON identity.provider_projection FROM identity_runtime;
 
 -- platform.outbox_sequence is read by every append. Without USAGE the outbox write fails
 -- inside the caller's domain transaction, so a membership mutation would roll back.

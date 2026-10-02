@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/anshacerbia2/foundation-platform/id"
 )
 
 // Config is the whole configuration surface of the deployable. It grows as the service
@@ -71,6 +73,11 @@ type Config struct {
 	// registration describes is disabled, as well as recorded. The default, report, records it only,
 	// for an estate whose bootstrap clients are not adopted yet (TDD-identity-control-003).
 	DisableUnmanagedClients bool
+
+	// DeliveryPrincipal is IDENTITY_DELIVERY_PRINCIPAL_ID: Organization Control's workload
+	// principal_id, the one caller the delivery intake admits (TDD-identity-control-006). Unset, the
+	// intake answers 503 and no provider event is accepted.
+	DeliveryPrincipal id.UUID
 
 	// Production is IDENTITY_ENVIRONMENT=production, the default: a registration keeps at least two
 	// owners (ADR-IAM-003 §5.1). Production unless stated, so a deployment that forgets to say
@@ -196,6 +203,15 @@ func Load() (Config, error) {
 		cfg.DisableUnmanagedClients = true
 	default:
 		problems = append(problems, fmt.Errorf("IDENTITY_UNMANAGED_CLIENTS is %q; it is report or disable", mode))
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("IDENTITY_DELIVERY_PRINCIPAL_ID")); raw != "" {
+		parsed, err := id.Parse(raw)
+		if err != nil {
+			problems = append(problems, fmt.Errorf("IDENTITY_DELIVERY_PRINCIPAL_ID is not a principal_id: %q", raw))
+		} else {
+			cfg.DeliveryPrincipal = parsed
+		}
 	}
 
 	cfg.DBMaxConns = int32(intOr("DB_MAX_CONNS", 20, &problems))

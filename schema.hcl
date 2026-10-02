@@ -1703,3 +1703,103 @@ table "registration_request" {
     expr = "(state <> 'approved') OR (decided_by <> proposed_by)"
   }
 }
+
+// One row per provider:identity-control grant, as Organization Control's events and snapshot carry
+// it (TDD-identity-control-006 §Data Model). Replaced by version, never deleted: a revoked grant
+// stays, so a late older event cannot revive it.
+table "provider_grant" {
+  schema  = schema.identity
+  comment = "Organization's provider:identity-control grants, projected by version. TDD-identity-control-006."
+
+  column "grant_id" {
+    null = false
+    type = uuid
+  }
+  column "principal_id" {
+    null = false
+    type = uuid
+  }
+  column "kind" {
+    null = false
+    type = text
+  }
+  column "grant_status" {
+    null = false
+    type = text
+  }
+  column "grant_version" {
+    null = false
+    type = bigint
+  }
+  column "activation_id" {
+    null = true
+    type = uuid
+  }
+  column "activation_ends_at" {
+    null = true
+    type = timestamptz
+  }
+  column "applied_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+
+  primary_key {
+    columns = [column.grant_id]
+  }
+
+  // The per-request decision reads a caller's active grants by principal_id.
+  index "provider_grant_principal" {
+    columns = [column.principal_id]
+    where   = "grant_status = 'active'"
+  }
+
+  check "provider_grant_kind_check" {
+    expr = "kind IN ('eligible', 'emergency')"
+  }
+  check "provider_grant_status_check" {
+    expr = "grant_status IN ('active', 'revoked')"
+  }
+  check "provider_grant_version_check" {
+    expr = "grant_version > 0"
+  }
+  check "provider_grant_activation_complete" {
+    expr = "(activation_id IS NULL) = (activation_ends_at IS NULL)"
+  }
+  check "provider_grant_revoked_inactive" {
+    expr = "grant_status = 'active' OR activation_id IS NULL"
+  }
+}
+
+// The snapshot this projection was built from and the highest stream position applied. No row is
+// no bootstrap, and no activation is honored (TDD-identity-control-006 §Freshness).
+table "provider_projection" {
+  schema  = schema.identity
+  comment = "The provider authority projection's bootstrap and progress. TDD-identity-control-006."
+
+  column "id" {
+    null = false
+    type = integer
+  }
+  column "snapshot_mark" {
+    null = false
+    type = bigint
+  }
+  column "bootstrapped_at" {
+    null = false
+    type = timestamptz
+  }
+  column "applied_mark" {
+    null = false
+    type = bigint
+  }
+
+  primary_key {
+    columns = [column.id]
+  }
+
+  check "provider_projection_single_row" {
+    expr = "id = 1"
+  }
+}
