@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-001
   title: Canonical Principal Identifier and Creation Path
   owner: Core Platform Team
-  version: 1.8.0
+  version: 1.9.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -171,6 +171,12 @@ CREATE TABLE identity.bootstrap_ceremony (
 credential-setting action, so the first human interaction establishes the credential. A ceremony
 that set a password would be a process holding a credential for an identity it also authorized,
 which is the concentration `ADR-IAM-001 §5.10` exists to prevent.
+
+**The ceremony's Principal is the first provider.** It records that Principal in its own row as a
+local emergency grant, honored until Organization's first emergency `provider:identity-control`
+grant is projected, and retired then by an insert-only record (`ADR-ORG-002 §5.4`,
+`TDD-identity-control-006` §The Ceremony's Grant). It no longer writes the kernel attribute
+`scnehaux_provider_scope`.
 
 **Why not simply relax the API for the first call.** A route that accepts an unauthenticated
 request when a table is empty is a route whose authorization depends on data. The table is empty
@@ -360,15 +366,13 @@ reconcilable after any future issuer change.
 ### Caller Token
 
 The token above is what a Principal carries to an internal API. A caller of this service carries
-a different one. Minting a Principal is irreversible and belongs to no Tenant, which makes it
-`privileged` in its `provider-scope` form (STD-IAM-002 §3.1.1). The kernel issues that token
-through its `scnehaux-provider` client scope, and this service accepts nothing else:
+the same shape, and its authority is read from records rather than claims. Minting a Principal is
+irreversible and belongs to no Tenant, which makes it `privileged` (STD-IAM-002 §3.1.1):
 
 ```json
 {
   "principal_id": "019235f1-8c4a-7c1e-9d0b-3f4a2b6e5d71",
   "subject_type": "human",
-  "provider_scope": "provider:identity-control",
   "acr": "1",
   "auth_time": 1786000000,
   "aud": ["identity-control"],
@@ -376,16 +380,15 @@ through its `scnehaux-provider` client scope, and this service accepts nothing e
 }
 ```
 
-`provider_scope` must name a registered provider scope. This design registers exactly one:
+**A provider is a Principal this service's records say is one, for this request**
+(`ADR-ORG-002 §5.3`, `TDD-identity-control-006`): one holding an emergency
+`provider:identity-control` grant, or an activation of an eligible one that is in force while the
+projection is fresh, or, until Organization's first emergency grant is projected, the ceremony's
+Principal. The token carries no `provider_scope`. A token that carries one, or carries `tenant_id`,
+is refused. The access token lifetime is class `L0`, 240 seconds, set on the calling client's
+registration.
 
-| Provider scope | Authority | Granted by |
-| :-- | :-- | :-- |
-| `provider:identity-control` | Mint, read, quarantine, relink, and retire Principals through this service | The bootstrap ceremony, to the first Principal; nothing else writes `scnehaux_provider_scope` |
-
-A token carrying `tenant_id`, or naming any other scope, is refused. The access token lifetime
-is class `L0`, 240 seconds, and is set on the calling client's registration.
-
-**A token without `provider_scope` is a registration owner's** (`ADR-IAM-003`), the
+**A caller that is not a provider is a registration owner** (`ADR-IAM-003`), the
 `resource-scoped` form of STD-IAM-002 §3.1.1: `principal_id`, `subject_type` `human`, `acr` and
 `auth_time`, and no `tenant_id`. It carries no authority of its own. Its authority is the ownership
 this service records for the registration a request names, read for each request

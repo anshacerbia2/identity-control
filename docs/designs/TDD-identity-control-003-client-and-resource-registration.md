@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-003
   title: Protocol Client and Protected-Resource Registration
   owner: Core Platform Team
-  version: 1.24.0
+  version: 1.25.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -1053,9 +1053,10 @@ production is refused when it would leave the registration fewer than two active
 (`ADR-IAM-003 §5.1`); whether the deployment is production is
 `IDENTITY_ENVIRONMENT`. A retired registration takes no new owner.
 
-**The caller.** A token naming `provider:identity-control` is a provider's, as before. A token
-without `provider_scope` is an owner's (`TDD-identity-control-001` §Caller Token): a person, with
-`acr` and `auth_time`. Authentication establishes which, and then:
+**The caller.** A caller is a provider when this service's records say so for this request
+(`TDD-identity-control-006` §The Provider Decision). Any other caller is an owner
+(`TDD-identity-control-001` §Caller Token): a person, with `acr` and `auth_time`. Authentication
+establishes which, and then:
 
 | Route | Provider | Owner |
 | :-- | :-- | :-- |
@@ -1299,7 +1300,7 @@ Principal, and counted only while the Principal's mapping is active, so a person
 creating registrations at the next request.
 
 ```text
-register(request) by a caller without provider_scope:
+register(request) by a caller that is not a provider:
     refuse unless the caller holds active application developer standing        403, before reading
     refuse in production: a production registration is requested, then approved    403
     refuse the workload profile: a workload is created through /v1/workloads       403
@@ -1459,8 +1460,9 @@ two creates nothing.
   another registration answers 404, and a provider-only route answers 403 without reading a record.
 - An owner whose Principal is retired or quarantined confers nothing at the next request.
 - In production, revoking an ownership that would leave fewer than two is refused.
-- A token without `provider_scope` that names a workload, lacks `acr` or `auth_time`, or carries
-  `tenant_id` is refused.
+- A caller's token that names a workload, lacks `acr` or `auth_time`, or carries `tenant_id` or
+  `provider_scope` is refused, except Organization Control's workload on the delivery intake
+  (`TDD-identity-control-006`).
 
 ### Changes
 
