@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-003
   title: Protocol Client and Protected-Resource Registration
   owner: Core Platform Team
-  version: 1.25.0
+  version: 1.26.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -1083,20 +1083,36 @@ provider's is.
 
 `ADR-IAM-003 §5.2` lets an owner propose a change to a registration's trust configuration and
 apply it to a non-production registration, and has a provider other than the proposer approve
-it in production. This slice changes **redirect URIs**, the field that decides where an
-authorization code is delivered and the one an attacker with a developer account would change
-(`TDD-identity-experience-004` §Security Notes). Audience and lifetime class follow. The kernel
-carries a client's audience as protocol mappers written at creation, which no patch path writes
-yet, and a resource's lifetime class changes the derived lifespan of every client whose audience
-names it, so each needs its own design.
+it in production. A change has a `kind`:
+
+- **`redirect_uris`**, the field that decides where an authorization code is delivered and the one
+  an attacker with a developer account would change (`TDD-identity-experience-004` §Security
+  Notes).
+- **`audience`**, the resources that accept the client's tokens. It is how a caller configured
+  before a resource was registered moves to it: `identity-control-api` replacing this service's
+  Admin API client in `aud` (STD-IAM-002 §3.1).
+
+A resource's lifetime class is not changed yet: it changes the derived lifespan of every client
+whose audience names it, so it needs its own design.
+
+**Why an audience is a governed change.** Keycloak's guidance is to "limit the audience on the token
+to make sure that access tokens contain just limited amount of audiences" [R3], and an
+audience-restricted token "cannot then be taken by that resource and presented elsewhere" [R4]. The
+audience is therefore a trust decision of the resource's, as a redirect URI is of the client's, and
+it takes the same route: an owner proposes, and in production another provider approves (NIST
+AC-5, `ADR-IAM-003 §5.2`).
 
 ```sql
 CREATE TABLE identity.registration_change (
     change_id              UUID        PRIMARY KEY,
     registration_id        UUID        NOT NULL REFERENCES identity.client_registration(registration_id),
     base_version           BIGINT      NOT NULL,
-    previous_redirect_uris TEXT[]      NOT NULL,
-    redirect_uris          TEXT[]      NOT NULL CHECK (cardinality(redirect_uris) > 0),
+    kind                   TEXT        NOT NULL DEFAULT 'redirect_uris'
+        CHECK (kind IN ('redirect_uris', 'audience')),
+    previous_redirect_uris TEXT[],
+    redirect_uris          TEXT[]      CHECK (cardinality(redirect_uris) > 0),
+    previous_audience      TEXT[],
+    audience               TEXT[],
     approval_required      BOOLEAN     NOT NULL,
     proposed_by            UUID        NOT NULL,
     proposal_reason        TEXT        NOT NULL CHECK (btrim(proposal_reason) <> ''),
@@ -1111,7 +1127,10 @@ CREATE TABLE identity.registration_change (
            AND (decided_at IS NULL) = (decided_by IS NULL)
            AND (decided_at IS NULL) = (decision_reason IS NULL)),
     CONSTRAINT registration_change_separation_check
-        CHECK (NOT approval_required OR state <> 'applied' OR decided_by <> proposed_by)
+        CHECK (NOT approval_required OR state <> 'applied' OR decided_by <> proposed_by),
+    CONSTRAINT registration_change_kind_check
+        CHECK ((kind = 'redirect_uris') = (redirect_uris IS NOT NULL AND previous_redirect_uris IS NOT NULL)
+           AND (kind = 'audience') = (audience IS NOT NULL AND previous_audience IS NOT NULL))
 );
 CREATE UNIQUE INDEX registration_change_open
     ON identity.registration_change (registration_id) WHERE state = 'proposed';
@@ -1151,6 +1170,40 @@ apply(change), under the registration's row lock:
     patch the kernel client's redirect URIs; on failure roll back        503, retry
     record the change applied, with the caller and the reason
 ```
+
+An audience change differs in what it validates and what it writes:
+
+```text
+propose(registration, audience, expected_version, reason, caller):
+    refuse unless the registration is active and its profile is public, confidential or workload
+    each entry a client_key, no repeats, not the registration's own
+    refuse an entry that is not an active registered resource             400
+    a caller that is not a provider: refuse an added resource it does not own   403
+    refuse a set equal to the registered one; the order is not significant
+    then as above: pinned to expected_version, one open change, applied now or proposed
+
+apply(audience change), under the registration's row lock:
+    write audience, sorted, and version + 1
+    make the kernel client's audience mappers exactly the set: one oidc-audience-mapper per
+        resource, and every other audience mapper removed, including one made by hand
+    patch the access token lifespan derived from the new audience (STD-IAM-002 §3.3)
+    on any kernel failure roll back                                         503, retry
+```
+
+- **Removing is never restricted, adding is.** A narrower audience only takes access away. An
+  added resource is one whose owners did not agree to this client, so an owner adds only resources
+  it owns, as an application developer registers (§Application Developers), and a provider adds
+  any, approved in production by another provider.
+- **The mapper set is closed.** An audience mapper the registration does not declare is a path for
+  a token to reach a resource nobody recorded, so the apply removes it. That is how a caller's
+  hand-made audience mapper (`deploy/dev/create-kernel-clients.sh`) is replaced.
+- **Not compared by the sweep yet.** The drift sweep does not read audience mappers, so a console
+  edit between changes is not found. Comparing them is the next step and needs no new state.
+
+| Ref | Source |
+| :-- | :-- |
+| R3 | Keycloak, *Server Administration Guide*, §Audience support, <https://github.com/keycloak/keycloak/blob/main/docs/documentation/server_admin/topics/clients/oidc/con-audience.adoc>, accessed 2026-10-02: "Limit the audience on the token to make sure that access tokens contain just limited amount of audiences"; the audience mapper's *Included Client Audience* adds "the client ID of the specified service client as an audience". |
+| R4 | IETF RFC 8707, *Resource Indicators for OAuth 2.0*, §3, <https://www.rfc-editor.org/rfc/rfc8707>: "An audience-restricted access token that is legitimately presented to a resource cannot then be taken by that resource and presented elsewhere for illegitimate access to other resources." |
 
 **The kernel is written inside the transaction, as a restore writes it.** A kernel that refuses or
 does not answer rolls the change back, and the proposal stays open for a retry. A kernel that
@@ -1478,6 +1531,12 @@ two creates nothing.
   applied.
 - A second open proposal on the same registration is refused; the same proposal retried returns it.
 - A kernel failure while applying leaves desired state, the version and the proposal unchanged.
+- An audience change naming an unregistered resource, the registration itself, or a repeated entry
+  is refused, as is one equal to the registered set in any order, and one on a resource.
+- An owner's audience change adding a resource it does not own is refused; one removing a resource
+  is not. A provider's adds any registered resource.
+- An applied audience change leaves the kernel client with exactly one audience mapper per declared
+  resource, a hand-made one removed, and the lifespan the new audience derives.
 - An owner proposes and withdraws on a registration it owns; it cannot approve or reject, or read
   the queue. A withdrawal by anyone but the proposer is refused.
 

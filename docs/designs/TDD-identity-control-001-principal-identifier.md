@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-001
   title: Canonical Principal Identifier and Creation Path
   owner: Core Platform Team
-  version: 1.9.0
+  version: 1.10.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -375,10 +375,16 @@ irreversible and belongs to no Tenant, which makes it `privileged` (STD-IAM-002 
   "subject_type": "human",
   "acr": "1",
   "auth_time": 1786000000,
-  "aud": ["identity-control"],
+  "aud": ["identity-control-api"],
   "exp": 1786000240
 }
 ```
+
+**`aud` names this service's resource registration, `identity-control-api`**, and never its Admin
+API client `identity-control`, which holds a key and `manage-users`. A client named in `aud` is one
+the kernel lets exchange the token, so the resource is a keyless `resource` registration
+(STD-IAM-002 §3.1). A caller's audience moves to it by an audience change
+(`TDD-identity-control-003` §Registration Changes), and `IDENTITY_TOKEN_AUDIENCE` names it.
 
 **A provider is a Principal this service's records say is one, for this request**
 (`ADR-ORG-002 §5.3`, `TDD-identity-control-006`): one holding an emergency
