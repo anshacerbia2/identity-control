@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-001
   title: Canonical Principal Identifier and Creation Path
   owner: Core Platform Team
-  version: 1.10.0
+  version: 1.11.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -171,6 +171,25 @@ CREATE TABLE identity.bootstrap_ceremony (
 credential-setting action, so the first human interaction establishes the credential. A ceremony
 that set a password would be a process holding a credential for an identity it also authorized,
 which is the concentration `ADR-IAM-001 §5.10` exists to prevent.
+
+**The ceremony registers this service's resource** (`ADR-IAM-001 §5.11` rule 5). A caller's token
+is admitted only when its `aud` names a registered protected resource (STD-IAM-002 §3.1), and the
+first call after the ceremony is to this API, so the resource must exist before any token can name
+it. Registering it through the API would need such a token first. The ceremony registers it through
+the registration path's own Admin API client, as `POST /v1/registrations` would:
+
+| Field | Value |
+| :-- | :-- |
+| `client_key` | `IDENTITY_TOKEN_AUDIENCE`, `identity-control-api`: one setting, so the resource the ceremony registers and the audience the service verifies cannot disagree |
+| `profile`, `audience_class`, `lifetime_class` | `resource`, `privileged`, `L0` |
+| `registered_by` | the Principal the ceremony created |
+| idempotency | scope `ceremony:bootstrap`, key `bootstrap-resource:<realm>` |
+
+A ceremony interrupted after the Principal exists names the failed registration and is resumed
+with `-resume`, which replays the Principal and completes the registration once. An estate whose
+ceremony ran before this rule registers the resource the same way, by resuming with the recorded
+operator, username and email, and then moves its callers' audience to it by an audience change
+(`TDD-identity-control-003` §Registration Changes).
 
 **The ceremony's Principal is the first provider.** It records that Principal in its own row as a
 local emergency grant, honored until Organization's first emergency `provider:identity-control`
