@@ -161,6 +161,25 @@ if ($r.code -eq 201) {
     Expect "lifespan derived from L1" $web.access_token_lifespan 540
     $g = Send-Json "GET" "/v1/registrations/$($web.registration_id)" $null $token $null
     Expect "read back" $g.code 200
+
+    # An audience change against the real kernel (TDD-identity-control-003 Registration Changes):
+    # the apply rewrites the client's audience mappers, which only the fake was checked against
+    # before. It toggles, so a rerun on a long-lived server changes it back rather than proposing
+    # the registered audience again.
+    $current = $g.body | ConvertFrom-Json
+    $next = if (@($current.audience) -contains "smoke-orders") { @() } else { @("smoke-orders") }
+    $changeBody = @{ audience = $next; expected_version = $current.version } | ConvertTo-Json -Compress
+    if ($next.Count -eq 0) { $changeBody = "{`"audience`":[],`"expected_version`":$($current.version)}" }
+    $change = New-Object System.Net.Http.HttpRequestMessage("POST", "$api/v1/registrations/$($web.registration_id)/changes")
+    $change.Headers.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", $token)
+    $change.Headers.Add("X-Administrative-Reason", "smoke: an audience change reaches the kernel")
+    $change.Content = New-Object System.Net.Http.StringContent($changeBody, [System.Text.Encoding]::UTF8, "application/json")
+    $answer = $client.SendAsync($change).Result
+    $answerBody = $answer.Content.ReadAsStringAsync().Result
+    Expect "audience change applied" ([int]$answer.StatusCode) 201
+    if ([int]$answer.StatusCode -ne 201) { Write-Host "        $answerBody" }
+    $after = (Send-Json "GET" "/v1/registrations/$($web.registration_id)" $null $token $null).body | ConvertFrom-Json
+    Expect "audience written" ((@($after.audience) -join ",")) ($next -join ",")
 }
 $r = Send-Json "POST" "/v1/registrations" `
     '{"client_key":"identity-control-caller","profile":"public","audience_class":"internal","application_ref":"smoke","redirect_uris":["http://127.0.0.1:8099/callback"]}' `

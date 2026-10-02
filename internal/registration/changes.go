@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 	"time"
@@ -442,9 +443,30 @@ func (s *Service) ProposeChange(ctx context.Context, proposal Proposal) (Change,
 		return err
 	})
 	if err != nil {
+		s.logFailure(ctx, "proposing a change", proposal.RegistrationID, err)
 		return Change{}, false, err
 	}
 	return change, created, nil
+}
+
+// expectedChangeErrors are the refusals a caller is told about precisely. Anything else reaches the
+// caller as "not applied, retry" with no cause, so it is logged here with the cause.
+var expectedChangeErrors = []error{ErrInvalid, ErrVersionConflict, ErrChangeOpen, ErrChangeDecided,
+	ErrSuperseded, ErrInvalidTransition, ErrSelfApproval, ErrNotProvider, ErrNotProposer,
+	ErrNotResourceOwner, ErrChangeNotFound, ErrNotFound}
+
+// logFailure records a change that failed for a reason the caller is not told: the kernel or the
+// database refused it. The error names the operation that failed and no secret.
+func (s *Service) logFailure(ctx context.Context, operation string, registrationID id.UUID, err error) {
+	for _, expected := range expectedChangeErrors {
+		if errors.Is(err, expected) {
+			return
+		}
+	}
+	s.logger.ErrorContext(ctx, "a registration change was not applied",
+		slog.String("operation", operation),
+		slog.String("registration_id", registrationID.String()),
+		slog.String("error", err.Error()))
 }
 
 // DecideChange approves, rejects or withdraws a proposed change. provider is whether the caller
@@ -499,6 +521,7 @@ func (s *Service) DecideChange(ctx context.Context, decision Decision, provider 
 		return err
 	})
 	if err != nil {
+		s.logFailure(ctx, "deciding a change", decision.RegistrationID, err)
 		return Change{}, err
 	}
 	if superseded {
