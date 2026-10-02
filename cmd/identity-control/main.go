@@ -275,7 +275,17 @@ func run() error {
 	if !cfg.EnforceAccessTokenType {
 		tokens = httpapi.ReportTokenType(verifier, logger)
 	}
-	authentication, err := httpapi.Authenticate(tokens)
+	// The provider decision reads the projection and the held freshness, never the network. A
+	// typed nil would read as a configured freshness, so an unconfigured one stays a nil interface.
+	var held providerauthority.FreshnessReader
+	if freshness != nil {
+		held = freshness
+	}
+	providers, err := providerauthority.NewDecider(pool, held)
+	if err != nil {
+		return fmt.Errorf("provider decision: %w", err)
+	}
+	authentication, err := httpapi.Authenticate(tokens, providers, logger)
 	if err != nil {
 		return fmt.Errorf("authentication middleware: %w", err)
 	}

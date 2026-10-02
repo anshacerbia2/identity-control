@@ -45,6 +45,7 @@ BEGIN
               ('identity.registration_request'),
               ('identity.provider_grant'),
               ('identity.provider_projection'),
+              ('identity.ceremony_grant_retirement'),
               ('identity.principal_relink'),
               ('identity.principal_finding'),
               ('platform.outbox'),
@@ -166,6 +167,9 @@ REVOKE DELETE, TRUNCATE ON identity.principal_finding FROM identity_runtime;
 -- older event is discarded against.
 REVOKE DELETE, TRUNCATE ON identity.provider_grant FROM identity_runtime;
 REVOKE DELETE, TRUNCATE ON identity.provider_projection FROM identity_runtime;
+-- The ceremony grant ends once, by an insert, and is never revived: insert-only like the ceremony
+-- row it retires (TDD-identity-control-006 §The Ceremony's Grant).
+REVOKE UPDATE, DELETE, TRUNCATE ON identity.ceremony_grant_retirement FROM identity_runtime;
 
 -- platform.outbox_sequence is read by every append. Without USAGE the outbox write fails
 -- inside the caller's domain transaction, so a membership mutation would roll back.

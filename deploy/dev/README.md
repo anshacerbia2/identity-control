@@ -66,9 +66,11 @@ one of them.
 
 ## Calling the API
 
-Every mutation needs a provider-scope token. Get one by logging in as `bootstrap-operator` with
-`IDENTITY_CALLER_PASSWORD`, through the kernel's login form and the `identity-control-caller`
-client. `scripts/dev-token.ps1` does this without a browser, and `scripts/dev-smoke.ps1` exercises
+Every mutation needs a provider: a Principal this service's records name as one, for each request
+(TDD-identity-control-006). On a fresh stack that is the ceremony's Principal, `bootstrap-operator`,
+until Organization's first emergency `provider:identity-control` grant is projected. Log in as
+`bootstrap-operator` with `IDENTITY_CALLER_PASSWORD`, through the kernel's login form and the
+`identity-control-caller` client. The token carries no `provider_scope`; one that does is refused. `scripts/dev-token.ps1` does this without a browser, and `scripts/dev-smoke.ps1` exercises
 the API with it. They are the same scripts CI runs:
 
 ```sh
@@ -92,7 +94,7 @@ language. The steps are:
 3. Call the API.
 
 To call the API from off the server, add port `8082` to the tunnel. Keep it owner-only unless
-something else must reach it. Every mutation is refused without a provider-scope token either way.
+something else must reach it. Every mutation is refused to a caller that is not a provider either way.
 
 ## Running the code from a laptop
 

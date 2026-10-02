@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/anshacerbia2/foundation-platform/db"
+	"github.com/anshacerbia2/foundation-platform/id"
 
 	"github.com/anshacerbia2/identity-control/internal/keycloak"
 )
@@ -37,19 +38,12 @@ const ceremonyRowID = 1
 // can never be replayed or consumed by an authenticated caller.
 const ceremonyScope = "ceremony:bootstrap"
 
-// CeremonyProviderScope is the bounded provider authority the ceremony grants to the first
-// Principal.
-//
-// ADR-IAM-001 §5.6 keeps every later grant with the Organization Platform, projected through
-// ADR-ORG-001 §5.4. The ceremony grants this one because it runs before any Organization authority
-// can exist, and a first Principal holding no scope could not reach the API that issues every
-// later Principal — the ceremony would produce an identity that can do nothing.
-//
-// One fixed value rather than a parameter: a ceremony that could be asked for an arbitrary scope
-// would be a way to mint provider authority, bounded only by what the operator typed.
-const CeremonyProviderScope = "provider:identity-control"
-
 var (
+	// ErrCeremonyUnnamed reports a ceremony row claimed before principal_id was recorded whose
+	// Principal was never created. The row is insert-only, so it cannot be made to name one.
+	ErrCeremonyUnnamed = errors.New("provisioning: the ceremony row names no principal_id; it was claimed " +
+		"before the column existed and its Principal was never created. Reset this Control Database")
+
 	// ErrCeremonyAlreadyPerformed reports that this Control Database already has its first
 	// Principal. It is a refusal rather than a failure: the ceremony is meant to be
 	// unrepeatable, so this is the mechanism working.
@@ -96,11 +90,18 @@ type CeremonyRecord struct {
 	Operator       string
 	Reason         string
 	IdempotencyKey string
+
+	// PrincipalID is the Principal the ceremony creates, minted when the row is claimed. It is
+	// the ceremony's local emergency grant, honored until Organization's first emergency
+	// provider:identity-control grant is projected (TDD-identity-control-006 §The Ceremony's
+	// Grant). Recorded in the insert-only row, so no later write can move the grant to someone
+	// else.
+	PrincipalID id.UUID
 }
 
 const claimCeremonyStatement = `INSERT INTO identity.bootstrap_ceremony
-    (id, operator, reason, idempotency_key)
-VALUES ($1, $2, $3, $4)
+    (id, operator, reason, idempotency_key, principal_id)
+VALUES ($1, $2, $3, $4, $5)
 ON CONFLICT (id) DO NOTHING`
 
 // readCeremonyStatement reads the claimed row and the registry's size in one round trip.
@@ -111,6 +112,7 @@ ON CONFLICT (id) DO NOTHING`
 const readCeremonyStatement = `SELECT c.operator,
        c.reason,
        c.idempotency_key,
+       coalesce(c.principal_id::text, ''),
        (SELECT count(*) FROM identity.principal_mapping)
 FROM identity.bootstrap_ceremony c
 WHERE c.id = $1`
@@ -152,6 +154,13 @@ func (p *Provisioner) Bootstrap(ctx context.Context, req CeremonyRequest) (Respo
 	// regardless, and the stored value is what step two uses.
 	key := fmt.Sprintf("bootstrap:%s", req.Realm)
 
+	// Minted before the claim so the row names the Principal it creates. On a resumed ceremony the
+	// insert does nothing and the recorded identifier is read back instead.
+	minted, err := p.newID()
+	if err != nil {
+		return Response{}, CeremonyRecord{}, fmt.Errorf("provisioning: mint principal_id: %w", err)
+	}
+
 	var (
 		record  CeremonyRecord
 		claimed bool
@@ -159,7 +168,7 @@ func (p *Provisioner) Bootstrap(ctx context.Context, req CeremonyRequest) (Respo
 
 	if err := p.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
 		tag, execErr := tx.Exec(ctx, claimCeremonyStatement,
-			ceremonyRowID, strings.TrimSpace(req.Operator), strings.TrimSpace(req.Reason), key)
+			ceremonyRowID, strings.TrimSpace(req.Operator), strings.TrimSpace(req.Reason), key, minted.String())
 		if execErr != nil {
 			return fmt.Errorf("provisioning: claim the ceremony row: %w", execErr)
 		}
@@ -169,11 +178,25 @@ func (p *Provisioner) Bootstrap(ctx context.Context, req CeremonyRequest) (Respo
 		// reason, and using them rather than the ones passed in is what makes the record
 		// immutable in practice as well as in privilege: a second attempt cannot rewrite who
 		// ran the first.
-		var existing int
+		var (
+			existing  int
+			principal string
+		)
 		if scanErr := tx.QueryRow(ctx, readCeremonyStatement, ceremonyRowID).
-			Scan(&record.Operator, &record.Reason, &record.IdempotencyKey, &existing); scanErr != nil {
+			Scan(&record.Operator, &record.Reason, &record.IdempotencyKey, &principal, &existing); scanErr != nil {
 			return fmt.Errorf("provisioning: read the ceremony row: %w", scanErr)
 		}
+		// A row claimed before principal_id was recorded, whose Principal was never created, names
+		// no one, and the row cannot be rewritten to name someone. Completing it would create a
+		// first Principal with no provider authority at all.
+		if principal == "" {
+			return ErrCeremonyUnnamed
+		}
+		parsed, parseErr := id.Parse(principal)
+		if parseErr != nil {
+			return fmt.Errorf("provisioning: the ceremony row names principal_id %q: %w", principal, parseErr)
+		}
+		record.PrincipalID = parsed
 
 		// The emptiness assertion applies only when this call claimed the row. A resumed
 		// ceremony legitimately finds the pending mapping the interrupted attempt wrote, and
@@ -212,7 +235,7 @@ func (p *Provisioner) Bootstrap(ctx context.Context, req CeremonyRequest) (Respo
 		Username:       req.Username,
 		Email:          req.Email,
 		SubjectType:    keycloak.SubjectHuman,
-		ProviderScope:  CeremonyProviderScope,
+		principalID:    record.PrincipalID,
 	})
 	if err != nil {
 		return Response{}, record, err

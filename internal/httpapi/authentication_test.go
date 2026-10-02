@@ -7,11 +7,14 @@ package httpapi_test
 
 import (
 	"bytes"
+	"context"
 	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -19,9 +22,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/anshacerbia2/foundation-platform/id"
 	"github.com/anshacerbia2/foundation-platform/verify"
 
 	"github.com/anshacerbia2/identity-control/internal/httpapi"
+	"github.com/anshacerbia2/identity-control/internal/providerauthority"
 )
 
 const (
@@ -107,18 +112,18 @@ func typedToken(t *testing.T, typ string, extra map[string]any) string {
 	return signed + "." + base64.RawURLEncoding.EncodeToString(signature)
 }
 
-// validClaims is the full `privileged` / `provider-scope` claim set of STD-IAM-002 §3.2.
+// validClaims is the full `privileged` claim set of STD-IAM-002 §3.2 at a resource that holds the
+// provider grants' projection: no provider_scope, no tenant_id (§3.1.1).
 //
 // Every entry is mandatory for this audience, so the helper is the specification restated: a claim
 // removed from here is a claim the verifier must refuse, and TestRequirementRejects... asserts that
 // for each one individually.
 func validClaims() map[string]any {
 	return map[string]any{
-		"principal_id":   "019235f1-8c4a-7c1e-9d0b-3f4a2b6e5d71",
-		"subject_type":   "human",
-		"provider_scope": httpapi.ProviderScopeIdentityControl,
-		"acr":            "urn:scnehaux:acr:mfa",
-		"auth_time":      authNow.Add(-2 * time.Minute).Unix(),
+		"principal_id": "019235f1-8c4a-7c1e-9d0b-3f4a2b6e5d71",
+		"subject_type": "human",
+		"acr":          "urn:scnehaux:acr:mfa",
+		"auth_time":    authNow.Add(-2 * time.Minute).Unix(),
 	}
 }
 
@@ -140,11 +145,7 @@ func withClaims(overrides map[string]any) map[string]any {
 // reached the handler rather than what the middleware was given.
 func scopeEcho(t *testing.T, verifier httpapi.TokenVerifier) http.Handler {
 	t.Helper()
-	middleware, err := httpapi.Authenticate(verifier)
-	if err != nil {
-		t.Fatalf("Authenticate: %v", err)
-	}
-	return middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return authenticate(t, verifier, decider{})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		scope, ok := httpapi.CallerScope(r.Context())
 		if !ok {
 			w.WriteHeader(http.StatusInternalServerError)
@@ -154,6 +155,34 @@ func scopeEcho(t *testing.T, verifier httpapi.TokenVerifier) http.Handler {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(scope))
 	}))
+}
+
+// decider is the provider decision as a test states it.
+type decider struct {
+	decision providerauthority.Decision
+	err      error
+	asked    *id.UUID
+}
+
+func (d decider) Decide(_ context.Context, principal id.UUID) (providerauthority.Decision, error) {
+	if d.asked != nil {
+		*d.asked = principal
+	}
+	return d.decision, d.err
+}
+
+func authenticate(t *testing.T, verifier httpapi.TokenVerifier, providers httpapi.ProviderDecider) func(http.Handler) http.Handler {
+	t.Helper()
+	return authenticateLogging(t, verifier, providers, slog.New(slog.NewTextHandler(io.Discard, nil)))
+}
+
+func authenticateLogging(t *testing.T, verifier httpapi.TokenVerifier, providers httpapi.ProviderDecider, logger *slog.Logger) func(http.Handler) http.Handler {
+	t.Helper()
+	middleware, err := httpapi.Authenticate(verifier, providers, logger)
+	if err != nil {
+		t.Fatalf("Authenticate: %v", err)
+	}
+	return middleware
 }
 
 func bearerRequest(header string) *http.Request {
@@ -303,8 +332,10 @@ func TestEveryRejectionProducesTheSameDocument(t *testing.T) {
 		"no principal_id":         token(t, withClaims(map[string]any{"principal_id": nil})),
 		"no subject_type":         token(t, withClaims(map[string]any{"subject_type": nil})),
 		"unknown subject":         token(t, withClaims(map[string]any{"subject_type": "service"})),
-		"no provider, a workload": token(t, withClaims(map[string]any{"provider_scope": nil, "subject_type": "workload"})),
-		"empty provider":          token(t, withClaims(map[string]any{"provider_scope": ""})),
+		"a workload":              token(t, withClaims(map[string]any{"subject_type": "workload"})),
+		"provider_scope present":  token(t, withClaims(map[string]any{"provider_scope": "provider:identity-control"})),
+		"empty provider_scope":    token(t, withClaims(map[string]any{"provider_scope": ""})),
+		"principal_id not a uuid": token(t, withClaims(map[string]any{"principal_id": "ansha"})),
 		"tenant present":          token(t, withClaims(map[string]any{"tenant_id": "019235f1-0000-7000-8000-000000000001"})),
 		"no acr":                  token(t, withClaims(map[string]any{"acr": nil})),
 		"no auth_time":            token(t, withClaims(map[string]any{"auth_time": nil})),
@@ -339,20 +370,21 @@ func TestEveryRejectionProducesTheSameDocument(t *testing.T) {
 	}
 }
 
-// TestRequirementRejectsEveryMissingMandatoryClaim walks the `privileged` / `provider-scope`
-// column of STD-IAM-002 §3.2 one claim at a time.
+// TestRequirementRejectsEveryMissingMandatoryClaim walks the `privileged` column of STD-IAM-002
+// §3.2 one claim at a time.
 //
 // One case per claim rather than one case with several missing: a rule that rejected only when two
 // claims were absent together would pass a combined test and let a single-claim omission through.
 func TestRequirementRejectsEveryMissingMandatoryClaim(t *testing.T) {
 	cases := map[string]map[string]any{
-		"no claims at all":              {"principal_id": nil, "subject_type": nil, "provider_scope": nil, "acr": nil, "auth_time": nil},
-		"no principal_id":               {"principal_id": nil},
-		"no subject_type":               {"subject_type": nil},
-		"unknown subject type":          {"subject_type": "agent"},
-		"no provider_scope, a workload": {"provider_scope": nil, "subject_type": "workload"},
-		"no acr":                        {"acr": nil},
-		"no auth_time":                  {"auth_time": nil},
+		"no claims at all":        {"principal_id": nil, "subject_type": nil, "acr": nil, "auth_time": nil},
+		"no principal_id":         {"principal_id": nil},
+		"principal_id not a uuid": {"principal_id": "ansha"},
+		"no subject_type":         {"subject_type": nil},
+		"unknown subject type":    {"subject_type": "agent"},
+		"a workload":              {"subject_type": "workload"},
+		"no acr":                  {"acr": nil},
+		"no auth_time":            {"auth_time": nil},
 	}
 
 	for name, overrides := range cases {
@@ -363,54 +395,30 @@ func TestRequirementRejectsEveryMissingMandatoryClaim(t *testing.T) {
 		})
 	}
 
-	// A workload token satisfies the rule too: the claim must be one of the two values, not one
-	// specific value.
-	if _, err := realVerifier(t).Verify(token(t, withClaims(map[string]any{
-		"principal_id": "019236a1-8c4a-7c1e-9d0b-3f4a2b6e5d71", "subject_type": "workload",
-	}))); err != nil {
-		t.Errorf("a workload token was refused: %v", err)
+	if _, err := realVerifier(t).Verify(token(t, validClaims())); err != nil {
+		t.Errorf("the complete claim set was refused: %v", err)
 	}
 }
 
-// TestScopeFormMustBeUnambiguous is STD-IAM-002 §3.5 rule 9.
-//
-// A privileged token carrying both context claims, or neither, has no determinable bounded
-// authority. The standard refuses rather than resolving the ambiguity, because the two plausible
-// resolutions differ in exactly the wrong direction: reading it as tenant-scoped would silently
-// narrow a provider action, and reading it as provider-scope would silently widen a tenant one.
-func TestScopeFormMustBeUnambiguous(t *testing.T) {
+// A provider_scope claim is refused whatever it names: this service reads provider authority from
+// its records and no such claim is issued (STD-IAM-002 §3.1.1), so a token carrying one was minted by
+// a client configured for the old profile, and reading it as an owner's would hide that. A tenant_id
+// is refused as the tenant-scoped form's (§3.5 rule 9).
+func TestAProviderScopeOrTenantClaimIsRefused(t *testing.T) {
 	cases := map[string]map[string]any{
-		"both claims present": {"tenant_id": "019235f1-0000-7000-8000-000000000001"},
-		"tenant only":         {"provider_scope": nil, "tenant_id": "019235f1-0000-7000-8000-000000000001"},
+		"the registered provider scope": {"provider_scope": "provider:identity-control"},
+		"another provider scope":        {"provider_scope": "provider:organization-control"},
+		"an unbounded provider scope":   {"provider_scope": "provider:*"},
+		"an empty provider scope":       {"provider_scope": ""},
+		"a tenant":                      {"tenant_id": "019235f1-0000-7000-8000-000000000001"},
+		"both":                          {"provider_scope": "provider:identity-control", "tenant_id": "019235f1-0000-7000-8000-000000000001"},
 	}
-
 	for name, overrides := range cases {
 		t.Run(name, func(t *testing.T) {
 			if _, err := realVerifier(t).Verify(token(t, withClaims(overrides))); err == nil {
-				t.Fatal("a token with an ambiguous scope form was accepted")
+				t.Fatal("the token was accepted")
 			}
 		})
-	}
-}
-
-// TestOnlyARegisteredProviderScopeIsAccepted closes the widening path. §3.1.1 requires the claim to
-// name a registered scope, so any non-empty string being enough would make the bound decorative and
-// would accept a token minted for a different provider surface.
-func TestOnlyARegisteredProviderScopeIsAccepted(t *testing.T) {
-	for _, scope := range []string{
-		"", "provider:*", "*", "all", "provider:organization-control", "identity-control",
-	} {
-		t.Run(scope, func(t *testing.T) {
-			if _, err := realVerifier(t).Verify(token(t, withClaims(
-				map[string]any{"provider_scope": scope}))); err == nil {
-				t.Errorf("provider_scope %q was accepted", scope)
-			}
-		})
-	}
-
-	if _, err := realVerifier(t).Verify(token(t, withClaims(
-		map[string]any{"provider_scope": httpapi.ProviderScopeIdentityControl}))); err != nil {
-		t.Errorf("the registered scope was refused: %v", err)
 	}
 }
 
@@ -433,9 +441,16 @@ func TestRequirementMessagesNameTheClaimAndNotItsValue(t *testing.T) {
 	}
 }
 
-func TestAuthenticateRejectsANilVerifier(t *testing.T) {
-	if _, err := httpapi.Authenticate(nil); err == nil {
-		t.Fatal("Authenticate accepted a nil verifier")
+func TestAuthenticateRequiresItsDependencies(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	if _, err := httpapi.Authenticate(nil, decider{}, logger); err == nil {
+		t.Error("Authenticate accepted a nil verifier")
+	}
+	if _, err := httpapi.Authenticate(realVerifier(t), nil, logger); err == nil {
+		t.Error("Authenticate accepted a nil provider decision")
+	}
+	if _, err := httpapi.Authenticate(realVerifier(t), decider{}, nil); err == nil {
+		t.Error("Authenticate accepted a nil logger")
 	}
 }
 
@@ -486,11 +501,7 @@ func TestEnforceModeRefusesATokenNotTypedAtJWT(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	middleware, err := httpapi.Authenticate(strict)
-	if err != nil {
-		t.Fatal(err)
-	}
-	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
+	handler := authenticate(t, strict, decider{})(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
 	for typ, want := range map[string]int{"JWT": http.StatusUnauthorized, "at+jwt": http.StatusNoContent} {
 		r := httptest.NewRequest(http.MethodGet, "/v1/registrations", nil)
 		r.Header.Set("Authorization", "Bearer "+typedToken(t, typ, validClaims()))
@@ -502,29 +513,51 @@ func TestEnforceModeRefusesATokenNotTypedAtJWT(t *testing.T) {
 	}
 }
 
-// A token without provider_scope is a registration owner's (ADR-IAM-003, STD-IAM-002 §3.1.1's
-// resource-scoped form): a person, accepted, and not marked a provider, so only the owner routes
-// serve it.
-func TestATokenWithoutProviderScopeIsAnOwnersAndNotAProviders(t *testing.T) {
-	middleware, err := httpapi.Authenticate(realVerifier(t))
-	if err != nil {
-		t.Fatal(err)
-	}
+// Provider authority is the decision this service's records give for the token's principal_id
+// (TDD-identity-control-006 §The Provider Decision): a provider is marked, an emergency use and an
+// unhonored activation are each reported, anyone else is an owner, and a decision that cannot be
+// read answers 503 rather than serving the caller as either.
+func TestProviderAuthorityComesFromTheRecordsDecision(t *testing.T) {
 	for name, c := range map[string]struct {
-		overrides map[string]any
-		provider  bool
+		decision providerauthority.Decision
+		err      error
+		status   int
+		provider bool
+		logged   string
 	}{
-		"a provider": {nil, true},
-		"an owner":   {map[string]any{"provider_scope": nil}, false},
+		"an activation":        {providerauthority.Decision{Provider: true, Basis: providerauthority.BasisActivation}, nil, http.StatusOK, true, ""},
+		"an emergency":         {providerauthority.Decision{Provider: true, Basis: providerauthority.BasisEmergency, Emergency: true}, nil, http.StatusOK, true, "emergency provider authority used"},
+		"the ceremony":         {providerauthority.Decision{Provider: true, Basis: providerauthority.BasisCeremony, Emergency: true}, nil, http.StatusOK, true, `"basis":"ceremony"`},
+		"stale":                {providerauthority.Decision{Stale: true, StaleReason: providerauthority.StaleAge}, nil, http.StatusOK, false, "provider projection is stale"},
+		"an owner":             {providerauthority.Decision{}, nil, http.StatusOK, false, ""},
+		"an unreadable record": {providerauthority.Decision{Provider: true}, errors.New("connection refused"), http.StatusServiceUnavailable, false, "could not be read"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			var seen, reached bool
-			handler := middleware(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-				reached, seen = true, httpapi.IsProvider(r.Context())
-			}))
-			handler.ServeHTTP(httptest.NewRecorder(), bearerRequest("Bearer "+token(t, withClaims(c.overrides))))
-			if !reached || seen != c.provider {
-				t.Errorf("reached=%t provider=%t, want reached and provider=%t", reached, seen, c.provider)
+			var (
+				logged  bytes.Buffer
+				asked   id.UUID
+				seen    bool
+				reached bool
+			)
+			logger := slog.New(slog.NewJSONHandler(&logged, nil))
+			handler := authenticateLogging(t, realVerifier(t), decider{decision: c.decision, err: c.err, asked: &asked}, logger)(
+				http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+					reached, seen = true, httpapi.IsProvider(r.Context())
+				}))
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, bearerRequest("Bearer "+token(t, validClaims())))
+
+			if w.Code != c.status || seen != c.provider || reached != (c.status == http.StatusOK) {
+				t.Errorf("status %d, reached %t, provider %t; want %d, provider %t", w.Code, reached, seen, c.status, c.provider)
+			}
+			if asked.String() != "019235f1-8c4a-7c1e-9d0b-3f4a2b6e5d71" {
+				t.Errorf("the decision was asked for %s, not the token's principal_id", asked)
+			}
+			if c.logged != "" && !strings.Contains(logged.String(), c.logged) {
+				t.Errorf("logged %q; want %q", logged.String(), c.logged)
+			}
+			if c.logged == "" && logged.Len() != 0 {
+				t.Errorf("logged %q; want nothing", logged.String())
 			}
 		})
 	}

@@ -517,3 +517,21 @@ func TestTheProviderProjectionIsNeverDeleted(t *testing.T) {
 		}
 	}
 }
+
+// The ceremony grant's retirement is its single recorded end (TDD-identity-control-006 §The
+// Ceremony's Grant). A runtime that could update or delete it could revive the ceremony's
+// emergency authority after Organization's grants took over.
+func TestTheCeremonyGrantRetirementIsInsertOnly(t *testing.T) {
+	pool, ctx := openPool(t)
+	const table = "identity.ceremony_grant_retirement"
+	for _, privilege := range []string{"SELECT", "INSERT"} {
+		if !queryBool(t, pool, ctx, `SELECT has_table_privilege($1, $2, $3)`, runtimeRole, table, privilege) {
+			t.Errorf("%s lacks %s on %s; the projection cannot retire the ceremony grant", runtimeRole, privilege, table)
+		}
+	}
+	for _, privilege := range []string{"UPDATE", "DELETE", "TRUNCATE"} {
+		if queryBool(t, pool, ctx, `SELECT has_table_privilege($1, $2, $3)`, runtimeRole, table, privilege) {
+			t.Errorf("%s holds %s on %s; the ceremony grant could be revived", runtimeRole, privilege, table)
+		}
+	}
+}

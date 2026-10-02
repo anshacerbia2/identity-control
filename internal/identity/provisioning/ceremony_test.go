@@ -23,10 +23,13 @@ import (
 
 // ceremonyClaimed configures the claiming transaction: the insert affected one row, and the
 // read-back reports the operator, reason, key, and an empty registry.
+// ceremonyPrincipal is the principal_id the ceremony row records, as the read-back returns it.
+const ceremonyPrincipal = "019235f1-8c4a-7c1e-9d0b-3f4a2b6e5d71"
+
 func ceremonyClaimed(operator, reason, key string, existingMappings int) *dbtest.Tx {
 	return &dbtest.Tx{
 		Tag:       dbtest.CommandTag(1),
-		RowValues: []any{operator, reason, key, existingMappings},
+		RowValues: []any{operator, reason, key, ceremonyPrincipal, existingMappings},
 	}
 }
 
@@ -35,7 +38,7 @@ func ceremonyClaimed(operator, reason, key string, existingMappings int) *dbtest
 func ceremonyAlreadyClaimed(operator, reason, key string, existingMappings int) *dbtest.Tx {
 	return &dbtest.Tx{
 		Tag:       dbtest.CommandTag(0),
-		RowValues: []any{operator, reason, key, existingMappings},
+		RowValues: []any{operator, reason, key, ceremonyPrincipal, existingMappings},
 	}
 }
 
@@ -115,81 +118,48 @@ func TestBootstrapHoldsNoCredential(t *testing.T) {
 	}
 }
 
-// TestOnlyTheCeremonyGrantsAProviderScope is ADR-IAM-001 §5.6 expressed as a test.
-//
-// The authority for a provider grant belongs to the Organization Platform, projected into the
-// kernel through ADR-ORG-001 §5.4. The ceremony is the single exception, and the exception has to
-// be bounded by something a later edit cannot widen: the ordinary creation path refuses the field
-// outright, so a handler that started setting it would fail rather than quietly mint authority.
-func TestOnlyTheCeremonyGrantsAProviderScope(t *testing.T) {
-	t.Run("the ceremony grants exactly one registered scope", func(t *testing.T) {
-		tx := &fakeTx{txs: []*dbtest.Tx{
-			ceremonyClaimed("ansha@example.com", "reason", "bootstrap:scnehaux", 0),
-			claimed(), claimed(),
-		}}
-		kernel := keycloakfake.New()
-		response, _, err := newProvisioner(t, tx, kernel).
-			Bootstrap(context.Background(), ceremonyRequest())
-		if err != nil {
-			t.Fatalf("Bootstrap: %v", err)
+// The ceremony's Principal is the one its insert-only row names: minted at the claim, so the row is
+// the ceremony's local emergency grant (TDD-identity-control-006 §The Ceremony's Grant), and a
+// resumed ceremony creates the same Principal.
+func TestTheCeremonyCreatesThePrincipalItsRowNames(t *testing.T) {
+	ceremonyRow := ceremonyClaimed("ansha@example.com", "reason", "bootstrap:scnehaux", 0)
+	tx := &fakeTx{txs: []*dbtest.Tx{ceremonyRow, claimed(), claimed()}}
+	kernel := keycloakfake.New()
+	response, record, err := newProvisioner(t, tx, kernel).Bootstrap(context.Background(), ceremonyRequest())
+	if err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	if response.PrincipalID.String() != ceremonyPrincipal || record.PrincipalID.String() != ceremonyPrincipal {
+		t.Errorf("created %s, recorded %s; want both %s", response.PrincipalID, record.PrincipalID, ceremonyPrincipal)
+	}
+	minted := ""
+	for _, call := range ceremonyRow.Calls() {
+		if len(call.Args) == 5 {
+			minted, _ = call.Args[4].(string)
 		}
+	}
+	if minted == "" {
+		t.Error("the claim recorded no principal_id")
+	}
+	found, err := kernel.FindByPrincipalID(context.Background(), "scnehaux", response.PrincipalID)
+	if err != nil || len(found) != 1 {
+		t.Fatalf("FindByPrincipalID: %v (%d found)", err, len(found))
+	}
+}
 
-		found, err := kernel.FindByPrincipalID(context.Background(), "scnehaux", response.PrincipalID)
-		if err != nil || len(found) != 1 {
-			t.Fatalf("FindByPrincipalID: %v (%d found)", err, len(found))
-		}
-		if got := kernel.ProviderScope(found[0].ID); got != provisioning.CeremonyProviderScope {
-			t.Errorf("provider scope = %q, want %q", got, provisioning.CeremonyProviderScope)
-		}
-	})
-
-	t.Run("the ordinary path grants none", func(t *testing.T) {
-		tx := &fakeTx{txs: []*dbtest.Tx{claimed(), claimed()}}
-		kernel := keycloakfake.New()
-		response, err := newProvisioner(t, tx, kernel).Create(context.Background(), humanCreate())
-		if err != nil {
-			t.Fatalf("Create: %v", err)
-		}
-		found, err := kernel.FindByPrincipalID(context.Background(), "scnehaux", response.PrincipalID)
-		if err != nil || len(found) != 1 {
-			t.Fatalf("FindByPrincipalID: %v (%d found)", err, len(found))
-		}
-		if got := kernel.ProviderScope(found[0].ID); got != "" {
-			t.Errorf("the ordinary creation path granted provider scope %q", got)
-		}
-	})
-
-	t.Run("an ordinary request asking for one is refused", func(t *testing.T) {
-		request := humanCreate()
-		request.ProviderScope = provisioning.CeremonyProviderScope
-
-		kernel := keycloakfake.New()
-		// No transaction configured: the refusal must happen before anything durable, so a
-		// request that reached the database would fail the fake instead.
-		if _, err := newProvisioner(t, &fakeTx{}, kernel).
-			Create(context.Background(), request); err == nil {
-			t.Fatal("an ordinary request was granted a provider scope")
-		}
-		if kernel.Calls.CreateUser != 0 {
-			t.Errorf("the kernel was called %d times for a refused grant", kernel.Calls.CreateUser)
-		}
-	})
-
-	t.Run("a workload cannot hold one", func(t *testing.T) {
-		// Enforced at the port as well as here, because STD-IAM-002 §3.2 prohibits the claim on
-		// the workload class and a workload authenticating by client credential presents no `acr`
-		// for PAD-PLT-002 §3.3 invariant 22 to evaluate.
-		if err := (keycloak.CreateUserRequest{
-			Realm:         "scnehaux",
-			Username:      "svc.reporting",
-			PrincipalID:   mustUUID(t),
-			SubjectType:   keycloak.SubjectWorkload,
-			WorkloadOwner: mustUUID(t),
-			ProviderScope: provisioning.CeremonyProviderScope,
-		}).Validate(); err == nil {
-			t.Fatal("a workload was accepted with a provider scope")
-		}
-	})
+// A row claimed before principal_id existed, whose Principal was never created, names no one and
+// cannot be rewritten to; completing it would create a first Principal with no authority.
+func TestACeremonyRowNamingNoPrincipalIsRefused(t *testing.T) {
+	tx := &fakeTx{txs: []*dbtest.Tx{{
+		Tag: dbtest.CommandTag(0), RowValues: []any{"ansha@example.com", "reason", "bootstrap:scnehaux", "", 0},
+	}}}
+	kernel := keycloakfake.New()
+	if _, _, err := newProvisioner(t, tx, kernel).Bootstrap(context.Background(), ceremonyRequest()); !errors.Is(err, provisioning.ErrCeremonyUnnamed) {
+		t.Errorf("Bootstrap = %v; want ErrCeremonyUnnamed", err)
+	}
+	if kernel.Calls.CreateUser != 0 {
+		t.Error("the kernel was called for an unnamed ceremony")
+	}
 }
 
 // TestBootstrapRefusesAPopulatedRegistry closes the path by which the ceremony could be used to

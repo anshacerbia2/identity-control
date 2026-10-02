@@ -325,6 +325,16 @@ table "bootstrap_ceremony" {
     default = sql("now()")
   }
 
+  // Minted when the row is claimed, so the insert-only row names the Principal the ceremony
+  // creates and a resumed ceremony creates the same one. The Principal is the ceremony's local
+  // emergency grant (TDD-identity-control-006 §The Ceremony's Grant). Null only on a row claimed
+  // before this column whose Principal was never created: that row's grant names no one.
+  column "principal_id" {
+    null    = true
+    type    = uuid
+    comment = "The ceremony's Principal: its local emergency grant until ceremony_grant_retirement. TDD-identity-control-006."
+  }
+
   primary_key {
     columns = [column.id]
   }
@@ -1800,6 +1810,37 @@ table "provider_projection" {
   }
 
   check "provider_projection_single_row" {
+    expr = "id = 1"
+  }
+}
+
+// The ceremony grant's single recorded end: written once, in the transaction that projects the
+// first active emergency provider:identity-control grant, and never changed (TDD-identity-control-006
+// §The Ceremony's Grant). Insert-only, like the ceremony row.
+table "ceremony_grant_retirement" {
+  schema  = schema.identity
+  comment = "The ceremony grant's retirement. Insert-only. TDD-identity-control-006."
+
+  column "id" {
+    null = false
+    type = integer
+  }
+  column "retired_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+  column "by_grant_id" {
+    null    = false
+    type    = uuid
+    comment = "The emergency grant whose projection retired the ceremony grant."
+  }
+
+  primary_key {
+    columns = [column.id]
+  }
+
+  check "ceremony_grant_retirement_single_row" {
     expr = "id = 1"
   }
 }
