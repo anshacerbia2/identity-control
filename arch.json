@@ -20,6 +20,7 @@
       "internal/httpapi",
       "internal/identity/provisioning",
       "internal/keycloak",
+      "internal/organization",
       "internal/providerauthority",
       "internal/reconcile",
       "internal/registration",
@@ -74,6 +75,20 @@
       "envelope are foundation-platform's."
     ],
     "internal/providerauthority": [],
+
+    "_comment_organization": [
+      "internal/organization is this service's client of Organization Control as the provider",
+      "authority consumer: the snapshot, the bootstrap mark, progress and the frontier, and nothing",
+      "else (TDD-identity-control-006). cmd/identity-provider-bootstrap reaches it and the",
+      "projection and NOT httpapi or keycloak: it builds the projection and holds no other",
+      "authority."
+    ],
+    "internal/organization": ["internal/providerauthority"],
+    "cmd/identity-provider-bootstrap": [
+      "internal/config",
+      "internal/organization",
+      "internal/providerauthority"
+    ],
     "internal/httpapi": [
       "internal/identity/provisioning",
       "internal/keycloak",
@@ -98,8 +113,8 @@
       "except": ["internal/identity/provisioning"]
     },
     "net/http": {
-      "reason": "only internal/keycloak reaches the identity kernel, and only the composition root serves. an HTTP client anywhere else is either a second path to the kernel or an undeclared cross-domain call, and ADR-ORG-001 plus TDD-identity-control-002 both require that no such path exists",
-      "except": ["cmd/identity-control", "internal/keycloak", "internal/httpapi"]
+      "reason": "only internal/keycloak reaches the identity kernel, and only the composition root serves. an HTTP client anywhere else is either a second path to the kernel or an undeclared cross-domain call, and ADR-ORG-001 plus TDD-identity-control-002 both require that no such path exists. internal/organization is the one declared cross-domain call: Organization Control's consumer routes, as this service's workload, for the provider authority projection (TDD-identity-control-006)",
+      "except": ["cmd/identity-control", "internal/keycloak", "internal/httpapi", "internal/organization"]
     }
   },
 

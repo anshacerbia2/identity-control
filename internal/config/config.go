@@ -79,6 +79,12 @@ type Config struct {
 	// intake answers 503 and no provider event is accepted.
 	DeliveryPrincipal id.UUID
 
+	// Organization is Organization Control as this service's projection consumer reads it, and
+	// ProviderFreshness the budget declared at registration (TDD-identity-control-006). An empty
+	// Organization.BaseURL reads nothing: the projection is never fresh, and no activation is honored.
+	Organization      Organization
+	ProviderFreshness time.Duration
+
 	// Production is IDENTITY_ENVIRONMENT=production, the default: a registration keeps at least two
 	// owners (ADR-IAM-003 §5.1). Production unless stated, so a deployment that forgets to say
 	// gets the stricter rule.
@@ -214,6 +220,9 @@ func Load() (Config, error) {
 		}
 	}
 
+	cfg.Organization = loadOrganization(&problems)
+	cfg.ProviderFreshness = durationOr("IDENTITY_PROVIDER_FRESHNESS", 60*time.Second, &problems)
+
 	cfg.DBMaxConns = int32(intOr("DB_MAX_CONNS", 20, &problems))
 	cfg.DBMaxConnLifetime = durationOr("DB_MAX_CONN_LIFETIME", 30*time.Minute, &problems)
 	cfg.DBAcquireTimeout = durationOr("DB_ACQUIRE_TIMEOUT", 3*time.Second, &problems)
@@ -226,6 +235,72 @@ func Load() (Config, error) {
 
 	if len(problems) > 0 {
 		return Config{}, errors.Join(problems...)
+	}
+	return cfg, nil
+}
+
+// Organization is this service's client of Organization Control: where it is, and the workload
+// client this service calls it as, with a private_key_jwt assertion (STD-IAM-001 §3).
+type Organization struct {
+	BaseURL          string
+	WorkloadClientID string
+	WorkloadKeyFile  string
+	WorkloadTokenURL string
+	// WorkloadAudience is the kernel's issuer, which the assertion names (RFC 7523 §3).
+	WorkloadAudience string
+}
+
+// loadOrganization reads Organization Control's settings. Nothing is required while the base URL is
+// unset; once it is, the workload client is.
+func loadOrganization(problems *[]error) Organization {
+	org := Organization{
+		BaseURL:          strings.TrimSpace(os.Getenv("IDENTITY_ORGANIZATION_BASE_URL")),
+		WorkloadClientID: strings.TrimSpace(os.Getenv("IDENTITY_WORKLOAD_CLIENT_ID")),
+		WorkloadKeyFile:  strings.TrimSpace(os.Getenv("IDENTITY_WORKLOAD_KEY_FILE")),
+		WorkloadTokenURL: strings.TrimSpace(os.Getenv("IDENTITY_WORKLOAD_TOKEN_URL")),
+		WorkloadAudience: strings.TrimSpace(os.Getenv("IDENTITY_WORKLOAD_AUDIENCE")),
+	}
+	if org.BaseURL == "" {
+		return org
+	}
+	for _, setting := range []struct{ name, value string }{
+		{"IDENTITY_WORKLOAD_CLIENT_ID", org.WorkloadClientID},
+		{"IDENTITY_WORKLOAD_KEY_FILE", org.WorkloadKeyFile},
+		{"IDENTITY_WORKLOAD_TOKEN_URL", org.WorkloadTokenURL},
+		{"IDENTITY_WORKLOAD_AUDIENCE", org.WorkloadAudience},
+	} {
+		if setting.value == "" {
+			*problems = append(*problems, fmt.Errorf("%s is required while IDENTITY_ORGANIZATION_BASE_URL is set", setting.name))
+		}
+	}
+	return org
+}
+
+// ProviderBootstrapConfig is what cmd/identity-provider-bootstrap needs: this service's database,
+// as the runtime role, and Organization Control.
+type ProviderBootstrapConfig struct {
+	RuntimeDSN   string
+	Organization Organization
+	LogLevel     string
+}
+
+// LoadProviderBootstrap reads it. Organization Control is required here: the command exists to read
+// its snapshot.
+func LoadProviderBootstrap() (ProviderBootstrapConfig, error) {
+	var problems []error
+	cfg := ProviderBootstrapConfig{
+		RuntimeDSN: strings.TrimSpace(os.Getenv("IDENTITY_DATABASE_URL")),
+		LogLevel:   stringOr("LOG_LEVEL", "info"),
+	}
+	if cfg.RuntimeDSN == "" {
+		problems = append(problems, errors.New("IDENTITY_DATABASE_URL is required"))
+	}
+	cfg.Organization = loadOrganization(&problems)
+	if cfg.Organization.BaseURL == "" {
+		problems = append(problems, errors.New("IDENTITY_ORGANIZATION_BASE_URL is required"))
+	}
+	if len(problems) > 0 {
+		return ProviderBootstrapConfig{}, errors.Join(problems...)
 	}
 	return cfg, nil
 }

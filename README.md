@@ -107,6 +107,7 @@ this machine's values; every credential in `.env.example` is a placeholder.
 | `make migrate` | PostgreSQL and Atlas: roles, platform schema, migrations, privileges |
 | `make run` | the above and a Keycloak with the realm `identity-kernel` applies |
 | `make bootstrap OPERATOR=... REASON=... USERNAME=...` | a running stack: the one-time ceremony |
+| `make provider-bootstrap` | Organization Control with this service registered as its consumer: builds the provider authority projection (TDD-identity-control-006) |
 
 The service still reads only its process environment and refuses a wrong value by name, so the
 Makefile is a convenience and changes nothing about a deployment.
