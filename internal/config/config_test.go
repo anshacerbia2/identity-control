@@ -436,3 +436,37 @@ func TestLoadProviderBootstrapRequiresOrganization(t *testing.T) {
 		t.Errorf("LoadProviderBootstrap without a database: %v", err)
 	}
 }
+
+// The ceremony registers this service's resource through the registration path's client, under the
+// name the service verifies as its audience, so each of the three is required (ADR-IAM-001 §5.11
+// rule 5).
+func TestLoadBootstrapRequiresWhatRegistersTheResource(t *testing.T) {
+	set := func() {
+		t.Setenv("IDENTITY_DATABASE_URL", "postgres://runtime@localhost:5432/identity")
+		t.Setenv("IDENTITY_KEYCLOAK_REALM", "scnehaux")
+		t.Setenv("IDENTITY_KEYCLOAK_BASE_URL", "https://identity.example.com")
+		t.Setenv("IDENTITY_KEYCLOAK_CLIENT_ID", "identity-control")
+		t.Setenv("IDENTITY_KEYCLOAK_CLIENT_KEY_FILE", "/keys/identity-control.pem")
+		t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID", "identity-control-registration")
+		t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_KEY_FILE", "/keys/identity-control-registration.pem")
+		t.Setenv("IDENTITY_TOKEN_AUDIENCE", "identity-control-api")
+	}
+	set()
+	cfg, err := config.LoadBootstrap()
+	if err != nil {
+		t.Fatalf("LoadBootstrap: %v", err)
+	}
+	if cfg.TokenAudience != "identity-control-api" || cfg.RegistrationClientID != "identity-control-registration" {
+		t.Errorf("loaded %+v", cfg)
+	}
+	for _, name := range []string{"IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID",
+		"IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_KEY_FILE", "IDENTITY_TOKEN_AUDIENCE"} {
+		t.Run(name, func(t *testing.T) {
+			set()
+			t.Setenv(name, "")
+			if _, err := config.LoadBootstrap(); err == nil || !strings.Contains(err.Error(), name) {
+				t.Errorf("LoadBootstrap without %s: %v", name, err)
+			}
+		})
+	}
+}

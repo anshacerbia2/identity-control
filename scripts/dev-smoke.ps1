@@ -174,8 +174,8 @@ Write-Host ""
 Write-Host "9b. adopt the development caller"
 # identity-control-caller is created by create-kernel-clients.sh before this service can register it,
 # so it is adopted: a plan first, then the adoption, held to the key it already authenticates with. Its
-# declared audience is empty because its audience mapper names identity-control's own Admin API client,
-# which is exempt rather than registered; the lifespan an empty audience derives is its 240 seconds.
+# declared audience is identity-control-api, the resource the ceremony registered and its audience
+# mapper names; an L0 resource derives its 240 seconds.
 $callerRsa = Read-ClientKey $env:IDENTITY_CALLER_KEY_FILE
 try {
     $callerPublic = $callerRsa.ExportParameters($false)
@@ -183,6 +183,7 @@ try {
 } finally { $callerRsa.Dispose() }
 $declaration = @{ client_key = "identity-control-caller"; profile = "confidential"; audience_class = "privileged"
     application_ref = "identity-control-dev"; redirect_uris = @("http://127.0.0.1:8099/callback"); public_keys = @($callerJwk)
+    audience = @("identity-control-api")
     # The script made the caller before the token profile: no at+jwt attribute, no client_id mapper, and
     # the realm's scopes rather than its own. Both converge as part of the adoption.
     converge = @("token_format", "audience_scope") }

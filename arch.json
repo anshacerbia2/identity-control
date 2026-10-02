@@ -33,12 +33,14 @@
       "Principal, per ADR-IAM-001 5.11. It reaches provisioning and keycloak and NOT httpapi:",
       "the ceremony is a command precisely so that no route exists which creates a Principal",
       "without an authenticated caller, and an edge to httpapi would be the first step toward",
-      "one."
+      "one. It reaches registration for ADR-IAM-001 5.11 rule 5: the ceremony registers this",
+      "service's own resource, which the first call's token must name."
     ],
     "cmd/identity-bootstrap": [
       "internal/config",
       "internal/identity/provisioning",
-      "internal/keycloak"
+      "internal/keycloak",
+      "internal/registration"
     ],
     "internal/config": [],
     "internal/controldb": [],

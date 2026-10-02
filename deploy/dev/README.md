@@ -164,7 +164,7 @@ $env:IDENTITY_KEYCLOAK_CLIENT_KEY_FILE = (Resolve-Path deploy/dev/keys/identity-
 $env:IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID       = 'identity-control-registration'
 $env:IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_KEY_FILE = (Resolve-Path deploy/dev/keys/identity-control-registration.pem).Path
 $env:IDENTITY_TOKEN_ISSUER           = '<KEYCLOAK_ISSUER>'
-$env:IDENTITY_TOKEN_AUDIENCE         = 'identity-control'
+$env:IDENTITY_TOKEN_AUDIENCE         = 'identity-control-api'
 $env:IDENTITY_JWKS_URL               = 'http://localhost:8081/realms/scnehaux/protocol/openid-connect/certs'
 go run ./cmd/identity-control
 ```
@@ -250,6 +250,43 @@ The first sweep after the upgrade records each such client `unattributed` in `to
 the registered state once per finding, from the Admin Portal's registration page or with
 `POST /v1/registrations:reconcile` naming the findings and a reason. The clients' access tokens then
 carry `typ` `at+jwt` and `client_id`, and no email, names, or roles.
+
+## Moving a server to `identity-control-api`
+
+A server whose ceremony ran before `ADR-IAM-001 §5.11` rule 5 has no `identity-control-api`
+resource, and its callers' tokens name the Admin API client `identity-control`, which
+STD-IAM-002 §3.1 prohibits. Move it in this order, because each step needs a token the step before
+still accepts:
+
+1. **Register the resource by resuming the ceremony**, with the operator, username and email on
+   record (`bootstrap.sh` used `bootstrap-operator` and `bootstrap-operator@scnehaux.local`). Do not
+   rerun `bootstrap.sh`; run only its first step:
+
+   ```sh
+   docker compose run --rm bootstrap -operator '<recorded operator>' -reason 'register identity-control-api' \
+     -username bootstrap-operator -email bootstrap-operator@scnehaux.local -resume '<recorded operator>'
+   ```
+
+2. **Move each caller's audience while the running service still verifies the old one.** With a
+   token from the running service, propose an audience change on the adopted caller and the BFF
+   (`TDD-identity-control-003` §Registration Changes). A development server applies it at once, and
+   the apply replaces the hand-made `identity-control-audience` mapper with
+   `audience-identity-control-api`:
+
+   ```http
+   POST /v1/registrations/{registration_id}/changes
+   X-Administrative-Reason: move to the API's own resource (STD-IAM-002 §3.1)
+   Content-Type: application/json
+
+   {"audience":["identity-control-api"],"expected_version":<the registration's version>}
+   ```
+
+   From here, new tokens name `identity-control-api` and the running service refuses them.
+
+3. **Recreate the service** so it verifies the new audience: `docker compose up -d identity-control`.
+   `compose.yaml` now sets `IDENTITY_TOKEN_AUDIENCE=identity-control-api`.
+
+A caller that is not adopted yet is adopted first, with `"audience":[]`, and then moved by step 2.
 
 ## Keys, and moving a server from secrets to keys
 

@@ -11,7 +11,7 @@
 #   identity-control-caller  development only: how a person obtains a provider-scope token to call
 #                            the API. Authorization Code with PKCE S256 and no password grant
 #                            (STD-IAM-001 §3.2), the kernel's scnehaux-provider scope attached
-#                            (STD-IAM-002 §3.2.1), identity-control named in aud, and a 240-second
+#                            (STD-IAM-002 §3.2.1), identity-control-api named in aud, and a 240-second
 #                            access token because provider-scope is lifetime class L0 (§3.3).
 #
 # The keys are made in ./keys by the kernel's new-client-key.sh, and the public halves installed by
@@ -87,10 +87,12 @@ caller="$(kc create clients -r "$realm" -i \
 	-s 'attributes."access.token.lifespan"=240')"
 # Which API a token is for belongs to the client relationship, not to the claim profile: the
 # audience sits on the caller, so the provider scope does not make every provider token valid at
-# every API.
+# every API. It names identity-control-api, the keyless resource the bootstrap ceremony registers,
+# never the Admin API client (STD-IAM-002 §3.1), and it is written exactly as identity-control
+# writes an audience mapper, so the adopted caller's declared audience matches it.
 kc create "clients/$caller/protocol-mappers/models" -r "$realm" \
-	-s name=identity-control-audience -s protocol=openid-connect -s protocolMapper=oidc-audience-mapper \
-	-s 'config."included.client.audience"=identity-control' \
+	-s name=audience-identity-control-api -s protocol=openid-connect -s protocolMapper=oidc-audience-mapper \
+	-s 'config."included.client.audience"=identity-control-api' \
 	-s 'config."access.token.claim"=true' -s 'config."id.token.claim"=false' \
 	-s 'config."introspection.token.claim"=true' >/dev/null
 kc update "clients/$caller/default-client-scopes/$scope" -r "$realm"

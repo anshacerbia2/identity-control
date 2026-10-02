@@ -28,10 +28,12 @@ import (
 	"time"
 
 	"github.com/anshacerbia2/foundation-platform/db"
+	"github.com/anshacerbia2/foundation-platform/id"
 
 	"github.com/anshacerbia2/identity-control/internal/config"
 	"github.com/anshacerbia2/identity-control/internal/identity/provisioning"
 	"github.com/anshacerbia2/identity-control/internal/keycloak"
+	"github.com/anshacerbia2/identity-control/internal/registration"
 )
 
 func main() {
@@ -131,6 +133,15 @@ func run(operator, reason, username, email, resume string, timeout time.Duration
 		return err
 	}
 
+	// ADR-IAM-001 §5.11 rule 5: the resource the first call is made to. A token is admitted only when
+	// its aud names a registered resource, and registering one through the API would need such a
+	// token first. Under the ceremony's own key, so a resumed ceremony completes it once.
+	resource, err := registerOwnResource(ctx, pool, cfg, response.PrincipalID, logger)
+	if err != nil {
+		return fmt.Errorf("the first Principal exists; registering %s failed, so resume the ceremony: %w",
+			cfg.TokenAudience, err)
+	}
+
 	logger.InfoContext(ctx, "bootstrap ceremony complete",
 		slog.String("principal_id", response.PrincipalID.String()),
 		slog.String("realm", string(response.Realm)),
@@ -144,6 +155,7 @@ func run(operator, reason, username, email, resume string, timeout time.Duration
 	fmt.Printf("  username      %s\n", username)
 	fmt.Printf("  realm         %s\n", response.Realm)
 	fmt.Printf("  operator      %s\n", record.Operator)
+	fmt.Printf("  resource      %s (registration %s)\n", resource.ClientKey, resource.ID)
 	fmt.Printf("\nThis Principal is a provider by the ceremony's grant until Organization's first\n")
 	fmt.Printf("emergency provider:identity-control grant is projected (TDD-identity-control-006).\n")
 	fmt.Printf("\nThis Principal owes a credential. It cannot authenticate until the kernel's\n")
@@ -162,4 +174,46 @@ func parseLevel(level string) slog.Level {
 	default:
 		return slog.LevelInfo
 	}
+}
+
+// ownResourceScope is the idempotency scope of the ceremony's resource registration. Like the
+// ceremony's own scope it is not a Principal's, so no authenticated caller can replay or claim it.
+const ownResourceScope = "ceremony:bootstrap"
+
+// registerOwnResource registers this service's resource: keyless, privileged at lifetime class L0,
+// registered by the Principal the ceremony created (ADR-IAM-001 §5.11 rule 5, STD-IAM-002 §3.1).
+func registerOwnResource(ctx context.Context, pool *db.Pool, cfg config.BootstrapConfig, firstPrincipal id.UUID,
+	logger *slog.Logger) (registration.Registration, error) {
+	key, err := keycloak.LoadClientKey(cfg.RegistrationClientKeyFile)
+	if err != nil {
+		return registration.Registration{}, fmt.Errorf("registration kernel client key: %w", err)
+	}
+	registry, err := keycloak.NewAdmin(keycloak.AdminConfig{
+		BaseURL:   cfg.KeycloakBaseURL,
+		Realm:     keycloak.Realm(cfg.KeycloakRealm),
+		ClientID:  cfg.RegistrationClientID,
+		ClientKey: key,
+		Timeout:   cfg.ProvisionTimeout,
+	}, nil)
+	if err != nil {
+		return registration.Registration{}, fmt.Errorf("registration kernel client: %w", err)
+	}
+	registrar, err := registration.New(pool, registry, registration.Config{
+		Realm:                keycloak.Realm(cfg.KeycloakRealm),
+		CallTimeout:          cfg.ProvisionTimeout,
+		PendingRecoveryAfter: cfg.PendingRecoveryAfter,
+	}, logger)
+	if err != nil {
+		return registration.Registration{}, fmt.Errorf("registration service: %w", err)
+	}
+	return registrar.Register(ctx, registration.Request{
+		CallerScope:    ownResourceScope,
+		IdempotencyKey: "bootstrap-resource:" + cfg.KeycloakRealm,
+		RegisteredBy:   firstPrincipal,
+		ClientKey:      cfg.TokenAudience,
+		Profile:        registration.ProfileResource,
+		AudienceClass:  "privileged",
+		ApplicationRef: "identity-control",
+		LifetimeClass:  "L0",
+	})
 }

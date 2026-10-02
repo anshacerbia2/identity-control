@@ -212,17 +212,19 @@ $callerClientId = Upsert-Client @{
 
 # Which API a token is for belongs to the client relationship, not to the claim profile, so the
 # audience sits on this client rather than in scnehaux-provider -- otherwise every provider token
-# would be valid at every API.
+# would be valid at every API. It names identity-control-api, the keyless resource the bootstrap
+# ceremony registers, never the Admin API client (STD-IAM-002 3.1), written exactly as
+# identity-control writes an audience mapper.
 $mappers = Invoke-RestMethod -Headers $H `
     -Uri "$kcBase/admin/realms/$realm/clients/$callerClientId/protocol-mappers/models"
-if (-not ($mappers | Where-Object { $_.name -eq "identity-control-audience" })) {
+if (-not ($mappers | Where-Object { $_.name -eq "audience-identity-control-api" })) {
     Invoke-RestMethod -Method Post -Headers $H -ContentType "application/json" `
         -Uri "$kcBase/admin/realms/$realm/clients/$callerClientId/protocol-mappers/models" -Body (@{
-            name           = "identity-control-audience"
+            name           = "audience-identity-control-api"
             protocol       = "openid-connect"
             protocolMapper = "oidc-audience-mapper"
             config         = @{
-                "included.client.audience"  = "identity-control"
+                "included.client.audience"  = "identity-control-api"
                 "access.token.claim"        = "true"
                 "id.token.claim"            = "false"
                 "introspection.token.claim" = "true"

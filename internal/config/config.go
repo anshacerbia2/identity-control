@@ -325,6 +325,13 @@ type BootstrapConfig struct {
 	KeycloakClientID      string
 	KeycloakClientKeyFile string
 
+	// The registration path's own Admin API client, and the resource the ceremony registers with
+	// it: this service's audience, the one IDENTITY_TOKEN_AUDIENCE names for the running service, so
+	// the two cannot disagree (ADR-IAM-001 §5.11 rule 5).
+	RegistrationClientID      string
+	RegistrationClientKeyFile string
+	TokenAudience             string
+
 	ProvisionTimeout     time.Duration
 	PendingRecoveryAfter time.Duration
 
@@ -341,11 +348,14 @@ func LoadBootstrap() (BootstrapConfig, error) {
 	}
 
 	required := map[string]*string{
-		"IDENTITY_DATABASE_URL":             &cfg.RuntimeDSN,
-		"IDENTITY_KEYCLOAK_REALM":           &cfg.KeycloakRealm,
-		"IDENTITY_KEYCLOAK_BASE_URL":        &cfg.KeycloakBaseURL,
-		"IDENTITY_KEYCLOAK_CLIENT_ID":       &cfg.KeycloakClientID,
-		"IDENTITY_KEYCLOAK_CLIENT_KEY_FILE": &cfg.KeycloakClientKeyFile,
+		"IDENTITY_DATABASE_URL":                          &cfg.RuntimeDSN,
+		"IDENTITY_KEYCLOAK_REALM":                        &cfg.KeycloakRealm,
+		"IDENTITY_KEYCLOAK_BASE_URL":                     &cfg.KeycloakBaseURL,
+		"IDENTITY_KEYCLOAK_CLIENT_ID":                    &cfg.KeycloakClientID,
+		"IDENTITY_KEYCLOAK_CLIENT_KEY_FILE":              &cfg.KeycloakClientKeyFile,
+		"IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID":       &cfg.RegistrationClientID,
+		"IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_KEY_FILE": &cfg.RegistrationClientKeyFile,
+		"IDENTITY_TOKEN_AUDIENCE":                        &cfg.TokenAudience,
 	}
 	for name, target := range required {
 		*target = os.Getenv(name)
