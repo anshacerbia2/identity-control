@@ -15,6 +15,7 @@ import (
 	"github.com/anshacerbia2/foundation-platform/httpapi"
 	"github.com/anshacerbia2/foundation-platform/id"
 
+	"github.com/anshacerbia2/identity-control/internal/keycloak"
 	"github.com/anshacerbia2/identity-control/internal/registration"
 )
 
@@ -144,8 +145,22 @@ func writeChangeError(w http.ResponseWriter, r *http.Request, err error) {
 		httpapi.Problem(w, r, httpapi.NotFound, "No such change")
 	case errors.Is(err, registration.ErrNotFound):
 		httpapi.Problem(w, r, httpapi.NotFound, "No such registration")
-	default:
+	case kernelFailure(err):
 		httpapi.Problem(w, r, httpapi.DependencyUnavailable,
 			"The change was not applied: the identity kernel did not confirm it; retry the same request")
+	default:
+		// Not the kernel: the database refused it, or a defect. The service logged the cause.
+		httpapi.Problem(w, r, httpapi.Internal, "The change was not applied; it was not recorded")
 	}
+}
+
+// kernelFailure reports whether an error came from the identity kernel, which a retry may get past.
+func kernelFailure(err error) bool {
+	for _, kernel := range []error{keycloak.ErrUnavailable, keycloak.ErrForbidden, keycloak.ErrConflict,
+		keycloak.ErrNotFound, keycloak.ErrAmbiguous} {
+		if errors.Is(err, kernel) {
+			return true
+		}
+	}
+	return false
 }

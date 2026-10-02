@@ -176,6 +176,6 @@ func (s Surface) Mount(probeChain, apiChain func(http.Handler) http.Handler) htt
 	if s.Deliveries != nil {
 		root.Handle("POST /v1/deliveries", probeChain(s.Deliveries))
 	}
-	root.Handle("/", apiChain(s.API))
+	root.Handle("/", apiChain(reasonHeaders(s.API)))
 	return root
 }
