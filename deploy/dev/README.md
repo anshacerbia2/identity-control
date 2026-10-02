@@ -263,7 +263,10 @@ still accepts, and the audience change needs the new binary while the old audien
    carries the claim, and the ceremony's Principal still holds the attribute.
 2. **Migrate, and run the new binary on the old audience.** Pull this repository, put
    `IDENTITY_TOKEN_AUDIENCE=identity-control` in `.env`, and
-   `docker compose up -d --build identity-control`. The migrate job runs first.
+   `docker compose up -d --build identity-control`. The migrate job runs first. Then rebuild the
+   ceremony's image, which `up --build` does not touch because `bootstrap` is behind the `ceremony`
+   profile: `docker compose --profile ceremony build bootstrap`. An image older than the move to
+   keys still demands `IDENTITY_KEYCLOAK_CLIENT_SECRET` and refuses to start.
 3. **Register the resource by resuming the ceremony**, with the operator, username and email on
    record (`bootstrap.sh` used `bootstrap-operator` and `bootstrap-operator@scnehaux.local`). Do not
    rerun `bootstrap.sh`; run only its first step:
