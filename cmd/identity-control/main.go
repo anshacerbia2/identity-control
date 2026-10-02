@@ -31,6 +31,7 @@ import (
 	"github.com/anshacerbia2/identity-control/internal/httpapi"
 	"github.com/anshacerbia2/identity-control/internal/identity/provisioning"
 	"github.com/anshacerbia2/identity-control/internal/keycloak"
+	"github.com/anshacerbia2/identity-control/internal/organization"
 	"github.com/anshacerbia2/identity-control/internal/providerauthority"
 	"github.com/anshacerbia2/identity-control/internal/reconcile"
 	"github.com/anshacerbia2/identity-control/internal/registration"
@@ -212,11 +213,11 @@ func run() error {
 		Database:      pool,
 		Telemetry:     telemetry,
 	}
+	projection, err := providerauthority.New(pool)
+	if err != nil {
+		return fmt.Errorf("provider authority projection: %w", err)
+	}
 	if !cfg.DeliveryPrincipal.IsNil() {
-		projection, err := providerauthority.New(pool)
-		if err != nil {
-			return fmt.Errorf("provider authority projection: %w", err)
-		}
 		deliveryVerifier, err := verify.New(verify.Config{
 			Issuer: cfg.TokenIssuer, Audience: cfg.TokenAudience, Keys: keys,
 			Requirement:            httpapi.DeliveryRequirement(cfg.DeliveryPrincipal),
@@ -232,6 +233,25 @@ func run() error {
 	} else {
 		logger.Warn("IDENTITY_DELIVERY_PRINCIPAL_ID is unset; the provider authority intake accepts no delivery")
 	}
+
+	// The projection's freshness, read from Organization Control's frontier as this service's
+	// workload (TDD-identity-control-006 §Freshness). Unconfigured, nothing is read and the
+	// projection is never fresh, so no activation is honored.
+	var (
+		freshness *providerauthority.Freshness
+		frontier  *organization.Client
+	)
+	if cfg.Organization.BaseURL != "" {
+		if freshness, err = providerauthority.NewFreshness(cfg.ProviderFreshness); err != nil {
+			return fmt.Errorf("provider authority freshness: %w", err)
+		}
+		if frontier, err = organization.NewWorkload(organizationWorkload(cfg.Organization)); err != nil {
+			return err
+		}
+	} else {
+		logger.Warn("IDENTITY_ORGANIZATION_BASE_URL is unset; the provider projection is never fresh and no activation is honored")
+	}
+
 	surface, err := httpapi.Routes(routesConfig)
 	if err != nil {
 		return fmt.Errorf("routes: %w", err)
@@ -308,6 +328,9 @@ func run() error {
 	// goroutine. Every replica schedules it; the reconciler's run claim lets one sweep at a time
 	// through, so the others' ticks are skipped rather than duplicated.
 	go scheduleSweeps(ctx, provisioner, registrar, workloads, reconciler, cfg.RegistrationReconcileInterval, logger)
+	if freshness != nil {
+		go freshness.Poll(ctx, projection, frontier, providerauthority.PollInterval, logger)
+	}
 
 	select {
 	case err := <-serveErr:
@@ -441,4 +464,12 @@ func newLogger(level string) *slog.Logger {
 	// JSON to stdout with no vendor agent, per STD-GLB-003. Credential redaction is enforced
 	// inside foundation-platform's serializer rather than here, so a caller cannot forget it.
 	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: parsed}))
+}
+
+// organizationWorkload is the configured workload client, in the client's terms.
+func organizationWorkload(cfg config.Organization) organization.Workload {
+	return organization.Workload{
+		BaseURL: cfg.BaseURL, ClientID: cfg.WorkloadClientID, KeyFile: cfg.WorkloadKeyFile,
+		TokenURL: cfg.WorkloadTokenURL, Audience: cfg.WorkloadAudience,
+	}
 }

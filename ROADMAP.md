@@ -15,7 +15,7 @@ Week numbers are relative to the first build week, not calendar dates.
 | `TDD-identity-control-003` | Protocol client and protected-resource registration | approved |
 | `TDD-identity-control-004` | Workload and bounded agent identity | approved |
 | `TDD-identity-control-005` | Account-security and investigation API mediation | approved |
-| `TDD-identity-control-006` | Provider authority from Organization's records: delivery intake, local projection, freshness, the per-request decision that replaces `provider_scope`, and the ceremony grant | approved; the build follows in steps: intake and projection, bootstrap and freshness, then the decision and the ceremony grant |
+| `TDD-identity-control-006` | Provider authority from Organization's records: delivery intake, local projection, freshness, the per-request decision that replaces `provider_scope`, and the ceremony grant | approved; built in steps: intake and projection (done), bootstrap and freshness (`cmd/identity-provider-bootstrap`, the frontier poll), then the decision and the ceremony grant |
 
 Three documents were inherited from the former monorepo. All three are gone from `docs/designs`,
 and their content lives here:

@@ -31,7 +31,7 @@ ADMIN_DSN ?= $(TEST_DATABASE_URL)
 COVERAGE_FLOOR ?= 80
 
 .DEFAULT_GOAL := help
-.PHONY: help env run migrate bootstrap build fmt vet arch tidy test test-unit test-integration \
+.PHONY: help env run migrate bootstrap provider-bootstrap build fmt vet arch tidy test test-unit test-integration \
         ci-db test-ci coverage gates migrate-status clean
 
 help:
@@ -40,6 +40,7 @@ help:
 	@echo   make migrate           roles and platform schema, Atlas, privileges, against IDENTITY_MIGRATION_DATABASE_URL
 	@echo   make run               the service on IDENTITY_LISTEN_ADDRESS -- needs a Keycloak, see .env.example
 	@echo   make bootstrap OPERATOR=... REASON=... USERNAME=...   the one-time ceremony
+	@echo   make provider-bootstrap  the provider authority projection from Organization Control's snapshot
 	@echo   make gates             everything CI runs: fmt vet build arch tidy test coverage
 	@echo   make test-ci           the suite against a CI-shaped database, not the dev one
 	@echo   make test-unit         no database needed
@@ -77,6 +78,14 @@ bootstrap:
 	@if "$(REASON)"=="" (echo REASON is required: it is recorded immutably && exit 1)
 	@if "$(USERNAME)"=="" (echo USERNAME is required: the first Principal's username && exit 1)
 	go run ./cmd/identity-bootstrap -operator "$(OPERATOR)" -reason "$(REASON)" -username "$(USERNAME)" $(if $(EMAIL),-email "$(EMAIL)",)
+
+# TDD-identity-control-006 §Bootstrap. Needs Organization Control running with this service
+# registered as its identity-control consumer, and IDENTITY_ORGANIZATION_BASE_URL with the workload
+# client in .env. Safe to rerun: the snapshot is applied by version.
+provider-bootstrap:
+	@if not exist .env (echo No .env yet. Run: make env && exit 1)
+	@if "$(IDENTITY_ORGANIZATION_BASE_URL)"=="" (echo IDENTITY_ORGANIZATION_BASE_URL is unset in .env -- see .env.example && exit 1)
+	go run ./cmd/identity-provider-bootstrap
 
 # ---------------------------------------------------------------------------
 # Gates

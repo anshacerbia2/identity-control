@@ -356,3 +356,83 @@ func TestTheEnvironmentIsProductionUnlessStated(t *testing.T) {
 		}
 	}
 }
+
+func setRequired(t *testing.T) {
+	t.Helper()
+	t.Setenv("IDENTITY_DATABASE_URL", "postgres://runtime@localhost:5432/identity")
+	t.Setenv("IDENTITY_KEYCLOAK_REALM", "scnehaux")
+	t.Setenv("IDENTITY_KEYCLOAK_BASE_URL", "https://identity.example.com")
+	t.Setenv("IDENTITY_KEYCLOAK_CLIENT_ID", "identity-control")
+	t.Setenv("IDENTITY_KEYCLOAK_CLIENT_KEY_FILE", "/keys/identity-control.pem")
+	t.Setenv("IDENTITY_TOKEN_ISSUER", "https://identity.example.com/realms/scnehaux")
+	t.Setenv("IDENTITY_TOKEN_AUDIENCE", "identity-control")
+	t.Setenv("IDENTITY_JWKS_URL", "https://identity.example.com/realms/scnehaux/protocol/openid-connect/certs")
+	t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID", "identity-control-registration")
+	t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_KEY_FILE", "/keys/identity-control-registration.pem")
+}
+
+func setOrganization(t *testing.T) {
+	t.Helper()
+	t.Setenv("IDENTITY_ORGANIZATION_BASE_URL", "https://organization.example.com")
+	t.Setenv("IDENTITY_WORKLOAD_CLIENT_ID", "identity-control-workload")
+	t.Setenv("IDENTITY_WORKLOAD_KEY_FILE", "/keys/identity-control-workload.pem")
+	t.Setenv("IDENTITY_WORKLOAD_TOKEN_URL", "https://identity.example.com/realms/scnehaux/protocol/openid-connect/token")
+	t.Setenv("IDENTITY_WORKLOAD_AUDIENCE", "https://identity.example.com/realms/scnehaux")
+}
+
+// Organization Control is optional, and its workload client is required once it is named
+// (TDD-identity-control-006 §Configuration).
+func TestOrganizationIsOptionalUntilNamed(t *testing.T) {
+	setRequired(t)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load without Organization Control: %v", err)
+	}
+	if cfg.Organization.BaseURL != "" || cfg.ProviderFreshness != 60*time.Second {
+		t.Errorf("defaults are %+v, %s", cfg.Organization, cfg.ProviderFreshness)
+	}
+
+	setOrganization(t)
+	t.Setenv("IDENTITY_PROVIDER_FRESHNESS", "45s")
+	cfg, err = config.Load()
+	if err != nil {
+		t.Fatalf("Load with Organization Control: %v", err)
+	}
+	if cfg.Organization.WorkloadClientID != "identity-control-workload" || cfg.ProviderFreshness != 45*time.Second {
+		t.Errorf("loaded %+v, %s", cfg.Organization, cfg.ProviderFreshness)
+	}
+
+	for _, name := range []string{
+		"IDENTITY_WORKLOAD_CLIENT_ID", "IDENTITY_WORKLOAD_KEY_FILE",
+		"IDENTITY_WORKLOAD_TOKEN_URL", "IDENTITY_WORKLOAD_AUDIENCE",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(name, "")
+			if _, err := config.Load(); err == nil || !strings.Contains(err.Error(), name) {
+				t.Errorf("Load without %s: %v", name, err)
+			}
+		})
+	}
+}
+
+func TestLoadProviderBootstrapRequiresOrganization(t *testing.T) {
+	t.Setenv("IDENTITY_DATABASE_URL", "postgres://runtime@localhost:5432/identity")
+	t.Setenv("IDENTITY_ORGANIZATION_BASE_URL", "")
+	if _, err := config.LoadProviderBootstrap(); err == nil || !strings.Contains(err.Error(), "IDENTITY_ORGANIZATION_BASE_URL") {
+		t.Errorf("LoadProviderBootstrap without Organization Control: %v", err)
+	}
+
+	setOrganization(t)
+	cfg, err := config.LoadProviderBootstrap()
+	if err != nil {
+		t.Fatalf("LoadProviderBootstrap: %v", err)
+	}
+	if cfg.RuntimeDSN == "" || cfg.Organization.BaseURL != "https://organization.example.com" {
+		t.Errorf("loaded %+v", cfg)
+	}
+
+	t.Setenv("IDENTITY_DATABASE_URL", "")
+	if _, err := config.LoadProviderBootstrap(); err == nil || !strings.Contains(err.Error(), "IDENTITY_DATABASE_URL") {
+		t.Errorf("LoadProviderBootstrap without a database: %v", err)
+	}
+}
