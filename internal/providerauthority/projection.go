@@ -199,5 +199,19 @@ func upsert(ctx context.Context, tx db.Tx, grant Grant) (bool, error) {
 		grant.GrantStatus, grant.GrantVersion, activationID, endsAt); err != nil {
 		return false, fmt.Errorf("providerauthority: writing grant %s: %w", grant.GrantID, err)
 	}
+	if grant.GrantStatus == "active" && grant.Kind == "emergency" {
+		if _, err := tx.Exec(ctx, retireCeremonyStatement, grant.GrantID.String()); err != nil {
+			return false, fmt.Errorf("providerauthority: retiring the ceremony grant: %w", err)
+		}
+	}
 	return true, nil
 }
+
+// retireCeremonyStatement retires the ceremony's local emergency grant, once, in the transaction
+// that projects the first active emergency grant (TDD-identity-control-006 §The Ceremony's Grant).
+// The row is insert-only, so the retirement is a single recorded end; a later emergency grant
+// finds it there and changes nothing.
+const retireCeremonyStatement = `INSERT INTO identity.ceremony_grant_retirement (id, retired_at, by_grant_id)
+SELECT 1, now(), $1::uuid
+ WHERE EXISTS (SELECT 1 FROM identity.bootstrap_ceremony)
+ON CONFLICT (id) DO NOTHING`

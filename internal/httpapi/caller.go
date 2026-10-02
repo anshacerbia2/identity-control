@@ -59,7 +59,7 @@ func idempotencyKey(r *http.Request) (string, bool) {
 type providerKey struct{}
 
 // withProvider records that the authenticated caller holds provider authority. Only the
-// authentication middleware sets it, from a verified provider_scope.
+// authentication middleware sets it, from the provider decision for this request.
 func withProvider(ctx context.Context) context.Context {
 	return context.WithValue(ctx, providerKey{}, true)
 }

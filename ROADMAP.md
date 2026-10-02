@@ -15,7 +15,7 @@ Week numbers are relative to the first build week, not calendar dates.
 | `TDD-identity-control-003` | Protocol client and protected-resource registration | approved |
 | `TDD-identity-control-004` | Workload and bounded agent identity | approved |
 | `TDD-identity-control-005` | Account-security and investigation API mediation | approved |
-| `TDD-identity-control-006` | Provider authority from Organization's records: delivery intake, local projection, freshness, the per-request decision that replaces `provider_scope`, and the ceremony grant | approved; built in steps: intake and projection (done), bootstrap and freshness (`cmd/identity-provider-bootstrap`, the frontier poll), then the decision and the ceremony grant |
+| `TDD-identity-control-006` | Provider authority from Organization's records: delivery intake, local projection, freshness, the per-request decision that replaces `provider_scope`, and the ceremony grant | built: intake and projection, bootstrap and freshness (`cmd/identity-provider-bootstrap`, the frontier poll), the per-request decision (`providerauthority.Decider`; `provider_scope` refused) and the ceremony grant with its insert-only retirement. The kernel's `provider_scope` mapper is removed in identity-kernel |
 
 Three documents were inherited from the former monorepo. All three are gone from `docs/designs`,
 and their content lives here:
@@ -228,6 +228,10 @@ the `provider-scope` form. Getting the class right fixed four things together:
 The `tenant_id` row is the one worth noting. It read as an implementation gap to defer until an
 Organization authority existed. It was a misclassification: for a provider-scope token the claim
 is `MUST NOT`, so classifying correctly removed the non-conformance rather than postponing it.
+
+The `provider_scope` row is superseded. `TDD-identity-control-006` reads provider authority from
+this service's projection of Organization's grants for each request, so the claim is no longer
+issued and a token carrying it is refused (`STD-IAM-002 §3.1.1`).
 
 #### STD-IAM-002 could not be implemented as written
 

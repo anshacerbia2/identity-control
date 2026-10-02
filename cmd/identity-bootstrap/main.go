@@ -144,6 +144,8 @@ func run(operator, reason, username, email, resume string, timeout time.Duration
 	fmt.Printf("  username      %s\n", username)
 	fmt.Printf("  realm         %s\n", response.Realm)
 	fmt.Printf("  operator      %s\n", record.Operator)
+	fmt.Printf("\nThis Principal is a provider by the ceremony's grant until Organization's first\n")
+	fmt.Printf("emergency provider:identity-control grant is projected (TDD-identity-control-006).\n")
 	fmt.Printf("\nThis Principal owes a credential. It cannot authenticate until the kernel's\n")
 	fmt.Printf("credential-setting action is completed; this command never held one.\n")
 	return nil

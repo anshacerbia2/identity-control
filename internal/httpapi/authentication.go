@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -8,7 +9,10 @@ import (
 	"strings"
 
 	fhttp "github.com/anshacerbia2/foundation-platform/httpapi"
+	"github.com/anshacerbia2/foundation-platform/id"
 	"github.com/anshacerbia2/foundation-platform/verify"
+
+	"github.com/anshacerbia2/identity-control/internal/providerauthority"
 )
 
 // PrincipalIDClaim is the canonical enterprise subject identifier.
@@ -22,24 +26,23 @@ const PrincipalIDClaim = "principal_id"
 // SubjectTypeClaim distinguishes a human Principal from a workload one.
 const SubjectTypeClaim = "subject_type"
 
-// This service is a `privileged` audience in the `provider-scope` form, per STD-IAM-002 §3.1.1.
+// This service is a `privileged` audience (STD-IAM-002 §3.1.1, §3.2).
 //
-// The classification is not a label; it decides four things at once. Creating a Principal is
-// irreversible, so the audience class is `privileged` rather than `internal`. It belongs to no
-// Tenant, so the scope form is `provider-scope`: `provider_scope` is mandatory and `tenant_id` is
-// prohibited. `privileged` makes `acr` and `auth_time` mandatory. And `L0` fixes the token
-// lifetime at four minutes, which is the tightest class the profile defines.
-//
-// Classifying it as `internal` — which an earlier revision of the local realm did — would have
-// required `tenant_id` on a token whose action has no Tenant, and would have permitted a
-// fifteen-minute lifetime on the one surface that can mint enterprise identities.
+// It holds the projection of the provider:identity-control grants, so a provider's token carries
+// no provider_scope: who is a provider is read from this service's records for each request, by the
+// token's principal_id (ADR-ORG-002 §5.3, TDD-identity-control-006). A caller that is not a
+// provider is a registration owner, the `resource-scoped` form, whose authority is the ownership
+// recorded for the registration a request names. Both forms present the same token: principal_id,
+// subject_type human, acr and auth_time, and no tenant_id. `privileged` makes `acr` and `auth_time`
+// mandatory, and `L0` fixes the lifetime at four minutes.
 const (
-	// ProviderScopeClaim names the bounded provider authority the operation runs under.
+	// ProviderScopeClaim is read only to refuse it. No resource checks a provider grant from a
+	// claim and none is issued (STD-IAM-002 §3.1.1), so a token carrying one was minted by a
+	// client still configured for the old profile, and is refused rather than read as an owner's.
 	ProviderScopeClaim = "provider_scope"
 
-	// TenantIDClaim is read only to reject it. A provider-scope token asserting a Tenant is a
-	// token whose scope form cannot be determined, and §3.5 rule 9 refuses that rather than
-	// guessing the narrower reading.
+	// TenantIDClaim is read only to reject it. This service's operations belong to no Tenant,
+	// and a token asserting one was minted for the tenant-scoped form (§3.5 rule 9).
 	TenantIDClaim = "tenant_id"
 
 	// AuthContextClassClaim and AuthTimeClaim are the elevated assurance claims §3.2 makes
@@ -48,19 +51,12 @@ const (
 	AuthTimeClaim         = "auth_time"
 )
 
-// ProviderScopeIdentityControl is the only scope this service accepts.
-//
-// A registered value rather than any non-empty string, per §3.1.1: an unregistered or unbounded
-// scope is refused, because "all Tenants" is precisely what PAD-PLT-002 §5.2 requires cross-tenant
-// administration never to be.
-const ProviderScopeIdentityControl = "provider:identity-control"
-
 // Requirement is the claim rule this service supplies to the shared verifier.
 //
-// It implements the `privileged` / `provider-scope` column of STD-IAM-002 §3.2 plus rules 7, 8,
-// and 9 of §3.5. Each check is a rejection the standard states, and the prohibitions matter as
-// much as the requirements: a claim that MUST NOT be present is one whose presence means the token
-// was minted for a different scope form than the one being enforced here.
+// It implements the `privileged` column of STD-IAM-002 §3.2 plus rules 7, 9 and 10 of §3.5. Each
+// check is a rejection the standard states, and the prohibitions matter as much as the
+// requirements: a claim that MUST NOT be present is one whose presence means the token was minted
+// for a different form than the one enforced here.
 //
 // No message includes a claim value. The verifier wraps this error and a caller may log it, so a
 // value quoted here would travel further than the token did.
@@ -68,42 +64,35 @@ func Requirement() verify.ClaimRequirement {
 	return verify.RequirementFunc(func(claims verify.Claims) error {
 		// §3.5 rule 7 — the canonical identifier. A partially migrated estate in which some
 		// domains key on `sub` and others on `principal_id` is worse than either choice applied
-		// consistently.
-		if _, ok := claims.String(PrincipalIDClaim); !ok {
+		// consistently. It is the key the provider decision reads, so it must be one.
+		principal, ok := claims.String(PrincipalIDClaim)
+		if !ok {
 			return fmt.Errorf("the %s claim is absent", PrincipalIDClaim)
 		}
+		if _, err := id.Parse(principal); err != nil {
+			return fmt.Errorf("the %s claim is not a UUID", PrincipalIDClaim)
+		}
 
+		// §3.5 rule 10 — a provider and an owner are both people. A workload's token is never an
+		// owner's, and a workload holds no provider authority here.
 		subjectType, ok := claims.String(SubjectTypeClaim)
 		if !ok {
 			return fmt.Errorf("the %s claim is absent", SubjectTypeClaim)
 		}
-		if subjectType != "human" && subjectType != "workload" {
-			return fmt.Errorf("the %s claim is not human or workload", SubjectTypeClaim)
+		if subjectType != "human" {
+			return fmt.Errorf("the %s claim is not human", SubjectTypeClaim)
 		}
 
-		// §3.5 rule 9 — the scope form must be unambiguous. Both claims present, or neither,
-		// leaves the token's bounded authority undetermined.
-		// Present at all is a provider's claim: an empty or non-string provider_scope is refused
-		// below rather than read as absent, which would turn it into an owner's token.
-		scope, _ := claims.String(ProviderScopeClaim)
-		hasScope := claims.Has(ProviderScopeClaim)
-		hasTenant := claims.Has(TenantIDClaim)
 		switch {
-		case hasScope && hasTenant:
-			return fmt.Errorf("the token carries both %s and %s", ProviderScopeClaim, TenantIDClaim)
-		case hasTenant:
+		case claims.Has(ProviderScopeClaim):
+			return fmt.Errorf("the %s claim is not accepted; provider authority is read from this service's records", ProviderScopeClaim)
+		case claims.Has(TenantIDClaim):
 			return fmt.Errorf("the %s claim is prohibited on this audience", TenantIDClaim)
-		case hasScope && scope != ProviderScopeIdentityControl:
-			return fmt.Errorf("the %s claim is not a scope this resource accepts", ProviderScopeClaim)
-		case !hasScope && subjectType != "human":
-			// Without provider_scope the token is a registration owner's, the resource-scoped form
-			// (STD-IAM-002 §3.1.1, ADR-IAM-003), and an owner is a person.
-			return fmt.Errorf("a token without %s must name a human", ProviderScopeClaim)
 		}
 
-		// §3.2 — elevated assurance is mandatory for privileged, in both scope forms. Without
-		// `auth_time` a step-up requirement cannot be evaluated at all, so its absence is a
-		// rejection rather than a downgrade to whatever the token happens to carry.
+		// §3.2 — elevated assurance is mandatory for privileged. Without `auth_time` a step-up
+		// requirement cannot be evaluated at all, so its absence is a rejection rather than a
+		// downgrade to whatever the token happens to carry.
 		if _, ok := claims.String(AuthContextClassClaim); !ok {
 			return fmt.Errorf("the %s claim is absent", AuthContextClassClaim)
 		}
@@ -112,6 +101,12 @@ func Requirement() verify.ClaimRequirement {
 		}
 		return nil
 	})
+}
+
+// ProviderDecider decides whether the caller is a provider for this request:
+// *providerauthority.Decider in production.
+type ProviderDecider interface {
+	Decide(ctx context.Context, principal id.UUID) (providerauthority.Decision, error)
 }
 
 // TokenVerifier is the verification this middleware performs.
@@ -133,9 +128,20 @@ type TokenVerifier interface {
 // distinction matters to an operator reading logs and not to the presenter of the token, and
 // telling a caller whether its signature or its audience was wrong is telling an attacker which
 // half of a forgery to fix.
-func Authenticate(verifier TokenVerifier) (fhttp.Middleware, error) {
+//
+// Provider authority is decided here, after verification, from this service's records
+// (TDD-identity-control-006 §The Provider Decision). A decision that cannot be read answers 503:
+// serving the caller as an owner would turn an unreadable record into a quiet downgrade, and
+// serving it as a provider would fail open.
+func Authenticate(verifier TokenVerifier, providers ProviderDecider, logger *slog.Logger) (fhttp.Middleware, error) {
 	if verifier == nil {
 		return nil, errors.New("httpapi: a token verifier is required")
+	}
+	if providers == nil {
+		return nil, errors.New("httpapi: a provider decision is required")
+	}
+	if logger == nil {
+		return nil, errors.New("httpapi: a logger is required")
 	}
 
 	return func(next http.Handler) http.Handler {
@@ -159,13 +165,37 @@ func Authenticate(verifier TokenVerifier) (fhttp.Middleware, error) {
 			// Principal can carry different values — which would let the same caller claim two
 			// idempotency keys and defeat the deduplication the key exists for.
 			principal, _ := claims.String(PrincipalIDClaim)
+			parsed, err := id.Parse(principal)
+			if err != nil {
+				fhttp.Problem(w, r, fhttp.AuthenticationRequired,
+					"The bearer token is not valid for this resource")
+				return
+			}
 			ctx := WithCallerScope(r.Context(), "principal:"+principal)
-			// provider_scope present means a provider: the Requirement accepts it only naming
-			// provider:identity-control. Absent, the caller is a registration owner, whose authority
-			// is read per route from the ownership records (TDD-identity-control-003 §Registration
-			// Ownership).
-			if claims.Has(ProviderScopeClaim) {
+
+			// A provider is a Principal this service's records say is one, for this request. Any
+			// other caller is a registration owner, whose authority is read per route from the
+			// ownership records (TDD-identity-control-003 §Registration Ownership).
+			decision, err := providers.Decide(ctx, parsed)
+			if err != nil {
+				logger.ErrorContext(ctx, "the provider decision could not be read",
+					slog.String("principal_id", principal), slog.String("error", err.Error()))
+				fhttp.Problem(w, r, fhttp.DependencyUnavailable,
+					"Provider authority could not be determined")
+				return
+			}
+			switch {
+			case decision.Provider:
 				ctx = withProvider(ctx)
+				// Every use of break-glass authority is reported (ADR-ORG-002 §5.2).
+				if decision.Emergency {
+					logger.WarnContext(ctx, "emergency provider authority used",
+						slog.String("principal_id", principal), slog.String("basis", decision.Basis),
+						slog.String("method", r.Method), slog.String("path", r.URL.Path))
+				}
+			case decision.Stale:
+				logger.WarnContext(ctx, "an activation in force was not honored; the provider projection is stale",
+					slog.String("principal_id", principal), slog.String("reason", decision.StaleReason))
 			}
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})

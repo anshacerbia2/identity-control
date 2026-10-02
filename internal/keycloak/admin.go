@@ -123,9 +123,6 @@ func (a *Admin) CreateUser(ctx context.Context, req CreateUserRequest) (UserID, 
 	if !req.WorkloadOwner.IsNil() {
 		attributes[AttrWorkloadOwner] = []string{req.WorkloadOwner.String()}
 	}
-	if req.ProviderScope != "" {
-		attributes[AttrProviderScope] = []string{req.ProviderScope}
-	}
 
 	payload := map[string]any{
 		"username":   req.Username,
