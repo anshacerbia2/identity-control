@@ -230,6 +230,145 @@ token: alg=PS256 principal_id=01a01526-... aud=identity-control,account lifetime
 all cases passed.
 ```
 
+## 8. Provider authority from Organization Control
+
+Until this is done, the ceremony's Principal is the only provider, and no activation is honored
+(`TDD-identity-control-006` §Operational Notes). It wires the three local services together:
+
+```text
+Organization Control ──deliveries, as organization-control-workload──▶ identity-control /v1/deliveries
+identity-control ──snapshot, frontier, progress, as identity-control-workload──▶ Organization Control
+```
+
+Each arrow is a workload token from the kernel, whose `aud` is the other side's resource
+registration (STD-IAM-002 §3.1). The order matters: Organization Control's own records are made
+while it still verifies the dev issuer, and it is switched to the kernel only once they exist.
+
+**Before you start.** identity-control runs with `IDENTITY_TOKEN_AUDIENCE=identity-control-api`
+(§5), Organization Control runs locally on `127.0.0.1:8099` with `make issuer` beside it, and
+`ORGANIZATION_TOKEN_AUDIENCE=organization-control-api` is in its `.env`.
+
+### 8.1 Two workload keys
+
+From the identity-kernel checkout, so each private key is made on this machine and only its public
+JWK is sent anywhere (ADR-IAM-001 §5.12):
+
+```powershell
+$keys = (Resolve-Path ..\identity-control\deploy\dev\keys).Path
+go run ./cmd/client-key new -out "$keys\organization-control-workload.pem"
+go run ./cmd/client-key new -out "$keys\identity-control-workload.pem"
+```
+
+### 8.2 Register the resource and the workloads in identity-control
+
+With a provider token from the running identity-control:
+
+```powershell
+. ./scripts/dev-token.ps1
+$token = Get-ScnehauxToken -Username bootstrap-operator -Password $env:IDENTITY_CALLER_PASSWORD -KeyFile $env:IDENTITY_CALLER_KEY_FILE
+$api = "http://127.0.0.1:8097"
+function Send($method, $path, $body, $key) {
+    $h = @{ Authorization = "Bearer $token"; "X-Administrative-Reason" = "wire provider authority locally" }
+    if ($key) { $h["Idempotency-Key"] = $key }
+    Invoke-RestMethod -Method $method -Uri "$api$path" -Headers $h -ContentType "application/json" -Body $body
+}
+$me = (Send GET "/v1/registrations:standing" $null $null)   # confirms the token is a provider's
+```
+
+Organization Control's resource, keyless (`TDD-organization-control-001` §Caller Authority):
+
+```powershell
+Send POST "/v1/registrations" '{"client_key":"organization-control-api","profile":"resource","audience_class":"privileged","application_ref":"organization-control","lifetime_class":"L0"}' "local-oc-resource"
+```
+
+The two workloads (`TDD-identity-control-004`), owned by the ceremony's Principal, each with the
+other side's resource as its audience:
+
+```powershell
+$owner = "<bootstrap-operator's principal_id, from the ceremony's output>"
+function Workload($key, $app, $audience, $purpose) {
+    $jwk = Get-Content "$keys\$key.jwk.json" -Raw | ConvertFrom-Json
+    $body = @{ display_name = $key; purpose = $purpose; workload_type = "service"; owner_principal_id = $owner
+        client_key = $key; application_ref = $app; audience = @($audience); public_key = $jwk } | ConvertTo-Json -Depth 4 -Compress
+    Send POST "/v1/workloads" $body "local-$key"
+}
+$oc = Workload "organization-control-workload" "organization-control" "identity-control-api" "Delivers provider grant events to the Identity Control API (ADR-GLB-018 §5.4)"
+$ic = Workload "identity-control-workload" "identity-control" "organization-control-api" "Reads Organization Control's provider authority snapshot and frontier (TDD-identity-control-006)"
+"organization-control-workload principal_id: $($oc.principal_id)"
+"identity-control-workload     principal_id: $($ic.principal_id)"
+```
+
+### 8.3 Organization Control's records, while it still verifies the dev issuer
+
+With `make token` (the dev provider) in the Organization Control checkout, and each body in a file.
+`make api` sends the `X-Administrative-Reason` the provider routes require. If it answers `403`, the
+dev provider holds no grant on this database: grant it once with `organization-control
+bootstrap-provider`, as Organization Control's README §Driving the service by hand describes.
+
+- `provider-grant.json`, an emergency `provider:identity-control` grant for the ceremony's
+  Principal. Projected, it retires the ceremony's grant (`TDD-identity-control-006` §The Ceremony's
+  Grant), and the Principal stays a provider through Organization's record:
+
+  ```json
+  {"principal_id":"<bootstrap-operator>","scope":"provider:identity-control","kind":"emergency"}
+  ```
+
+  `make api M=POST P=/v1/provider-grants B=provider-grant.json KEY=local-grant-ic`
+
+- `consumer.json`, identity-control as a projection consumer, its principal the workload from 8.2
+  (`TDD-identity-control-006` §Registration with Organization Control):
+
+  ```json
+  {"consumer_id":"identity-control","principal_id":"<identity-control-workload principal_id>",
+   "projection_version":"v1","max_accepted_age_seconds":60,"stale_behavior":"fail_closed",
+   "event_types":["com.scnehaux.organization.provider.lifecycle.granted","com.scnehaux.organization.provider.lifecycle.activated",
+                  "com.scnehaux.organization.provider.security.ended","com.scnehaux.organization.provider.security.revoked"]}
+  ```
+
+  `make api M=POST P=/v1/projections/consumers B=consumer.json KEY=local-consumer-ic`
+
+### 8.4 Switch Organization Control to the kernel
+
+In its `.env`, then restart it (`make run`); `make issuer` is no longer needed:
+
+```text
+ORGANIZATION_TOKEN_ISSUER=http://127.0.0.1:8081/realms/scnehaux
+ORGANIZATION_JWKS_URL=http://127.0.0.1:8081/realms/scnehaux/protocol/openid-connect/certs
+ORGANIZATION_TOKEN_AUDIENCE=organization-control-api
+ORGANIZATION_DELIVERY_TARGETS=identity-control=http://127.0.0.1:8097/v1/deliveries
+ORGANIZATION_WORKLOAD_CLIENT_ID=organization-control-workload
+ORGANIZATION_WORKLOAD_KEY_FILE=<absolute path to organization-control-workload.pem>
+ORGANIZATION_WORKLOAD_TOKEN_URL=http://127.0.0.1:8081/realms/scnehaux/protocol/openid-connect/token
+```
+
+`ORGANIZATION_CONSUMER_DATABASE_URL` and `ORGANIZATION_DISPATCH_DATABASE_URL` must be set as
+`.env.example` shows: the first admits identity-control's workload to the consumer routes, the
+second runs the dispatcher.
+
+### 8.5 Point identity-control at Organization Control
+
+In its `.env`, then restart it (`make run`):
+
+```text
+IDENTITY_DELIVERY_PRINCIPAL_ID=<organization-control-workload principal_id>
+IDENTITY_ORGANIZATION_BASE_URL=http://127.0.0.1:8099
+IDENTITY_WORKLOAD_CLIENT_ID=identity-control-workload
+IDENTITY_WORKLOAD_KEY_FILE=deploy/dev/keys/identity-control-workload.pem
+IDENTITY_WORKLOAD_TOKEN_URL=http://127.0.0.1:8081/realms/scnehaux/protocol/openid-connect/token
+IDENTITY_WORKLOAD_AUDIENCE=http://127.0.0.1:8081/realms/scnehaux
+```
+
+Then build the projection from the snapshot: `make provider-bootstrap`.
+
+### 8.6 What you should see
+
+- identity-control logs `the provider projection is fresh` within 15 seconds.
+- Organization Control's dispatcher delivers the grant from 8.3; `identity.ceremony_grant_retirement`
+  holds one row naming it, and the ceremony's Principal is a provider by `emergency` from now on
+  (each request logs `emergency provider authority used`).
+- Stopping Organization Control makes identity-control log the projection stale within a minute;
+  the emergency grant still authorizes, an activation would not.
+
 ## Known limits of this harness
 
 - **Setting the bootstrap credential is not a production step.** Step 2 of `dev-bootstrap.ps1`
