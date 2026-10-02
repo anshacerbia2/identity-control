@@ -167,9 +167,11 @@ if ($r.code -eq 201) {
     # before. It toggles, so a rerun on a long-lived server changes it back rather than proposing
     # the registered audience again.
     $current = $g.body | ConvertFrom-Json
-    $next = if (@($current.audience) -contains "smoke-orders") { @() } else { @("smoke-orders") }
-    $changeBody = @{ audience = $next; expected_version = $current.version } | ConvertTo-Json -Compress
-    if ($next.Count -eq 0) { $changeBody = "{`"audience`":[],`"expected_version`":$($current.version)}" }
+    # @(...) around the if: PowerShell unrolls a branch's array, so a bare if yields $null or a lone
+    # string rather than an array.
+    $next = @(if (@($current.audience) -notcontains "smoke-orders") { "smoke-orders" })
+    $audienceJson = if ($next.Count -eq 0) { "[]" } else { "[`"" + ($next -join "`",`"") + "`"]" }
+    $changeBody = "{`"audience`":$audienceJson,`"expected_version`":$($current.version)}"
     $change = New-Object System.Net.Http.HttpRequestMessage("POST", "$api/v1/registrations/$($web.registration_id)/changes")
     $change.Headers.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", $token)
     $change.Headers.Add("X-Administrative-Reason", "smoke: an audience change reaches the kernel")
