@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-003
   title: Protocol Client and Protected-Resource Registration
   owner: Core Platform Team
-  version: 1.23.0
+  version: 1.24.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-11
-  last_reviewed: 2026-10-01
+  last_reviewed: 2026-10-02
   parent_sad: SAD-001
 ---
 
@@ -1240,8 +1240,30 @@ A client_key a Keycloak client already holds retires it, as registration does, a
 stays the record of what was approved.
 
 **Outside production there is nothing to request**: an application developer registers directly,
-and the API says so. A provider still creates production registrations directly, and
-§Open Questions records whether it should request them too.
+and the API says so.
+
+**A provider registers directly, and each production one is reported** (`ADR-IAM-003 §5.3`,
+§5.7). Registration, the workload path and adoption create a provider's production registration
+without a request, as Entra's Application Administrator "can create and manage all aspects of …
+application registrations" [R1]. Each one logs at WARN, after it commits: *a provider registered a
+production client directly, without a second person's approval*, with its `path`
+(`registration`, `workload` or `adoption`), `client_key`, `registration_id` and `registered_by`.
+A registration an approved request created is not reported: a second provider decided it.
+
+The tradeoff, stated rather than hidden: one provider, or one compromised provider account,
+registers a production client alone, and Entra itself notes that an application administrator
+"can add credentials to an application and use those credentials to impersonate the
+application's identity" [R1]. The report makes each one visible to a review and an alert; it
+prevents nothing. Requiring a request of providers too was rejected (`ADR-IAM-003` Alternative E).
+It would put a second person in front of every workload, adoption and incident replacement. It
+would also constrain only registration, while the established control constrains everything a
+provider does: approval when administrative authority is activated, by "at least two approvers"
+[R2]. That is the backlog item `ADR-IAM-003 §5.7` names.
+
+| Ref | Source |
+| :-- | :-- |
+| R1 | Microsoft, *Delegate application management administrator permissions*, <https://learn.microsoft.com/en-us/entra/identity/role-based-access-control/delegate-app-roles>, accessed 2026-10-02 |
+| R2 | Microsoft, *Configure Microsoft Entra role settings in PIM*, <https://learn.microsoft.com/en-us/entra/id-governance/privileged-identity-management/pim-how-to-change-default-settings>, accessed 2026-10-02 |
 
 `GET /v1/registration-requests` is the approval queue, oldest first. `:mine` lists the caller's own
 requests, newest first, at most 100.
@@ -1478,6 +1500,8 @@ two creates nothing.
   approval creates the registration, grants its owners and records the request approved, together.
 - An owner who stopped being an active person refuses the approval, and nothing is created.
 - Only the proposer withdraws; a provider rejects with a reason.
+- A provider's direct production registration logs the report, with its path, client and
+  registrant; one outside production, and one an approved request created, do not.
 
 ### Lifecycle
 
@@ -1569,6 +1593,7 @@ authentication.
 | Last registration sweep finished | older than 2 intervals | older than 4 intervals, or `unresolved` twice in a row |
 | Registration with `application_authority = manual` | tracked as debt | — |
 | Registration change awaiting approval | older than 3 days | older than 7 days |
+| Production registration a provider created directly | any occurrence, reviewed | — |
 
 Runbooks required before production: unmanaged client triage, client key rotation,
 compromised client key, expired client key recovery, and registration drift repair.
@@ -1597,12 +1622,7 @@ compromised client key, expired client key recovery, and registration drift repa
 
 ### Open Questions
 
-1. Whether a provider's own production registration should be requested and approved too.
-   `ADR-IAM-003 §5.3` says a production registration is created only by approval. Today a provider
-   creates one directly, as the workload path and adoption do; requiring approval of them changes
-   both, and is the owner's decision.
-
-2. The Application reference authority. `manual` is the interim, and every registration
+1. The Application reference authority. `manual` is the interim, and every registration
    carrying it is tracked as debt. When Software Catalog is chartered, the authority
    name changes and existing references are reconciled against it rather than
    re-entered.
