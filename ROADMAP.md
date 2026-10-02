@@ -510,7 +510,8 @@ Acceptance criteria, also from RESPONSE-4 §4:
   - An owner proposes and withdraws on a registration it owns. Approving, rejecting and the queue are a provider's, and an owner is refused before anything is read.
   - Changes waiting past three days log at WARN, and past seven at ERROR, before each sweep.
   - The Developer Console proposes and withdraws, and the Admin Portal approves and rejects, in identity-experience#22.
-  - Not built yet: audience and lifetime-class changes. The kernel carries a client's audience as protocol mappers written at creation, and a lifetime class changes every client whose audience names it.
+  - Audience changes, the `audience` kind of a change (TDD-identity-control-003 1.26.0): an owner adds only resources it owns and always removes, a provider adds any registered resource, approved in production by another provider. The apply makes the client's audience mappers exactly the declared set, a hand-made one removed, and re-derives the lifespan. It is how callers move to `identity-control-api` (STD-IAM-002 §3.1).
+  - Not built yet: lifetime-class changes, which change every client whose audience names the resource, and the drift sweep comparing audience mappers.
 - ✅ **Application developer standing, non-production creation** (ADR-IAM-003 §5.3; TDD-003 1.21.0 §Application Developers): `identity.application_developer`, and `GET`/`POST /v1/application-developers` and `:revoke`, a provider's.
   - The standing is granted and revoked by a provider with a reason. It is held only by an active human Principal, counted only while the mapping is active, and insert-only but for its revocation columns.
   - `POST /v1/registrations` admits a caller holding the standing. A caller without it is refused before the body is read. Such a caller registers only:

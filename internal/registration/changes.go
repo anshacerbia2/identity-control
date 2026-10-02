@@ -1,7 +1,7 @@
 package registration
 
 // Registration changes (ADR-IAM-003 §5.2, TDD-identity-control-003 §Registration Changes): a
-// change to a registration's redirect URIs, proposed by an owner or a provider. In non-production
+// change to a registration's redirect URIs or its audience, proposed by an owner or a provider. In non-production
 // it is applied at once. In production it waits until a provider other than its proposer approves
 // it, a rule the database holds as well as this code. A change is pinned to the version it was
 // proposed against, so what the approver sees is what the proposer saw, and nothing is deleted: a
@@ -37,6 +37,12 @@ const (
 	ChangeCriticalAge = 7 * 24 * time.Hour
 )
 
+// The kinds of change.
+const (
+	ChangeRedirectURIs = "redirect_uris"
+	ChangeAudience     = "audience"
+)
+
 // The decisions on a proposed change.
 const (
 	DecisionApprove  = "approve"
@@ -67,6 +73,10 @@ var (
 	// ErrNotProposer is a withdrawal by anyone but the change's proposer.
 	ErrNotProposer = errors.New("registration: only the proposer withdraws a change")
 
+	// ErrNotResourceOwner is an owner's audience change adding a resource it does not own: that
+	// resource's owners did not agree to this client. A provider adds any registered resource.
+	ErrNotResourceOwner = errors.New("registration: an owner adds to an audience only resources it owns")
+
 	// ErrSuperseded is an approval of a change whose registration moved since it was proposed. The
 	// change is recorded superseded, and is proposed again against the registration as it is.
 	ErrSuperseded = errors.New("registration: the registration changed since this was proposed; propose it again")
@@ -78,8 +88,11 @@ type Change struct {
 	Registration         id.UUID    `json:"registration_id"`
 	ClientKey            string     `json:"client_key"`
 	BaseVersion          int64      `json:"base_version"`
+	Kind                 string     `json:"kind"`
 	PreviousRedirectURIs []string   `json:"previous_redirect_uris"`
 	RedirectURIs         []string   `json:"redirect_uris"`
+	PreviousAudience     []string   `json:"previous_audience"`
+	Audience             []string   `json:"audience"`
 	ApprovalRequired     bool       `json:"approval_required"`
 	ProposedBy           id.UUID    `json:"proposed_by"`
 	ProposalReason       string     `json:"proposal_reason"`
@@ -90,14 +103,27 @@ type Change struct {
 	DecidedAt            *time.Time `json:"decided_at"`
 }
 
-// Proposal is a change asked for: the redirect URIs the registration should have, the version the
-// caller read, who asks and why.
+// Proposal is a change asked for: the redirect URIs or the audience the registration should have,
+// the version the caller read, who asks and why. Exactly one of RedirectURIs and Audience is set.
 type Proposal struct {
 	RegistrationID  id.UUID
 	RedirectURIs    []string
+	Audience        *[]string
 	ExpectedVersion int64
 	ProposedBy      id.UUID
 	Reason          string
+
+	// Provider is whether the proposer holds provider authority, which adds any registered resource
+	// to an audience. An owner adds only resources it owns.
+	Provider bool
+}
+
+// kind is what the proposal changes.
+func (p Proposal) kind() string {
+	if p.Audience != nil {
+		return ChangeAudience
+	}
+	return ChangeRedirectURIs
 }
 
 func (p Proposal) validate() error {
@@ -108,6 +134,10 @@ func (p Proposal) validate() error {
 		return fmt.Errorf("%w: expected_version is the registration's version as read, and is required", ErrInvalid)
 	case strings.TrimSpace(p.Reason) == "":
 		return fmt.Errorf("%w: a change requires a reason", ErrInvalid)
+	case p.Audience != nil && p.RedirectURIs != nil:
+		return fmt.Errorf("%w: a change is to redirect_uris or to audience, not both", ErrInvalid)
+	case p.Audience != nil:
+		return validateAudience(*p.Audience)
 	case len(p.RedirectURIs) == 0:
 		return fmt.Errorf("%w: a public or confidential client needs at least one redirect URI", ErrInvalid)
 	}
@@ -122,6 +152,29 @@ func (p Proposal) validate() error {
 		seen[uri] = true
 	}
 	return nil
+}
+
+// validateAudience applies the rules that need nothing but the list: each entry a client_key, named
+// once. Whether each is a registered resource is read in the proposal's transaction.
+func validateAudience(audience []string) error {
+	seen := map[string]bool{}
+	for _, resource := range audience {
+		if !clientKeyPattern.MatchString(resource) {
+			return fmt.Errorf("%w: an audience entry is not a client_key", ErrInvalid)
+		}
+		if seen[resource] {
+			return fmt.Errorf("%w: an audience names a resource twice", ErrInvalid)
+		}
+		seen[resource] = true
+	}
+	return nil
+}
+
+// sortedAudience is the audience as it is stored and compared: its order carries no meaning.
+func sortedAudience(audience []string) []string {
+	out := append([]string{}, audience...)
+	slices.Sort(out)
+	return out
 }
 
 // Decision is an approval, a rejection or a withdrawal of one change.
@@ -146,7 +199,7 @@ func (d Decision) validate() error {
 }
 
 const lockChangedRegistrationStatement = `SELECT profile, state, coalesce(kc_client_id, ''), version,
-       coalesce(redirect_uris, '{}'::text[])
+       coalesce(redirect_uris, '{}'::text[]), client_key, coalesce(audience, '{}'::text[])
 FROM identity.client_registration
 WHERE registration_id = $1 AND realm = $2
 FOR UPDATE`
@@ -157,6 +210,8 @@ type changedRegistration struct {
 	client       keycloak.ClientUUID
 	version      int64
 	redirectURIs []string
+	clientKey    string
+	audience     []string
 }
 
 func (s *Service) lockChanged(ctx context.Context, tx db.Tx, registrationID id.UUID) (changedRegistration, error) {
@@ -175,15 +230,18 @@ func (s *Service) lockChanged(ctx context.Context, tx db.Tx, registrationID id.U
 		locked changedRegistration
 		client string
 	)
-	if err := rows.Scan(&locked.profile, &locked.state, &client, &locked.version, &locked.redirectURIs); err != nil {
+	if err := rows.Scan(&locked.profile, &locked.state, &client, &locked.version, &locked.redirectURIs,
+		&locked.clientKey, &locked.audience); err != nil {
 		return changedRegistration{}, fmt.Errorf("registration: scan the registration: %w", err)
 	}
 	locked.client = keycloak.ClientUUID(client)
+	locked.audience = sortedAudience(locked.audience)
 	return locked, nil
 }
 
-var changeColumns = `c.change_id::text, c.registration_id::text, r.client_key, c.base_version,
-       c.previous_redirect_uris, c.redirect_uris, c.approval_required, c.proposed_by::text,
+var changeColumns = `c.change_id::text, c.registration_id::text, r.client_key, c.base_version, c.kind,
+       c.previous_redirect_uris, c.redirect_uris, c.previous_audience, c.audience,
+       c.approval_required, c.proposed_by::text,
        c.proposal_reason, c.proposed_at, c.state, coalesce(c.decided_by::text, ''),
        coalesce(c.decision_reason, ''), c.decided_at`
 
@@ -211,9 +269,9 @@ WHERE r.realm = $1 AND c.state = 'proposed'
 ORDER BY c.proposed_at, c.change_id`
 
 const insertChangeStatement = `INSERT INTO identity.registration_change
-    (change_id, registration_id, base_version, previous_redirect_uris, redirect_uris, approval_required,
-     proposed_by, proposal_reason, proposed_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`
+    (change_id, registration_id, base_version, kind, previous_redirect_uris, redirect_uris,
+     previous_audience, audience, approval_required, proposed_by, proposal_reason, proposed_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`
 
 const decideChangeStatement = `UPDATE identity.registration_change
 SET state = $2, decided_by = $3, decision_reason = $4, decided_at = $5
@@ -223,14 +281,23 @@ const changeRedirectsStatement = `UPDATE identity.client_registration
 SET redirect_uris = $2, version = version + 1
 WHERE registration_id = $1`
 
+const changeAudienceStatement = `UPDATE identity.client_registration
+SET audience = $2, version = version + 1
+WHERE registration_id = $1`
+
+// audienceLifespanStatement is the lifespan an audience derives (STD-IAM-002 §3.3), read before the
+// kernel is patched with it.
+var audienceLifespanStatement = `SELECT ` + LifespanSQL("$1", "$2::text[]")
+
 func scanChange(row interface{ Scan(dest ...any) error }) (Change, error) {
 	var (
 		change                             Change
 		changeID, registrationID, proposer string
 		decidedBy                          string
 	)
-	if err := row.Scan(&changeID, &registrationID, &change.ClientKey, &change.BaseVersion,
-		&change.PreviousRedirectURIs, &change.RedirectURIs, &change.ApprovalRequired, &proposer,
+	if err := row.Scan(&changeID, &registrationID, &change.ClientKey, &change.BaseVersion, &change.Kind,
+		&change.PreviousRedirectURIs, &change.RedirectURIs, &change.PreviousAudience, &change.Audience,
+		&change.ApprovalRequired, &proposer,
 		&change.ProposalReason, &change.ProposedAt, &change.State, &decidedBy,
 		&change.DecisionReason, &change.DecidedAt); err != nil {
 		return Change{}, err
@@ -305,15 +372,23 @@ func (s *Service) ProposeChange(ctx context.Context, proposal Proposal) (Change,
 		if err != nil {
 			return err
 		}
+		kind := proposal.kind()
+		var audience []string
+		if kind == ChangeAudience {
+			audience = sortedAudience(*proposal.Audience)
+		}
 		switch {
-		case locked.profile != ProfilePublic && locked.profile != ProfileConfidential:
+		case kind == ChangeRedirectURIs && locked.profile != ProfilePublic && locked.profile != ProfileConfidential:
 			return fmt.Errorf("%w: only a public or confidential client has redirect URIs", ErrInvalid)
+		case kind == ChangeAudience && locked.profile == ProfileResource:
+			return fmt.Errorf("%w: a resource has no audience", ErrInvalid)
 		case locked.state != StateActive:
 			return fmt.Errorf("%w: only an active registration is changed; this one is %s", ErrInvalidTransition, locked.state)
 		}
 		open, err := readChange(ctx, tx, openChangeStatement, proposal.RegistrationID.String())
 		switch {
-		case err == nil && open.ProposedBy == proposal.ProposedBy && slices.Equal(open.RedirectURIs, proposal.RedirectURIs):
+		case err == nil && open.ProposedBy == proposal.ProposedBy && open.Kind == kind &&
+			slices.Equal(open.RedirectURIs, proposal.RedirectURIs) && slices.Equal(open.Audience, audience):
 			change = open
 			return nil
 		case err == nil:
@@ -325,8 +400,15 @@ func (s *Service) ProposeChange(ctx context.Context, proposal Proposal) (Change,
 		case locked.version != proposal.ExpectedVersion:
 			return fmt.Errorf("%w: expected version %d, the registration is at %d",
 				ErrVersionConflict, proposal.ExpectedVersion, locked.version)
-		case slices.Equal(locked.redirectURIs, proposal.RedirectURIs):
+		case kind == ChangeRedirectURIs && slices.Equal(locked.redirectURIs, proposal.RedirectURIs):
 			return fmt.Errorf("%w: these are the registered redirect URIs already", ErrInvalid)
+		case kind == ChangeAudience && slices.Equal(locked.audience, audience):
+			return fmt.Errorf("%w: this is the registered audience already", ErrInvalid)
+		}
+		if kind == ChangeAudience {
+			if err := s.admitAudience(ctx, tx, locked, audience, proposal); err != nil {
+				return err
+			}
 		}
 
 		changeID, err := s.newID()
@@ -334,15 +416,22 @@ func (s *Service) ProposeChange(ctx context.Context, proposal Proposal) (Change,
 			return fmt.Errorf("registration: mint change_id: %w", err)
 		}
 		at := s.now()
+		var previousRedirects, redirects, previousAudience, nextAudience any
+		if kind == ChangeRedirectURIs {
+			previousRedirects, redirects = locked.redirectURIs, proposal.RedirectURIs
+		} else {
+			previousAudience, nextAudience = locked.audience, audience
+		}
 		if _, err := tx.Exec(ctx, insertChangeStatement, changeID.String(), proposal.RegistrationID.String(),
-			locked.version, locked.redirectURIs, proposal.RedirectURIs, s.cfg.Production,
+			locked.version, kind, previousRedirects, redirects, previousAudience, nextAudience, s.cfg.Production,
 			proposal.ProposedBy.String(), strings.TrimSpace(proposal.Reason), at); err != nil {
 			return fmt.Errorf("registration: record the change: %w", err)
 		}
 		created = true
 		if !s.cfg.Production {
 			// No approval is required, so the proposer's own reason is the decision's.
-			if err := s.apply(ctx, tx, locked, proposal.RegistrationID, proposal.RedirectURIs); err != nil {
+			pending := Change{Kind: kind, RedirectURIs: proposal.RedirectURIs, Audience: audience}
+			if err := s.apply(ctx, tx, locked, proposal.RegistrationID, pending); err != nil {
 				return err
 			}
 			if err := decide(ctx, tx, changeID, ChangeApplied, proposal.ProposedBy, proposal.Reason, at); err != nil {
@@ -397,7 +486,7 @@ func (s *Service) DecideChange(ctx context.Context, decision Decision, provider 
 			case locked.version != current.BaseVersion || locked.state != StateActive:
 				state, superseded = ChangeSuperseded, true
 			default:
-				if err := s.apply(ctx, tx, locked, decision.RegistrationID, current.RedirectURIs); err != nil {
+				if err := s.apply(ctx, tx, locked, decision.RegistrationID, current); err != nil {
 					return err
 				}
 				state = ChangeApplied
@@ -429,10 +518,50 @@ func decide(ctx context.Context, tx db.Tx, changeID id.UUID, state string, by id
 	return nil
 }
 
-// apply writes the redirect URIs into desired state and the kernel client, under the row lock the
-// caller holds. The kernel is written before the commit, as a restore writes it: a kernel that
-// refuses or does not answer rolls the change back, and the caller retries.
-func (s *Service) apply(ctx context.Context, tx db.Tx, locked changedRegistration, registrationID id.UUID, uris []string) error {
+// admitAudience refuses an audience entry that is not an active registered resource, or that is the
+// registration itself, and an owner's addition of a resource it does not own. Removing is never
+// refused: a narrower audience only takes access away.
+func (s *Service) admitAudience(ctx context.Context, tx db.Tx, locked changedRegistration, audience []string, proposal Proposal) error {
+	if slices.Contains(audience, locked.clientKey) {
+		return fmt.Errorf("%w: a registration is not its own audience", ErrInvalid)
+	}
+	var unregistered int
+	if err := tx.QueryRow(ctx, unregisteredAudienceStatement, string(s.cfg.Realm), audience).Scan(&unregistered); err != nil {
+		return fmt.Errorf("registration: read the audience: %w", err)
+	}
+	if unregistered > 0 {
+		return fmt.Errorf("%w: an audience names only active registered resources", ErrInvalid)
+	}
+	if proposal.Provider {
+		return nil
+	}
+	var added []string
+	for _, resource := range audience {
+		if !slices.Contains(locked.audience, resource) {
+			added = append(added, resource)
+		}
+	}
+	if len(added) == 0 {
+		return nil
+	}
+	var owned int
+	if err := tx.QueryRow(ctx, ownsAllStatement, string(s.cfg.Realm), proposal.ProposedBy.String(), added).Scan(&owned); err != nil {
+		return fmt.Errorf("registration: read the audience's owners: %w", err)
+	}
+	if owned != len(added) {
+		return ErrNotResourceOwner
+	}
+	return nil
+}
+
+// apply writes the change into desired state and the kernel client, under the row lock the caller
+// holds. The kernel is written before the commit, as a restore writes it: a kernel that refuses or
+// does not answer rolls the change back, and the caller retries.
+func (s *Service) apply(ctx context.Context, tx db.Tx, locked changedRegistration, registrationID id.UUID, change Change) error {
+	if change.Kind == ChangeAudience {
+		return s.applyAudience(ctx, tx, locked, registrationID, change.Audience)
+	}
+	uris := change.RedirectURIs
 	if _, err := tx.Exec(ctx, changeRedirectsStatement, registrationID.String(), uris); err != nil {
 		return fmt.Errorf("registration: write the redirect URIs: %w", err)
 	}
@@ -444,6 +573,29 @@ func (s *Service) apply(ctx context.Context, tx db.Tx, locked changedRegistratio
 		return struct{}{}, s.kernel.PatchClient(ctx, s.cfg.Realm, locked.client, keycloak.ClientPatch{RedirectURIs: &redirects})
 	}); err != nil {
 		return fmt.Errorf("registration: write the redirect URIs to the client: %w", err)
+	}
+	return nil
+}
+
+// applyAudience writes the audience and the lifespan it derives, and makes the kernel client's
+// audience mappers exactly that set (TDD-identity-control-003 §Registration Changes).
+func (s *Service) applyAudience(ctx context.Context, tx db.Tx, locked changedRegistration, registrationID id.UUID, audience []string) error {
+	audience = sortedAudience(audience)
+	if _, err := tx.Exec(ctx, changeAudienceStatement, registrationID.String(), audience); err != nil {
+		return fmt.Errorf("registration: write the audience: %w", err)
+	}
+	if locked.client == "" {
+		return nil
+	}
+	var lifespan int
+	if err := tx.QueryRow(ctx, audienceLifespanStatement, string(s.cfg.Realm), audience).Scan(&lifespan); err != nil {
+		return fmt.Errorf("registration: derive the lifespan: %w", err)
+	}
+	if _, err := call(ctx, s.cfg.CallTimeout, func(ctx context.Context) (struct{}, error) {
+		return struct{}{}, s.kernel.PatchClient(ctx, s.cfg.Realm, locked.client,
+			keycloak.ClientPatch{Audience: &audience, AccessTokenLifespan: &lifespan})
+	}); err != nil {
+		return fmt.Errorf("registration: write the audience to the client: %w", err)
 	}
 	return nil
 }

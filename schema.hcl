@@ -1405,7 +1405,7 @@ table "registration_owner" {
 
 table "registration_change" {
   schema  = schema.identity
-  comment = "A change to a registration's redirect URIs, proposed, then applied or decided against. TDD-identity-control-003."
+  comment = "A change to a registration's redirect URIs or audience, proposed, then applied or decided against. TDD-identity-control-003."
 
   column "change_id" {
     null = false
@@ -1424,14 +1424,32 @@ table "registration_change" {
     type = bigint
   }
 
+  // What the change is to. Each kind fills its own pair of columns and leaves the other null.
+  column "kind" {
+    null    = false
+    type    = text
+    default = "redirect_uris"
+  }
+
   // The registered set when the change was proposed: the before of the preview the approver sees.
   column "previous_redirect_uris" {
-    null = false
+    null = true
     type = sql("text[]")
   }
 
   column "redirect_uris" {
-    null = false
+    null = true
+    type = sql("text[]")
+  }
+
+  // The registered audience when the change was proposed, and the audience proposed, each sorted.
+  column "previous_audience" {
+    null = true
+    type = sql("text[]")
+  }
+
+  column "audience" {
+    null = true
     type = sql("text[]")
   }
 
@@ -1509,6 +1527,10 @@ table "registration_change" {
 
   check "registration_change_redirects_check" {
     expr = "cardinality(redirect_uris) > 0"
+  }
+
+  check "registration_change_kind_check" {
+    expr = "(kind = ANY (ARRAY['redirect_uris'::text, 'audience'::text])) AND ((kind = 'redirect_uris'::text) = ((redirect_uris IS NOT NULL) AND (previous_redirect_uris IS NOT NULL))) AND ((kind = 'audience'::text) = ((audience IS NOT NULL) AND (previous_audience IS NOT NULL)))"
   }
 
   check "registration_change_reason_check" {
