@@ -48,6 +48,10 @@ $appPassword    = Require-Env "IDENTITY_APP_PASSWORD"
 # The service's Admin API client authenticates with the key dev-keycloak.ps1 made. It has no secret.
 $serviceKey = Join-Path $PSScriptRoot "..\deploy\dev\keys\identity-control.pem"
 if (-not (Test-Path $serviceKey)) { throw "$serviceKey is missing; run ./scripts/dev-keycloak.ps1 first" }
+# The ceremony also registers this service's resource, through the registration path's own client
+# (ADR-IAM-001 5.11 rule 5).
+$registrationKey = Join-Path $PSScriptRoot "..\deploy\dev\keys\identity-control-registration.pem"
+if (-not (Test-Path $registrationKey)) { throw "$registrationKey is missing; create the registration client first" }
 $kcPassword     = Require-Env "KC_ADMIN_PASSWORD"
 $callerPassword = Require-Env "IDENTITY_CALLER_PASSWORD"
 
@@ -68,6 +72,10 @@ $env:IDENTITY_KEYCLOAK_REALM = $realm
 $env:IDENTITY_KEYCLOAK_BASE_URL = $kcBase
 $env:IDENTITY_KEYCLOAK_CLIENT_ID = "identity-control"
 $env:IDENTITY_KEYCLOAK_CLIENT_KEY_FILE = (Resolve-Path $serviceKey).Path
+$env:IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID = "identity-control-registration"
+$env:IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_KEY_FILE = (Resolve-Path $registrationKey).Path
+# The resource the ceremony registers is the audience the service verifies, so both read one name.
+$env:IDENTITY_TOKEN_AUDIENCE = "identity-control-api"
 
 $arguments = @(
     "run", "./cmd/identity-bootstrap",

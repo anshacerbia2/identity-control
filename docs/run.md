@@ -136,6 +136,14 @@ The registry is left empty. This script writes no Principal.
 ./scripts/dev-bootstrap.ps1 -Operator 'you@example.com' -Reason 'initial local stand-up'
 ```
 
+It also registers this service's resource, `identity-control-api`, which every caller's token
+names in `aud` (`ADR-IAM-001 §5.11` rule 5, STD-IAM-002 §3.1). A local realm whose ceremony ran
+before that rule registers it with `-Resume`, after `./scripts/dev-keycloak.ps1` has added the
+caller's `audience-identity-control-api` mapper; then set `IDENTITY_TOKEN_AUDIENCE` to
+`identity-control-api` and restart the service. Once the caller is adopted, an audience change
+(`TDD-identity-control-003` §Registration Changes) removes its old `identity-control-audience`
+mapper.
+
 This is the entry point into a realm with no Principals. `POST /v1/principals` requires a caller
 holding a `principal_id` and is the only path that issues one, so without the ceremony the API
 cannot be reached at all. `ADR-IAM-001 §5.11` records the decision and why a standing break-glass
@@ -190,7 +198,7 @@ $env:IDENTITY_KEYCLOAK_CLIENT_KEY_FILE = (Resolve-Path deploy/dev/keys/identity-
 $env:IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID       = 'identity-control-registration'
 $env:IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_KEY_FILE = (Resolve-Path deploy/dev/keys/identity-control-registration.pem).Path
 $env:IDENTITY_TOKEN_ISSUER           = 'http://127.0.0.1:8081/realms/scnehaux'
-$env:IDENTITY_TOKEN_AUDIENCE         = 'identity-control'
+$env:IDENTITY_TOKEN_AUDIENCE         = 'identity-control-api'
 $env:IDENTITY_JWKS_URL               = 'http://127.0.0.1:8081/realms/scnehaux/protocol/openid-connect/certs'
 $env:LOG_LEVEL                       = 'debug'
 
