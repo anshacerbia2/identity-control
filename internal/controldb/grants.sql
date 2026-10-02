@@ -42,6 +42,7 @@ BEGIN
               ('identity.registration_owner'),
               ('identity.registration_change'),
               ('identity.application_developer'),
+              ('identity.registration_request'),
               ('identity.principal_relink'),
               ('identity.principal_finding'),
               ('platform.outbox'),
@@ -147,6 +148,12 @@ GRANT UPDATE (state, decided_by, decision_reason, decided_at) ON identity.regist
 -- reason, never deleted, and only its revocation written after the grant.
 REVOKE UPDATE, DELETE, TRUNCATE ON identity.application_developer FROM identity_runtime;
 GRANT UPDATE (revoked_at, revoked_by, revoke_reason) ON identity.application_developer TO identity_runtime;
+
+-- A registration request says who asked for which production client, naming which owners, and
+-- why (ADR-IAM-003 §5.3). Its document and its proposer are never rewritten and nothing deletes
+-- one: only its decision, and the registration an approval created, are written after it.
+REVOKE UPDATE, DELETE, TRUNCATE ON identity.registration_request FROM identity_runtime;
+GRANT UPDATE (state, decided_by, decision_reason, decided_at, registration_id) ON identity.registration_request TO identity_runtime;
 
 -- A relink record says who moved a Principal to a new Keycloak user and why, so it is insert-only.
 -- A dangling-mapping finding is evidence that a user disappeared, kept after it is resolved.

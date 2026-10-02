@@ -140,6 +140,12 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	api.HandleFunc("GET /v1/application-developers", p(cfg.Registrations.ApplicationDevelopers))
 	api.HandleFunc("POST /v1/application-developers", p(cfg.Registrations.GrantApplicationDeveloper))
 	api.HandleFunc("POST /v1/application-developers/{developer_action}", p(cfg.Registrations.DeveloperAction))
+	// A request is a provider's or an application developer's; approving, rejecting and the queue
+	// are a provider's, refused to anyone else in the handler, and withdrawing is the proposer's.
+	api.HandleFunc("POST /v1/registration-requests", creator(cfg.Registrations.ProposeRegistration))
+	api.HandleFunc("GET /v1/registration-requests", p(cfg.Registrations.RequestQueue))
+	api.HandleFunc("GET /v1/registration-requests:mine", creator(cfg.Registrations.MyRequests))
+	api.HandleFunc("POST /v1/registration-requests/{request_action}", creator(cfg.Registrations.RequestAction))
 	api.HandleFunc("POST /v1/workloads", p(cfg.Workloads.CreateWorkload))
 	api.HandleFunc("GET /v1/workloads/{target}", p(cfg.Workloads.GetWorkload))
 	api.HandleFunc("POST /v1/workloads/{target}", p(cfg.Workloads.WorkloadAction))

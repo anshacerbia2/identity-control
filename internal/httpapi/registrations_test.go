@@ -345,6 +345,10 @@ type stubRegistrar struct {
 	developers map[id.UUID]bool
 	devChange  *registration.DeveloperChange
 	devRevoked bool
+
+	// The registration request surface.
+	regProposal *registration.RegistrationProposal
+	regDecision *registration.RequestDecision
 }
 
 func (s *stubRegistrar) lifecycle(action string, change registration.StateChange) (registration.Registration, error) {
@@ -442,6 +446,24 @@ func (s *stubRegistrar) GrantApplicationDeveloper(_ context.Context, change regi
 func (s *stubRegistrar) RevokeApplicationDeveloper(_ context.Context, change registration.DeveloperChange) error {
 	s.devChange, s.devRevoked = &change, true
 	return s.err
+}
+
+func (s *stubRegistrar) ProposeRegistration(_ context.Context, proposal registration.RegistrationProposal) (registration.RegistrationRequest, bool, error) {
+	s.regProposal = &proposal
+	return registration.RegistrationRequest{ClientKey: proposal.Request.ClientKey, State: "proposed"}, !s.replayed, s.err
+}
+
+func (s *stubRegistrar) DecideRegistration(_ context.Context, decision registration.RequestDecision, provider bool) (registration.RegistrationRequest, error) {
+	s.regDecision, s.asProvider = &decision, provider
+	return registration.RegistrationRequest{ID: decision.RequestID, State: "approved"}, s.err
+}
+
+func (s *stubRegistrar) RequestQueue(context.Context) ([]registration.RegistrationRequest, error) {
+	return []registration.RegistrationRequest{}, s.readErr
+}
+
+func (s *stubRegistrar) MyRequests(context.Context, id.UUID) ([]registration.RegistrationRequest, error) {
+	return []registration.RegistrationRequest{}, s.readErr
 }
 
 func (s *stubRegistrar) Adopt(_ context.Context, req registration.AdoptRequest) (registration.AdoptResult, error) {

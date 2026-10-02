@@ -76,6 +76,12 @@ type Registrar interface {
 	ApplicationDevelopers(ctx context.Context) ([]registration.Developer, error)
 	GrantApplicationDeveloper(ctx context.Context, change registration.DeveloperChange) error
 	RevokeApplicationDeveloper(ctx context.Context, change registration.DeveloperChange) error
+
+	// Registration requests (ADR-IAM-003 §5.3, TDD-identity-control-003 §Registration Requests).
+	ProposeRegistration(ctx context.Context, proposal registration.RegistrationProposal) (registration.RegistrationRequest, bool, error)
+	DecideRegistration(ctx context.Context, decision registration.RequestDecision, provider bool) (registration.RegistrationRequest, error)
+	RequestQueue(ctx context.Context) ([]registration.RegistrationRequest, error)
+	MyRequests(ctx context.Context, principal id.UUID) ([]registration.RegistrationRequest, error)
 }
 
 // Registrations serves the registration and drift routes.

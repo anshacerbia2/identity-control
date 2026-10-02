@@ -515,7 +515,14 @@ Acceptance criteria, also from RESPONSE-4 §4:
     - an audience naming only resources it owns.
   - It becomes the registration's first owner in the same transaction. The standing is read again there, so one revoked between the two reads creates nothing.
   - `GET /v1/registrations:standing` answers any caller with its own standing and the environment, so a console offers registration only where the API accepts it.
-  - Not built yet: production creation by approval, naming at least two owners (ADR-IAM-003 §5.3); the screens for granting the standing and for registering.
+  - identity-experience#23 grants the standing in the Admin Portal and registers from the Developer Console.
+- ✅ **Production registration by request** (ADR-IAM-003 §5.3; TDD-003 1.23.0 §Registration Requests): `identity.registration_request`, and `POST /v1/registration-requests`, `GET` (the provider's approval queue), `:mine`, `:approve`, `:reject`, `:withdraw`.
+  - In production an application developer requests a registration, naming at least two owners, with a reason. The request is held to the developer's bounds and validated as registration validates. A private key is refused, and the stored key is its public members only.
+  - A provider other than the proposer approves it; a check constraint holds that in the database too. The approval registers the document as the proposer's, under the request as its Idempotency-Key. The approval, the owners' grants and the reservation commit together, and an owner who stopped being an active person refuses the approval.
+  - One open request per client_key, and the same request retried returns it. Only the proposer withdraws.
+  - Outside production nothing is requested: a developer registers directly. In production a developer no longer registers directly.
+  - Open question for the owner (TDD-003 §Open Questions): whether a provider's own production registrations should be requested and approved too.
+  - Not built yet: the screens, in identity-experience.
 - ✅ **Workload lifecycle** (TDD-004 1.4.0 §Suspension, Restoration, and Retirement): `POST /v1/workloads/{id}:suspend`, `:restore` and `:retire`, each with a reason.
   - The client and the Principal stop together: the workload lifecycle holds the workload's row lock and changes its registration in the same transaction, through the registration package's `…WorkloadWithin` seams, because the registration lifecycle still refuses a workload's client.
   - A suspension commits, then disables the client and sets its not-before. A restore is refused while the owner is not an active human Principal (reassign first), and writes the client back inside its transaction. A retirement, only after a suspension, deletes the client, revokes its keys, and retires the Principal's mapping, so the dangling sweep does not report the deleted service-account user.
