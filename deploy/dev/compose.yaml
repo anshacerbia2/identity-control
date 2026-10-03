@@ -29,6 +29,9 @@ services:
     build:
       context: ../..
       target: migrate
+    # Named, so every one-off task below runs this image and `up --build` rebuilds them with the
+    # release (STD-GLB-009 §Development Server Deployment).
+    image: scnehaux-identity-control-dev-migrate
     restart: "no"
     environment:
       POSTGRES_SUPER_URL: postgres://postgres:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432
@@ -42,9 +45,7 @@ services:
   # what the profile is for. It uses the runtime credential, not the migration one: a ceremony able
   # to alter the schema could remove the constraint that makes it single-use.
   bootstrap:
-    build:
-      context: ../..
-      target: migrate
+    image: scnehaux-identity-control-dev-migrate
     profiles: ["ceremony"]
     entrypoint: ["identity-bootstrap"]
     # The key file belongs to KEYS_OWNER and is readable by it alone, so the ceremony runs as that
@@ -67,6 +68,30 @@ services:
       migrate:
         condition: service_completed_successfully
     networks: [internal, kernel]
+
+  # The provider authority projection's first snapshot, from Organization Control
+  # (TDD-identity-control-006 §Bootstrap). Run once Organization Control serves this consumer; safe
+  # to rerun, because the snapshot is applied by version.
+  provider-bootstrap:
+    image: scnehaux-identity-control-dev-migrate
+    profiles: ["provider-bootstrap"]
+    entrypoint: ["identity-provider-bootstrap"]
+    user: "${KEYS_OWNER:-65532:65532}"
+    environment:
+      IDENTITY_DATABASE_URL: postgres://identity_app:${IDENTITY_APP_PASSWORD:?set IDENTITY_APP_PASSWORD in .env}@postgres:5432/identity_control?sslmode=disable
+      # Optional here, because compose interpolates every service, profiled or not: a required
+      # variable would stop every `up`. The command itself refuses an empty one.
+      IDENTITY_ORGANIZATION_BASE_URL: ${IDENTITY_ORGANIZATION_BASE_URL:-}
+      IDENTITY_WORKLOAD_CLIENT_ID: identity-control-workload
+      IDENTITY_WORKLOAD_KEY_FILE: /keys/identity-control-workload.pem
+      IDENTITY_WORKLOAD_TOKEN_URL: http://keycloak:8080/realms/scnehaux/protocol/openid-connect/token
+      IDENTITY_WORKLOAD_AUDIENCE: ${KEYCLOAK_ISSUER:?set KEYCLOAK_ISSUER in .env}
+    volumes:
+      - ./keys:/keys:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks: [internal, kernel, api]
 
   identity-control:
     build:
@@ -109,6 +134,16 @@ services:
       # the new binary has to verify the old audience while the callers' audience is changed.
       IDENTITY_TOKEN_AUDIENCE: ${IDENTITY_TOKEN_AUDIENCE:-identity-control-api}
       IDENTITY_JWKS_URL: http://keycloak:8080/realms/scnehaux/protocol/openid-connect/certs
+      # Provider authority from Organization Control (TDD-identity-control-006). Empty until
+      # organization-control's stack serves this consumer: the intake then answers 503, the
+      # projection is never fresh, and the ceremony's grant is the only provider authority.
+      # organization-control's deploy/dev README sets both.
+      IDENTITY_DELIVERY_PRINCIPAL_ID: ${IDENTITY_DELIVERY_PRINCIPAL_ID:-}
+      IDENTITY_ORGANIZATION_BASE_URL: ${IDENTITY_ORGANIZATION_BASE_URL:-}
+      IDENTITY_WORKLOAD_CLIENT_ID: identity-control-workload
+      IDENTITY_WORKLOAD_KEY_FILE: /keys/identity-control-workload.pem
+      IDENTITY_WORKLOAD_TOKEN_URL: http://keycloak:8080/realms/scnehaux/protocol/openid-connect/token
+      IDENTITY_WORKLOAD_AUDIENCE: ${KEYCLOAK_ISSUER:?set KEYCLOAK_ISSUER in .env}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     depends_on:
       migrate:
@@ -117,13 +152,17 @@ services:
       - ./keys:/keys:ro
     ports:
       - "127.0.0.1:${IDENTITY_CONTROL_PORT:-8082}:8090"
-    networks: [internal, kernel]
+    networks: [internal, kernel, api]
 
 volumes:
   postgres:
 
 networks:
   internal:
+  # The network other stacks call this service on. It carries identity-control alone; a calling
+  # stack, organization-control's, joins it as external (STD-GLB-009 §Development Server Deployment).
+  api:
+    name: scnehaux-identity-control-api
   kernel:
     external: true
     name: scnehaux-identity-api

@@ -55,14 +55,44 @@ If the network intercepts TLS to `proxy.golang.org`, the build fails at `go mod 
 services:
   migrate:
     build: { args: { GOPROXY: direct } }
-  bootstrap:
-    build: { args: { GOPROXY: direct } }
   identity-control:
     build: { args: { GOPROXY: direct } }
 ```
 
 Modules are then fetched from their origins. `go.sum` and the checksum database still verify every
 one of them.
+
+## Updating
+
+The same on every server and in every repository (STD-GLB-009 §Development Server Deployment):
+
+```sh
+cd identity-control/deploy/dev
+git pull
+docker compose up -d --build
+```
+
+The migrate job applies whatever is new before the service restarts. The one-off tasks run the
+migrate image, so this rebuilds them too. A `## Moving a server` section below says when a release
+needs more than this.
+
+## One-off tasks
+
+Each is a service behind a profile that runs the migrate image, and never starts with `up`:
+
+| Task | Run | When |
+| :-- | :-- | :-- |
+| `bootstrap` | `./bootstrap.sh "<operator>" "<reason>"` the first time; to resume, `docker compose run --rm bootstrap -operator … -resume …` | once per Control Database (ADR-IAM-001 §5.11) |
+| `provider-bootstrap` | `docker compose run --rm provider-bootstrap` | once Organization Control serves this consumer; organization-control's `deploy/dev/README.md` says when |
+
+## Wiring to other services
+
+Organization Control's stack joins this one's `scnehaux-identity-control-api` network, so start this
+stack first. Until it runs, the delivery intake answers 503, the provider projection is never fresh,
+and the ceremony's grant is the only provider authority (TDD-identity-control-006). organization-control's
+`deploy/dev/README.md` §Wiring to other services is the procedure. It ends by setting
+`IDENTITY_DELIVERY_PRINCIPAL_ID` and `IDENTITY_ORGANIZATION_BASE_URL` here and running
+`provider-bootstrap`.
 
 ## Calling the API
 
@@ -263,10 +293,8 @@ still accepts, and the audience change needs the new binary while the old audien
    carries the claim, and the ceremony's Principal still holds the attribute.
 2. **Migrate, and run the new binary on the old audience.** Pull this repository, put
    `IDENTITY_TOKEN_AUDIENCE=identity-control` in `.env`, and
-   `docker compose up -d --build identity-control`. The migrate job runs first. Then rebuild the
-   ceremony's image, which `up --build` does not touch because `bootstrap` is behind the `ceremony`
-   profile: `docker compose --profile ceremony build bootstrap`. An image older than the move to
-   keys still demands `IDENTITY_KEYCLOAK_CLIENT_SECRET` and refuses to start.
+   `docker compose up -d --build identity-control`. The migrate job runs first, and the ceremony
+   runs the migrate image, so it is rebuilt with it.
 3. **Register the resource by resuming the ceremony**, with the operator, username and email on
    record (`bootstrap.sh` used `bootstrap-operator` and `bootstrap-operator@scnehaux.local`). Do not
    rerun `bootstrap.sh`; run only its first step:
