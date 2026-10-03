@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-005
   title: Account Security and Investigation API Mediation
   owner: Core Platform Team
-  version: 2.3.0
+  version: 2.3.1
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -159,6 +159,15 @@ GET   /v1/me/security-operations/{operation_id}
   follows their own command at `GET /v1/me/security-operations/{operation_id}`, which answers only
   for an operation whose subject is the caller and is `404` for any other. This keeps every route in
   one class.
+- **What ending a session does not reach.** It ends the Keycloak session and its refresh token.
+  An access token already issued from that session stays valid until its `exp`: at most 240 seconds
+  for this service's `L0` callers (STD-IAM-002 §3.3). Every resource server verifies the token
+  locally (STD-IAM-002), and none asks the kernel whether the session is still alive. This is the
+  same window §Containment as Built states for a suspension. The development server observed it on
+  2026-10-03: the ended session's access token was still accepted, and its refresh token was refused.
+- **A handle differs on every read.** Each seal draws a fresh nonce and its own expiry (§Technical
+  Context), so the same session or authenticator gets a new `security_ref` each time it is listed.
+  A handle is used within its TTL. It is not an identifier to keep or compare.
 - **After `terminate-all`.** The BFF ends its own session as well (`TDD-identity-experience-001`), because
   the Keycloak session behind it is gone.
 
