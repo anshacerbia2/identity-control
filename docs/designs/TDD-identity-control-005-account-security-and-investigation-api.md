@@ -233,7 +233,7 @@ API, and the assurance floor. **4b** is WebAuthn. It needs a browser flow in whi
 neither (TDD-identity-kernel-001 §Authentication Levels).
 
 ```text
-POST  /v1/me/authenticators:enroll          Idempotency-Key       {"type":"totp"}
+POST  /v1/me/authenticators:enroll          {"type":"totp"}
 ```
 
 **Enrolling.**
@@ -252,6 +252,8 @@ POST  /v1/me/authenticators:enroll          Idempotency-Key       {"type":"totp"
   - It answers a shortfall with the RFC 9470 challenge for that level.
 - **Evidence.** The authorization is recorded as `authenticator.enroll` with outcome `served`. The
   binding itself is the kernel's event.
+- **No Idempotency-Key.** The call changes nothing but its evidence. A repeated request authorizes
+  the same action again, and each authorization is its own record.
 
 **The assurance floor.** `ADR-IAM-004` requires `aal2` of a provider, so a provider must keep a way
 to reach it.
