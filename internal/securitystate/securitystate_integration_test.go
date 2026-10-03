@@ -711,11 +711,25 @@ func TestEnrollingTakesTheAccountsLevel(t *testing.T) {
 	}() {
 		t.Errorf("enrolling a second at aal1: %v, want a step-up to aal2", err)
 	}
+	if action, err := h.service.Enroll(ctx, actor(fresh), "webauthn", onlyAAL1); err != nil || action != "webauthn-register" {
+		t.Errorf("enrolling a first security key: %q, %v", action, err)
+	}
+	if _, err := h.service.Enroll(ctx, actor(enrolled), "webauthn", onlyAAL1); func() bool {
+		level, ok := IsStepUp(err)
+		return !ok || level != "aal2"
+	}() {
+		t.Errorf("enrolling a security key at aal1 beside a TOTP: %v, want a step-up to aal2", err)
+	}
+	for _, refused := range []string{"sms", "webauthn-passwordless", "WEBAUTHN"} {
+		if _, err := h.service.Enroll(ctx, actor(fresh), refused, onlyAAL1); !errors.Is(err, ErrInvalid) {
+			t.Errorf("type %q: %v, want ErrInvalid", refused, err)
+		}
+	}
 	if _, err := h.service.Enroll(ctx, actor(fresh), "sms", onlyAAL1); !errors.Is(err, ErrInvalid) {
 		t.Errorf("an unknown type: %v, want ErrInvalid", err)
 	}
 	if n := h.count(`SELECT count(*) FROM identity.privileged_access WHERE actor_principal_id = $1
-	    AND action = 'authenticator.enroll' AND outcome = 'served'`, fresh.String()); n != 1 {
+	    AND action = 'authenticator.enroll' AND outcome = 'served'`, fresh.String()); n != 2 {
 		t.Errorf("%d enrollment records", n)
 	}
 }

@@ -577,7 +577,7 @@ Built in the order TDD-005 §Build Order states, one PR per slice:
 - ✅ **4a · TOTP enrollment and the assurance floor** (TDD-005 2.6.0).
   - `POST /v1/me/authenticators:enroll` `{"type":"totp"}` authorizes an enrollment at the level binding requires (NIST SP 800-63B-4 §4.1.2.1): `aal2` once the person holds a second factor, `aal1` before, and recent. It returns `CONFIGURE_TOTP` for the BFF to drive as `kc_action`, and is evidenced as `authenticator.enroll`.
   - A provider's last second factor is never removed or revoked (`assurance_floor`). It reads the same provider decision as authentication.
-- **4b · WebAuthn.** It needs a kernel flow in which either factor reaches `aal2` while a person with neither still enrolls one, and a compat suite that can register a WebAuthn credential.
+- ✅ **4b · WebAuthn enrollment** (TDD-005 2.7.0). `POST /v1/me/authenticators:enroll` `{"type":"webauthn"}` returns `webauthn-register`, at the same level as a TOTP. identity-kernel's `scnehaux-browser-v2` accepts either factor at `aal2`, and its compat suite registers a key through that action (TDD-identity-kernel-001 1.11.0).
 
 ## Waiting on the Keycloak proof-of-concept
 
