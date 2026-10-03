@@ -61,6 +61,48 @@ function Add-LoopbackCookies {
     }
 }
 
+# Get-TotpCode is RFC 6238 with the realm's policy: HmacSHA1, 30-second steps, six digits. Keycloak
+# keys the HMAC with the secret's bytes as its enrollment page carries them (identity-kernel's
+# compat/levels_test.go computes it the same way).
+function Get-TotpCode([string] $Secret) {
+    $counter = [long][Math]::Floor([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() / 30)
+    $message = [BitConverter]::GetBytes($counter)
+    if ([BitConverter]::IsLittleEndian) { [Array]::Reverse($message) }
+    $hmac = New-Object System.Security.Cryptography.HMACSHA1 -ArgumentList (, [System.Text.Encoding]::UTF8.GetBytes($Secret))
+    $hash = $hmac.ComputeHash($message)
+    $hmac.Dispose()
+    $offset = $hash[$hash.Length - 1] -band 0x0f
+    $value = (([int]$hash[$offset] -band 0x7f) -shl 24) -bor ([int]$hash[$offset + 1] -shl 16) -bor `
+        ([int]$hash[$offset + 2] -shl 8) -bor [int]$hash[$offset + 3]
+    return ($value % 1000000).ToString("000000")
+}
+
+# Get-HiddenInputs reads a form's hidden fields, which the kernel carries its state in.
+function Get-HiddenInputs([string] $Content) {
+    $fields = [ordered]@{}
+    foreach ($element in [regex]::Matches($Content, '<input[^>]*type="hidden"[^>]*>')) {
+        if ($element.Value -match 'name="([^"]+)"') {
+            $name = $Matches[1]
+            $value = if ($element.Value -match 'value="([^"]*)"') { [System.Web.HttpUtility]::HtmlDecode($Matches[1]) } else { "" }
+            $fields[$name] = $value
+        }
+    }
+    return $fields
+}
+
+# Find-OtpCredential is the identifier of the OTP credential the code page lists under a label, for
+# an account that holds more than one.
+function Find-OtpCredential([string] $Content, [string] $Label) {
+    foreach ($radio in [regex]::Matches($Content, '<input[^>]*name="selectedCredentialId"[^>]*>')) {
+        if ($radio.Value -match 'id="([^"]+)"') { $inputId = $Matches[1] } else { continue }
+        if ($radio.Value -match 'value="([^"]+)"') { $credentialId = $Matches[1] } else { continue }
+        $pattern = '(?s)for="' + [regex]::Escape($inputId) + '".*?</label>'
+        $labelElement = [regex]::Match($Content, $pattern)
+        if ($labelElement.Success -and $labelElement.Value -match [regex]::Escape($Label)) { return $credentialId }
+    }
+    return $null
+}
+
 function Get-ScnehauxToken {
     param(
         [Parameter(Mandatory = $true)] [string] $Username,
@@ -77,8 +119,22 @@ function Get-ScnehauxToken {
         # authenticator app in -Otp. The first TOTP is enrolled in a browser: sign in to the Admin
         # Portal, which asks for aal2 and shows the kernel's enrollment page.
         [string] $AcrValues = "",
-        [string] $Otp = ""
+        [string] $Otp = "",
+        # A development server's own TOTP for this account (ADR-IAM-004 §5.5): a JSON file holding its
+        # label and secret, from which the code is computed. Never printed.
+        [string] $TotpSecretFile = "",
+        # Enrolls that TOTP: signs in at aal2 with -Otp, the one code read from the person's own
+        # authenticator, then asks the kernel to set up another TOTP (kc_action=CONFIGURE_TOTP), and
+        # writes its secret here, mode 0600. Refuses when the file exists.
+        [string] $EnrollTotpFile = "",
+        [string] $TotpLabel = "dev-server"
     )
+
+    if ($EnrollTotpFile) {
+        if (Test-Path $EnrollTotpFile) { throw "$EnrollTotpFile exists; a server holds one TOTP for this account" }
+        if (-not $Otp) { throw "enrolling binds at aal2 (NIST SP 800-63B-4 4.1.2.1): pass the current code from the person's own authenticator in -Otp" }
+        $AcrValues = "aal2"
+    }
 
     $ErrorActionPreference = "Stop"
 
@@ -110,7 +166,8 @@ function Get-ScnehauxToken {
         "&state=$state" +
         "&code_challenge=$challenge" +
         "&code_challenge_method=S256" +
-        $(if ($AcrValues) { "&acr_values=$([uri]::EscapeDataString($AcrValues))" } else { "" })
+        $(if ($AcrValues) { "&acr_values=$([uri]::EscapeDataString($AcrValues))" } else { "" }) +
+        $(if ($EnrollTotpFile) { "&max_age=0&kc_action=CONFIGURE_TOTP" } else { "" })
 
     # One cookie jar across both requests. The kernel's login form is bound to a session cookie,
     # and posting the form without it produces "Restart login cookie not found" rather than a
@@ -175,14 +232,44 @@ function Get-ScnehauxToken {
     }
 
     $answer = Send-LoginForm $action "username=$([uri]::EscapeDataString($Username))&password=$([uri]::EscapeDataString($Password))"
-    # A level of two factors asks for the code on a second page of the same sign-in.
-    if ($answer.Status -eq 200 -and $answer.Content -match 'name="totpSecret"') {
-        throw "the kernel asks to enroll a TOTP authenticator first: sign in to the Admin Portal in a browser once, then pass the app's code in -Otp"
+    # Further pages of the same sign-in: the code a level of two factors asks for, and, when
+    # enrolling, the kernel's page that sets up another TOTP.
+    $enrolledSecret = $null
+    for ($step = 0; $step -lt 4 -and $answer.Status -eq 200; $step++) {
+        $content = $answer.Content
+        if ($content -notmatch '(?s)<form[^>]*\saction="([^"]+)"') { throw "the kernel answered a page with no form" }
+        $next = [System.Web.HttpUtility]::HtmlDecode($Matches[1])
+        $fields = Get-HiddenInputs $content
+        if ($content -match 'name="totpSecret"') {
+            if (-not $EnrollTotpFile) {
+                throw "the kernel asks to enroll a TOTP authenticator first: sign in to the Admin Portal in a browser once, then pass the app's code in -Otp"
+            }
+            $enrolledSecret = $fields["totpSecret"]
+            $fields["totp"] = Get-TotpCode $enrolledSecret
+            $fields["userLabel"] = $TotpLabel
+        } elseif ($content -match 'name="otp"') {
+            if ($Otp) {
+                $fields["otp"] = $Otp
+                $Otp = ""
+            } elseif ($TotpSecretFile) {
+                $stored = Get-Content -Raw $TotpSecretFile | ConvertFrom-Json
+                $credential = Find-OtpCredential $content $stored.label
+                if ($credential) { $fields["selectedCredentialId"] = $credential }
+                $fields["otp"] = Get-TotpCode $stored.secret
+            } else {
+                throw "the kernel asks for a one-time code: pass -Otp, or -TotpSecretFile on a development server"
+            }
+        } else {
+            throw "the kernel showed a page this script does not answer"
+        }
+        $form = ($fields.GetEnumerator() | ForEach-Object { "$([uri]::EscapeDataString($_.Key))=$([uri]::EscapeDataString([string]$_.Value))" }) -join "&"
+        $answer = Send-LoginForm $next $form
     }
-    if ($answer.Status -eq 200 -and $answer.Content -match 'name="otp"') {
-        if (-not $Otp) { throw "the kernel asks for a one-time code: pass the current code from the authenticator app in -Otp" }
-        if ($answer.Content -notmatch '(?s)<form[^>]*\saction="([^"]+)"') { throw "the code page carries no form" }
-        $answer = Send-LoginForm ([System.Web.HttpUtility]::HtmlDecode($Matches[1])) "otp=$([uri]::EscapeDataString($Otp))"
+    if ($enrolledSecret -and $answer.Status -ge 300 -and $answer.Status -lt 400) {
+        # Written only once the kernel accepted the code it was set up with. Never printed.
+        @{ label = $TotpLabel; secret = $enrolledSecret } | ConvertTo-Json -Compress | Set-Content -NoNewline $EnrollTotpFile
+        if ($IsLinux -or $IsMacOS) { chmod 600 $EnrollTotpFile }
+        Write-Host "enrolled the TOTP '$TotpLabel'; its secret is in $EnrollTotpFile"
     }
     $codeUri = $null
     if ($answer.Status -ge 300 -and $answer.Status -lt 400) {
