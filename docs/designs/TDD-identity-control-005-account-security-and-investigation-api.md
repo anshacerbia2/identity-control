@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-005
   title: Account Security and Investigation API Mediation
   owner: Core Platform Team
-  version: 2.0.0
+  version: 2.1.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -82,7 +82,7 @@ Version 1.0.0 predates five decisions this design now follows:
 | A caller's token names `identity-control-api`, is a person's, and carries no `provider_scope` | STD-IAM-002 §3.1, `TDD-identity-control-001` §Caller Token | `/v1/me/*` serves any person, as themselves. A workload's token is refused |
 | An administrative reason is the `X-Administrative-Reason` header, visible US-ASCII | STD-GLB-001 §Request Header Values | Reason is a header on every route, not a body field |
 | Containment is reversible, and distinct from the reconciler's integrity hold | §Containment Is Reversible, `TDD-identity-control-001` 1.12.0 | `:quarantine` and `:release` become `:suspend` and `:restore` |
-| The enterprise Audit platform does not exist yet | PAD-PLT-007 | Evidence is published as events on this service's outbox. `GET …/events` waits for the Audit API |
+| The enterprise Audit platform does not exist yet | PAD-PLT-007 | Evidence is an insert-only table here (§Evidence). `GET …/events` waits for the Audit API |
 
 **Route classes.** Every route is exactly one of three, and a test fails on a route that is none:
 `self` (any person, acting on the Principal in its token), `providerOnly` (the provider decision of
@@ -213,7 +213,7 @@ Every mutation requires `Idempotency-Key`. Administrative mutations additionally
 (STD-GLB-001 §Request Header Values). The correlation identifier is the one the request
 middleware assigns or accepts, and it is recorded on the operation. `GET
 /v1/principals/{principal_id}/events` is not offered until the Audit API exists. Until then the
-evidence is the events this service publishes (§Evidence). A command returns its final
+evidence is the insert-only record this service keeps (§Evidence). A command returns its final
 result when execution completes inside the request budget; otherwise it returns
 `202 Accepted` with an operation URL. Repeating the same idempotency key returns the
 same operation and never repeats a completed side effect.
@@ -338,11 +338,40 @@ and that is the gap the last slice closes.
 
 ### Evidence
 
-Every administrative read and every command publishes an event on this service's outbox, in the
-transaction that records it (STD-GLB-004): `com.scnehaux.identity.security.read`, `.suspended`,
-`.restored`, `.sessions-terminated`, `.authenticator-revoked`. Each names the acting and the subject
-Principal, the reason, the correlation identifier and the outcome, and never a kernel identifier or
-a sealed reference. The Audit platform consumes them once it exists.
+Every administrative read and every command writes one row to `identity.privileged_access`, in the
+transaction that serves or records it:
+
+```sql
+CREATE TABLE identity.privileged_access (
+    access_id            UUID        PRIMARY KEY,
+    actor_principal_id   UUID        NOT NULL,
+    subject_principal_id UUID,
+    action               TEXT        NOT NULL,   -- search, read.sessions, suspend, ...
+    route                TEXT        NOT NULL,
+    reason               TEXT,
+    query                TEXT,                   -- a search's text, as typed
+    result_count         INTEGER,
+    outcome              TEXT        NOT NULL,   -- served, applied, refused
+    correlation_id       TEXT        NOT NULL,
+    emergency            BOOLEAN     NOT NULL,   -- the provider decision's basis was emergency
+    recorded_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+The row holds what an audit record must establish: "What type of event occurred; When the event
+occurred; Where the event occurred; Source of the event; Outcome of the event; and Identity of any
+individuals, subjects, or objects/entities associated with the event" (NIST SP 800-53 AU-3 [R6]).
+It holds no kernel identifier and no sealed reference. The runtime role may insert and select it,
+and holds no `UPDATE`, `DELETE` or `TRUNCATE`, because audit information is protected "from
+unauthorized access, modification, and deletion" (AU-9 [R6]). Organization Control keeps its own
+`audit.privileged_access` the same way.
+
+**Why a table and not, as 2.0.0 said, outbox events.** An outbox event is retained only "while any
+of its deliveries is unpublished or dead-lettered" (ADR-GLB-018 §5.3). With no consumer subscribed,
+none is owed, so the events would be pruned with their partition before the Audit platform exists
+to read them. A log line is no better, because nothing protects it from modification. Once the
+Audit platform consumes this service, each row is also appended to the outbox in the same
+transaction, and the table stays the local record.
 
 ## Configuration
 
@@ -460,3 +489,4 @@ degradation.
 | R3 | Okta, *Suspend and unsuspend users*, <https://help.okta.com/en-us/content/topics/users-groups-profiles/usgp-suspend.htm>, accessed 2026-10-03: "Suspended users' app and group memberships are maintained and are reinstated when the user is unsuspended." |
 | R4 | IETF RFC 9470, *OAuth 2.0 Step Up Authentication Challenge Protocol*, §3, <https://www.rfc-editor.org/rfc/rfc9470>: `insufficient_user_authentication`; `acr_values`; `max_age`. |
 | R5 | IETF RFC 5116, *An Interface and Algorithms for Authenticated Encryption*, <https://www.rfc-editor.org/rfc/rfc5116>: AEAD checks the integrity and authenticity of the plaintext and of the associated data; §5.2 defines AEAD_AES_256_GCM. |
+| R6 | NIST SP 800-53 Rev. 5, *AU-3 Content of Audit Records* and *AU-9 Protection of Audit Information*, from NIST's OSCAL catalog <https://github.com/usnistgov/oscal-content/blob/main/nist.gov/SP800-53/rev5/json/NIST_SP-800-53_rev5_catalog.json>, accessed 2026-10-03: AU-3 as quoted in §Evidence; AU-9 a. "Protect audit information and audit logging tools from unauthorized access, modification, and deletion". |
