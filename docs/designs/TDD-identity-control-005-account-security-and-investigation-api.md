@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-005
   title: Account Security and Investigation API Mediation
   owner: Core Platform Team
-  version: 2.6.0
+  version: 2.7.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -225,29 +225,38 @@ Unset, it logs once that no metric leaves the process.
 The trace and correlation identifiers are on the operation and in every log line (§3.15 "trace/
 correlation identifiers"). The workload identity is the service's own resource attribute.
 
-## Enrollment and the Assurance Floor (2.6.0)
+## Enrollment and the Assurance Floor (2.7.0)
 
-Slice 4 is built in two parts. **4a**, built here, is enrolling a TOTP authenticator through this
-API, and the assurance floor. **4b** is WebAuthn. It needs a browser flow in which a person reaches
-`aal2` with either factor, and identity-kernel's first attempt at that refused a person who held
-neither (TDD-identity-kernel-001 §Authentication Levels).
+Slice 4 is built in two parts. **4a** (2.6.0) is enrolling a TOTP authenticator through this API,
+and the assurance floor. **4b** (2.7.0) is enrolling a WebAuthn authenticator.
+
+4b waited for a browser flow in which a person reaches `aal2` with either factor. identity-kernel's
+first attempt at that refused a person who held neither. Its `scnehaux-browser-v2` offers WebAuthn or
+TOTP at level 2, and still takes a person with neither to TOTP enrollment
+(TDD-identity-kernel-001 1.11.0 §Authentication Levels).
 
 ```text
-POST  /v1/me/authenticators:enroll          {"type":"totp"}
+POST  /v1/me/authenticators:enroll          {"type":"totp"}       ->  {"action":"CONFIGURE_TOTP"}
+POST  /v1/me/authenticators:enroll          {"type":"webauthn"}   ->  {"action":"webauthn-register"}
 ```
 
 **Enrolling.**
 - **What the API returns.** It authorizes the enrollment and returns the kernel action that performs
-  it, `{"action":"CONFIGURE_TOTP"}`. The BFF drives that action as an OIDC sign-in with
-  `kc_action`, the kernel's supported application-initiated action (TDD-identity-kernel-001;
-  identity-kernel compat proves `CONFIGURE_TOTP`).
+  it. The BFF drives that action as an OIDC sign-in with `kc_action`, the kernel's supported
+  application-initiated action [R17]. identity-kernel's compat suite proves both actions on the
+  pinned kernel: `CONFIGURE_TOTP`, and `webauthn-register` after an `aal2` sign-in.
+- **Only these two types.** `webauthn` is a WebAuthn authenticator used as a second factor beside
+  the password, which is what the kernel's level 2 accepts. A passkey that replaces the password
+  (`webauthn-register-passwordless`) is not offered: no flow of the realm admits it as a first
+  factor. Any other type is refused as invalid.
 - **No material passes through.** The API never accepts or returns authenticator material, as
   §API / Interface says.
 - **The level required.** NIST requires that binding "requires authentication at either the maximum
   AAL currently available in the subscriber account or the maximum AAL at which the new
   authenticator will be used, whichever is lower" (NIST SP 800-63B-4 §4.1.2.1). So a person who
   already holds a second factor enrolls at `aal2`, and one who holds none at `aal1`. Either way the
-  authentication must be within `IDENTITY_STEP_UP_MAX_AGE`.
+  authentication must be within `IDENTITY_STEP_UP_MAX_AGE`. The rule is the same for both types,
+  because a WebAuthn authenticator, like a TOTP one, is used at `aal2`.
   - The API reads the person's credentials from the kernel to decide which level applies.
   - It answers a shortfall with the RFC 9470 challenge for that level.
 - **Evidence.** The authorization is recorded as `authenticator.enroll` with outcome `served`. The
@@ -760,6 +769,8 @@ approved secret manager and have independent rotation schedules.
 ### Authorization
 
 - Enrollment and authenticator removal without fresh required assurance are refused.
+- `totp` enrolls through `CONFIGURE_TOTP` and `webauthn` through `webauthn-register`; any other type
+  is refused before the kernel is read.
 - A provider cannot suspend, restore, or revoke an authenticator of, themselves.
 - A route outside `self`, `providerOnly` and `owned` fails the route test.
 - Every administrative read and mutation emits attributable evidence.
@@ -846,3 +857,4 @@ degradation.
 | R14 | Keycloak, *Admin REST API* (OpenAPI, `docs-api/latest`), <https://www.keycloak.org/docs-api/latest/rest-api/index.html>, accessed 2026-10-03: `POST /admin/realms/{realm}/users/{user-id}/logout` "Remove all user sessions associated with the user"; `DELETE /admin/realms/{realm}/users/{user-id}/credentials/{credentialId}` "Remove a credential for a user"; `PUT /admin/realms/{realm}/users/{user-id}` "Update the user". The pinned kernel, 26.7.5, is proved by identity-kernel's compat suite (§Kernel Compatibility). |
 | R15 | Keycloak, *Server Administration Guide*, Authentication flows, the built-in browser flow, <https://www.keycloak.org/docs/latest/server_admin/index.html>, accessed 2026-10-03: "The first execution is the Username Password Form, an authentication type that renders the username and password page. It is marked as required, so the user must enter a valid username and password." |
 | R16 | STD-IAM-002 1.4.0, *Token and Verification Profile*, §3.2: the kernel writes `sid` into its access tokens, "the session identifier OpenID Connect logout defines". |
+| R17 | Keycloak 26.7.5, *Server Administration Guide*, Registering WebAuthn credentials using AIA, source `docs/documentation/server_admin/topics/authentication/webauthn.adoc` at tag 26.7.5, accessed 2026-10-03: "The actions *Webauthn Register* (`kc_action=webauthn-register`) and *Webauthn Register Passwordless* (`kc_action=webauthn-register-passwordless`) are available for the applications if enabled in the Required actions tab." |
