@@ -20,7 +20,7 @@ ARG GOPROXY=https://proxy.golang.org,direct
 RUN if [ "$GOPROXY" = "direct" ]; then apk add --no-cache git; fi && go mod download
 COPY . .
 # CGO off, so the binaries run on distroless static and on the Postgres image alike.
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/ ./cmd/identity-control ./cmd/identity-migrate ./cmd/identity-bootstrap
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/ ./cmd/identity-control ./cmd/identity-migrate ./cmd/identity-bootstrap ./cmd/identity-provider-bootstrap
 
 # arigaio/atlas:1.3.3
 FROM arigaio/atlas@sha256:07f3f92fa46e684ed789d5ef344a25494a4fa6844ef1ea1fa4e138522c2c37ac AS atlas
@@ -28,7 +28,7 @@ FROM arigaio/atlas@sha256:07f3f92fa46e684ed789d5ef344a25494a4fa6844ef1ea1fa4e138
 # postgres:17.11-alpine -- the same image the Control Database runs, so psql matches the server.
 FROM postgres@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24 AS migrate
 COPY --from=atlas /atlas /usr/local/bin/atlas
-COPY --from=build /out/identity-migrate /out/identity-bootstrap /usr/local/bin/
+COPY --from=build /out/identity-migrate /out/identity-bootstrap /out/identity-provider-bootstrap /usr/local/bin/
 WORKDIR /work
 COPY atlas.hcl schema.hcl ./
 COPY migrations ./migrations
