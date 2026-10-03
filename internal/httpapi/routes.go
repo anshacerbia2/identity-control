@@ -157,6 +157,8 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 		api.HandleFunc("POST /v1/principals/{principal_id}/sessions:terminate-all", p(cfg.Security.TerminateAll))
 		api.HandleFunc("POST /v1/principals/{principal_id}/authenticators/{authenticator_action}", p(cfg.Security.Revoke))
 		api.HandleFunc("GET /v1/security-operations/{operation_id}", p(cfg.Security.Operation))
+		api.HandleFunc("GET /v1/security-operations:unresolved", p(cfg.Security.Unresolved))
+		api.HandleFunc("POST /v1/security-operations/{operation_action}", p(cfg.Security.OperationAction))
 	}
 	api.HandleFunc("POST /v1/principals:reconcile", p(cfg.Principals.Reconcile))
 	// A provider registers anything; an application developer registers within its bounds.

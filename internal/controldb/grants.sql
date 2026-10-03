@@ -184,7 +184,7 @@ REVOKE UPDATE, DELETE, TRUNCATE ON identity.privileged_access FROM identity_runt
 -- state is a counter, updated by every command and never deleted.
 REVOKE DELETE, TRUNCATE ON identity.security_subject_state FROM identity_runtime;
 REVOKE UPDATE, DELETE, TRUNCATE ON identity.security_operation FROM identity_runtime;
-GRANT UPDATE (state, attempts, next_attempt_at, result_code, last_error_class, applied_at) ON identity.security_operation TO identity_runtime;
+GRANT UPDATE (state, attempts, next_attempt_at, result_code, last_error_class, applied_at, redriven_at) ON identity.security_operation TO identity_runtime;
 REVOKE UPDATE, DELETE, TRUNCATE ON identity.security_operation_attempt FROM identity_runtime;
 GRANT UPDATE (finished_at, outcome, error_class) ON identity.security_operation_attempt TO identity_runtime;
 

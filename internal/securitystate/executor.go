@@ -11,6 +11,8 @@ import (
 	"math/rand/v2"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+
 	"github.com/anshacerbia2/foundation-platform/db"
 	"github.com/anshacerbia2/foundation-platform/id"
 
@@ -36,7 +38,7 @@ const leaseStatement = `UPDATE identity.security_operation
 SET attempts = attempts + 1, next_attempt_at = now() + $2 * interval '1 millisecond'
 WHERE operation_id = $1
 RETURNING attempts, principal_id::text, operation_type, coalesce(sealed_object_ref, ''), actor_principal_id::text,
-          coalesce(reason, ''), correlation_id, emergency`
+          coalesce(reason, ''), correlation_id, emergency, redriven_at, created_at`
 
 const attemptStatement = `INSERT INTO identity.security_operation_attempt (operation_id, attempt, lease_until)
 VALUES ($1, $2, now() + $3 * interval '1 millisecond')`
@@ -55,6 +57,9 @@ type claimed struct {
 	correlation string
 	emergency   bool
 	kernelUser  keycloak.UserID
+	// redrivenAt is the attempt count at the last re-drive: the budget counts attempts past it.
+	redrivenAt int
+	createdAt  time.Time
 }
 
 // outcome is what one attempt established.
@@ -92,7 +97,10 @@ func (s *Service) execute(ctx context.Context, only *id.UUID) (int, error) {
 		return 0, err
 	}
 	for _, c := range work {
+		s.metric.wait.Record(ctx, seconds(time.Since(c.createdAt)), typed(c.opType))
+		started := time.Now()
 		result := s.attempt(ctx, c)
+		s.metric.duration.Record(ctx, seconds(time.Since(started)), typed(c.opType))
 		// The finish is written even when the caller's budget ended during the kernel calls: the
 		// effect may have landed, and leaving the outcome to the lease would repeat the calls.
 		finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
@@ -136,7 +144,7 @@ func (s *Service) claim(ctx context.Context, only *id.UUID) ([]claimed, error) {
 				subject, actor, kc string
 			)
 			if err := tx.QueryRow(ctx, leaseStatement, raw, lease).Scan(&c.attempt, &subject, &c.opType, &c.ref,
-				&actor, &c.reason, &c.correlation, &c.emergency); err != nil {
+				&actor, &c.reason, &c.correlation, &c.emergency, &c.redrivenAt, &c.createdAt); err != nil {
 				return fmt.Errorf("securitystate: lease: %w", err)
 			}
 			if _, err := tx.Exec(ctx, attemptStatement, raw, c.attempt, lease); err != nil {
@@ -199,7 +207,7 @@ func (s *Service) attempt(ctx context.Context, c claimed) outcome {
 		return outcome{state: StateApplied, resultCode: StateApplied}
 	}
 	class, permanent := classify(err)
-	if permanent || c.attempt >= s.cfg.MaxAttempts {
+	if permanent || c.attempt-c.redrivenAt >= s.cfg.MaxAttempts {
 		return outcome{state: StateUnresolved, errorClass: class}
 	}
 	return outcome{state: StateRetrying, errorClass: class}
@@ -412,6 +420,7 @@ func (s *Service) finish(ctx context.Context, c claimed, o outcome) error {
 	}
 	attemptOutcome := map[string]string{StateApplied: "applied", StateRefused: "refused", StateRetrying: "retry",
 		StateUnresolved: "unresolved"}[o.state]
+	lost := false
 	err := s.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
 		tag, err := tx.Exec(ctx, finishStatement, c.operationID.String(), c.attempt, o.state, o.resultCode, o.errorClass,
 			backoff.Milliseconds())
@@ -421,6 +430,8 @@ func (s *Service) finish(ctx context.Context, c claimed, o outcome) error {
 		if tag.RowsAffected() == 0 {
 			s.logger.WarnContext(ctx, "a security operation's lease ended before its attempt finished",
 				slog.String("operation_id", c.operationID.String()), slog.Int("attempt", c.attempt))
+			s.metric.leaseLost.Add(ctx, 1, typed(c.opType))
+			lost = true
 			return nil
 		}
 		if _, err := tx.Exec(ctx, finishAttemptStatement, c.operationID.String(), c.attempt, attemptOutcome,
@@ -443,6 +454,10 @@ func (s *Service) finish(ctx context.Context, c claimed, o outcome) error {
 	if err != nil {
 		return err
 	}
+	if lost {
+		return nil
+	}
+	s.metric.attempts.Add(ctx, 1, typed(c.opType, attribute.String("outcome", attemptOutcome)))
 	attrs := []any{slog.String("operation_id", c.operationID.String()), slog.String("operation_type", c.opType),
 		slog.String("principal_id", c.subject.String()), slog.Int("attempt", c.attempt),
 		slog.String("correlation_id", c.correlation)}

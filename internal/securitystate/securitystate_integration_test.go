@@ -12,6 +12,9 @@ import (
 	"testing"
 	"time"
 
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+
 	"github.com/anshacerbia2/foundation-platform/db"
 	"github.com/anshacerbia2/foundation-platform/id"
 
@@ -548,5 +551,90 @@ func TestASuspendedPersonCommandsNothingAndReadsOnlyTheirOwnOperations(t *testin
 	}
 	if _, err := h.service.MyOperation(ctx, person, op.OperationID); !errors.Is(err, ErrNotFound) {
 		t.Errorf("another person's operation: %v, want ErrNotFound", err)
+	}
+}
+
+// A parked operation is listed, re-driven with a reason and a new attempt budget, evidenced, and
+// then completes once its cause is gone; a second re-drive finds nothing parked.
+func TestAParkedOperationIsRedriven(t *testing.T) {
+	h := newHarness(t)
+	alice, user := h.principal("human", "active")
+	h.kernel.FailDisable = keycloak.ErrUnavailable
+	ctx := context.Background()
+	op, err := h.service.Submit(ctx, h.command(TypeSuspend, alice, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := h.service.RunOnce(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	parked, err := h.service.Unresolved(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, p := range parked {
+		if p.OperationID == op.OperationID && p.Attempts == 3 && p.LastErrorClass == "unavailable" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the parked operation is not listed: %+v", parked)
+	}
+
+	h.kernel.FailDisable = nil
+	operator := Actor{Principal: h.actor, Correlation: "corr-redrive", Assurance: "acr=aal2;auth_time=2026-10-03T12:00:00Z"}
+	redriven, err := h.service.Redrive(ctx, operator, op.OperationID, "kernel back after the outage")
+	if err != nil || redriven.State != StateApplied || redriven.Attempts != 4 {
+		t.Fatalf("re-drive: %+v, %v", redriven, err)
+	}
+	if got, _ := h.kernel.User(user); got.Enabled {
+		t.Error("the re-driven suspension did not disable the user")
+	}
+	if n := h.count(`SELECT count(*) FROM identity.privileged_access WHERE subject_principal_id = $1
+	    AND action = 'operation.redrive' AND reason = 'kernel back after the outage' AND correlation_id = 'corr-redrive'`,
+		alice.String()); n != 1 {
+		t.Errorf("%d re-drive evidence rows", n)
+	}
+	if _, err := h.service.Redrive(ctx, operator, op.OperationID, "again"); !errors.Is(err, ErrState) {
+		t.Errorf("re-driving an applied operation: %v, want ErrState", err)
+	}
+	missing, _ := id.NewV7()
+	if _, err := h.service.Redrive(ctx, operator, missing, "nothing"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("re-driving an absent operation: %v, want ErrNotFound", err)
+	}
+}
+
+// The executor's metrics reach a meter: accepted commands and attempts by outcome.
+func TestTheExecutorIsMeasured(t *testing.T) {
+	h := newHarness(t)
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	service, err := New(h.pool, h.kernel, h.refs, Config{Realm: testRealm, Budget: 5 * time.Second,
+		AttemptTimeout: time.Second, Meter: provider.Meter("test")}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice, _ := h.principal("human", "active")
+	if _, err := service.Submit(context.Background(), h.command(TypeTerminateAll, alice, 1)); err != nil {
+		t.Fatal(err)
+	}
+	var collected metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &collected); err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, scope := range collected.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			seen[m.Name] = true
+		}
+	}
+	for _, name := range []string{"identity.security_operation.accepted", "identity.security_operation.attempts",
+		"identity.security_operation.wait", "identity.security_operation.duration", "identity.security_operation.unresolved"} {
+		if !seen[name] {
+			t.Errorf("%s was not recorded; recorded %v", name, seen)
+		}
 	}
 }

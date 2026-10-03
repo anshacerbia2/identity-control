@@ -26,6 +26,8 @@ import (
 type SecurityCommander interface {
 	Submit(ctx context.Context, cmd securitystate.Command) (securitystate.Operation, error)
 	Get(ctx context.Context, operationID id.UUID) (securitystate.Operation, error)
+	Unresolved(ctx context.Context) ([]securitystate.Parked, error)
+	Redrive(ctx context.Context, actor securitystate.Actor, operationID id.UUID, reason string) (securitystate.Operation, error)
 }
 
 // Security is the handler.
@@ -88,6 +90,72 @@ func (h *Security) Operation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, op)
+}
+
+// Unresolved handles GET /v1/security-operations:unresolved: the parked operations, oldest first
+// (TDD-identity-control-005 §Operating the Executor).
+func (h *Security) Unresolved(w http.ResponseWriter, r *http.Request) {
+	parked, err := h.commands.Unresolved(r.Context())
+	if err != nil {
+		writeSecurityError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"operations": parked})
+}
+
+// OperationAction handles POST /v1/security-operations/{operation_id}:redrive, with a reason and a
+// recent authentication. A repeated request finds the operation no longer parked and is refused with
+// 409, which is what makes it idempotent without a key.
+func (h *Security) OperationAction(w http.ResponseWriter, r *http.Request) {
+	raw, action, _ := strings.Cut(r.PathValue("operation_action"), ":")
+	if action != "redrive" {
+		httpapi.Problem(w, r, httpapi.NotFound, "No such operation action")
+		return
+	}
+	operationID, err := id.Parse(raw)
+	if err != nil {
+		httpapi.Problem(w, r, httpapi.ValidationFailed, "operation_id is not a valid identifier")
+		return
+	}
+	actor, ok := callerPrincipal(r)
+	if !ok {
+		httpapi.Problem(w, r, httpapi.AuthenticationRequired, "The request carries no authenticated caller")
+		return
+	}
+	reason := strings.TrimSpace(r.Header.Get(AdministrativeReasonHeader))
+	if reason == "" {
+		httpapi.Problem(w, r, httpapi.ValidationFailed, "A re-drive requires an X-Administrative-Reason header")
+		return
+	}
+	acr, authTime, ok := Assurance(r.Context())
+	if !ok || h.now().Sub(authTime) > h.stepUpMaxAge {
+		h.stepUp(w, r)
+		return
+	}
+	op, err := h.commands.Redrive(r.Context(), securitystate.Actor{Principal: actor, Emergency: ProviderEmergency(r.Context()),
+		Correlation: correlationOf(r), Assurance: fmt.Sprintf("acr=%s;auth_time=%s", acr, authTime.UTC().Format(time.RFC3339))},
+		operationID, reason)
+	if err != nil {
+		writeSecurityError(w, r, err)
+		return
+	}
+	if !op.Final() {
+		w.Header().Set("Location", "/v1/security-operations/"+op.OperationID.String())
+		writeJSON(w, http.StatusAccepted, op)
+		return
+	}
+	writeJSON(w, http.StatusOK, op)
+}
+
+// correlationOf is the request's correlation identifier, minted when the middleware set none.
+func correlationOf(r *http.Request) string {
+	if value, ok := observability.CorrelationID(r.Context()); ok {
+		return value.String()
+	}
+	if minted, err := id.NewV7(); err == nil {
+		return minted.String()
+	}
+	return ""
 }
 
 func (h *Security) command(w http.ResponseWriter, r *http.Request, opType, rawSubject, ref string) {

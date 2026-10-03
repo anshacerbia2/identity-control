@@ -15,10 +15,17 @@ import (
 	"github.com/anshacerbia2/identity-control/internal/securitystate"
 )
 
+type redrive struct {
+	actor       securitystate.Actor
+	operationID id.UUID
+	reason      string
+}
+
 type stubCommander struct {
 	err       error
 	state     string
 	submitted *securitystate.Command
+	redriven  *redrive
 }
 
 func (s *stubCommander) Submit(_ context.Context, cmd securitystate.Command) (securitystate.Operation, error) {
@@ -32,6 +39,21 @@ func (s *stubCommander) Submit(_ context.Context, cmd securitystate.Command) (se
 		state = securitystate.StateApplied
 	}
 	return securitystate.Operation{OperationID: operationID, PrincipalID: cmd.Subject, Type: cmd.Type, State: state}, nil
+}
+
+func (s *stubCommander) Unresolved(context.Context) ([]securitystate.Parked, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return []securitystate.Parked{{Type: securitystate.TypeSuspend, Attempts: 3, LastErrorClass: "unavailable"}}, nil
+}
+
+func (s *stubCommander) Redrive(_ context.Context, actor securitystate.Actor, operationID id.UUID, reason string) (securitystate.Operation, error) {
+	s.redriven = &redrive{actor: actor, operationID: operationID, reason: reason}
+	if s.err != nil {
+		return securitystate.Operation{}, s.err
+	}
+	return securitystate.Operation{OperationID: operationID, State: securitystate.StateApplied}, nil
 }
 
 func (s *stubCommander) Get(_ context.Context, operationID id.UUID) (securitystate.Operation, error) {
@@ -260,5 +282,48 @@ func TestTheSecurityHandlerNeedsItsDependencies(t *testing.T) {
 	}
 	if _, err := httpapi.NewSecurity(&stubCommander{}, 0); err == nil {
 		t.Error("a handler without a step-up age was built")
+	}
+}
+
+func TestAProviderListsAndRedrivesParkedOperations(t *testing.T) {
+	stub := &stubCommander{}
+	handler := securityHandler(t, stub)
+	r, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, "/v1/security-operations:unresolved", nil))
+	if w := serve(handler, r); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"last_error_class":"unavailable"`) {
+		t.Errorf("listing: %d %s", w.Code, w.Body)
+	}
+
+	operationID := mustUUID(t)
+	r, caller := asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/security-operations/"+operationID.String()+":redrive", nil))
+	r.Header.Set(httpapi.AdministrativeReasonHeader, "kernel back after the outage")
+	if w := serve(handler, r); w.Code != http.StatusOK {
+		t.Fatalf("re-drive: %d %s", w.Code, w.Body)
+	}
+	if stub.redriven == nil || stub.redriven.operationID != operationID || stub.redriven.actor.Principal != caller ||
+		stub.redriven.reason != "kernel back after the outage" {
+		t.Errorf("re-driven %+v", stub.redriven)
+	}
+}
+
+func TestARedriveIsRefusedWhatItMust(t *testing.T) {
+	path := "/v1/security-operations/" + mustUUID(t).String() + ":redrive"
+	r, _ := asPrincipal(t, httptest.NewRequest(http.MethodPost, path, nil))
+	if w := serve(securityHandler(t, &stubCommander{}), r); w.Code != http.StatusBadRequest {
+		t.Errorf("no reason: %d", w.Code)
+	}
+	r, _ = asPrincipal(t, httptest.NewRequest(http.MethodPost, path, nil))
+	r.Header.Set(httpapi.AdministrativeReasonHeader, "retry")
+	r = r.WithContext(httpapi.WithAssurance(r.Context(), httpapi.AcrAAL2, time.Now().Add(-time.Hour)))
+	if w := serve(securityHandler(t, &stubCommander{}), r); w.Code != http.StatusUnauthorized {
+		t.Errorf("a stale authentication: %d", w.Code)
+	}
+	r, _ = asPrincipal(t, httptest.NewRequest(http.MethodPost, path, nil))
+	r.Header.Set(httpapi.AdministrativeReasonHeader, "retry")
+	if w := serve(securityHandler(t, &stubCommander{err: securitystate.ErrState}), r); w.Code != http.StatusConflict {
+		t.Errorf("not parked: %d", w.Code)
+	}
+	r = asOwner(httptest.NewRequest(http.MethodPost, path, nil), mustUUID(t))
+	if w := serve(securityHandler(t, &stubCommander{}), r); w.Code != http.StatusForbidden {
+		t.Errorf("an owner: %d", w.Code)
 	}
 }

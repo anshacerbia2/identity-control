@@ -21,6 +21,9 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+
 	"github.com/anshacerbia2/foundation-platform/db"
 	"github.com/anshacerbia2/foundation-platform/id"
 
@@ -94,6 +97,8 @@ type Config struct {
 	Lease          time.Duration
 	Interval       time.Duration
 	BatchSize      int
+	// Meter receives the executor's metrics; nil sends them nowhere.
+	Meter metric.Meter
 }
 
 // Actor is who commands, as the request established it.
@@ -144,6 +149,7 @@ type Service struct {
 	logger *slog.Logger
 	newID  func() (id.UUID, error)
 	jitter func(limit time.Duration) time.Duration
+	metric instruments
 }
 
 // New builds the service.
@@ -178,7 +184,12 @@ func New(tx Transactor, kernel keycloak.Containment, refs *securityref.Codec, cf
 	if cfg.BatchSize <= 0 {
 		cfg.BatchSize = 10
 	}
-	return &Service{tx: tx, kernel: kernel, refs: refs, cfg: cfg, logger: logger, newID: id.NewV7, jitter: fullJitter}, nil
+	measured, err := newInstruments(cfg.Meter, tx)
+	if err != nil {
+		return nil, fmt.Errorf("securitystate: metrics: %w", err)
+	}
+	return &Service{tx: tx, kernel: kernel, refs: refs, cfg: cfg, logger: logger, newID: id.NewV7, jitter: fullJitter,
+		metric: measured}, nil
 }
 
 // Route is the route an operation is commanded on, as its evidence records it. A self command is
@@ -291,7 +302,10 @@ func (s *Service) Accept(ctx context.Context, cmd Command) (Operation, error) {
 		return Operation{}, err
 	}
 	digest := cmd.digest()
-	var accepted id.UUID
+	var (
+		accepted id.UUID
+		replay   bool
+	)
 	err := s.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
 		existing, existingDigest, found, err := s.findByKey(ctx, tx, cmd.Actor.Principal, cmd.IdempotencyKey)
 		if err != nil {
@@ -301,7 +315,7 @@ func (s *Service) Accept(ctx context.Context, cmd Command) (Operation, error) {
 			if existingDigest != digest {
 				return ErrKeyReuse
 			}
-			accepted = existing
+			accepted, replay = existing, true
 			return nil
 		}
 
@@ -368,6 +382,7 @@ func (s *Service) Accept(ctx context.Context, cmd Command) (Operation, error) {
 	if err != nil {
 		return Operation{}, err
 	}
+	s.metric.accepted.Add(ctx, 1, typed(cmd.Type, attribute.Bool("replay", replay)))
 	return s.Get(ctx, accepted)
 }
 
