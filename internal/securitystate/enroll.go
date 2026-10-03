@@ -16,7 +16,9 @@ import (
 )
 
 // The kernel actions an enrollment may name, by authenticator type. Nothing else is ever returned.
-var enrollActions = map[string]string{"totp": "CONFIGURE_TOTP"}
+// webauthn is a second factor beside the password; a passkey replacing it is not offered
+// (TDD-identity-control-005 2.7.0).
+var enrollActions = map[string]string{"totp": "CONFIGURE_TOTP", "webauthn": "webauthn-register"}
 
 // ErrStepUp is an enrollment whose caller has not authenticated at the level binding requires. Level
 // is that level: aal2 for a person who already holds a second factor, aal1 otherwise.
