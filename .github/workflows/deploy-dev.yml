@@ -48,7 +48,14 @@ jobs:
             echo "KC_BOOTSTRAP_ADMIN_USERNAME=admin"
             echo "KC_BOOTSTRAP_ADMIN_PASSWORD=$(openssl rand -hex 16)"
           } > .env
-          docker compose -f compose.yaml -f compose.ci.yaml up -d --wait --wait-timeout 300
+          docker compose -f compose.yaml -f compose.ci.yaml up -d --wait --wait-timeout 300 postgres keycloak caddy
+          # The kernel's realm-apply job is one-shot: wait for its exit code, as identity-kernel's own
+          # deploy-dev does. Started alongside the check below, it races it, and the check then finds
+          # a realm built but not yet recorded as applied.
+          docker compose -f compose.yaml -f compose.ci.yaml up -d realm-apply
+          code="$(docker wait "$(docker compose -f compose.yaml -f compose.ci.yaml ps -aq realm-apply)")"
+          docker compose -f compose.yaml -f compose.ci.yaml logs --no-color realm-apply
+          [ "$code" = "0" ] || { echo "::error::the kernel's realm-apply job exited $code"; exit 1; }
           # realm-apply's service account authenticates with its own key; the key belongs to the
           # runner here because realm-apply runs on the runner below, not in its container.
           bash ./new-client-key.sh realm-apply ./keys "$(id -u):$(id -g)"
