@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-001
   title: Canonical Principal Identifier and Creation Path
   owner: Core Platform Team
-  version: 1.11.0
+  version: 1.12.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -220,7 +220,7 @@ CREATE TABLE identity.principal_mapping (
     quarantine_reason  TEXT,
     version            INTEGER     NOT NULL DEFAULT 1,
     CONSTRAINT principal_mapping_state_check
-        CHECK (state IN ('pending', 'active', 'quarantined', 'retired')),
+        CHECK (state IN ('pending', 'active', 'suspended', 'quarantined', 'retired')),
     CONSTRAINT principal_mapping_subject_check
         CHECK (subject_type IN ('human', 'workload')),
     CONSTRAINT principal_mapping_owner_check
@@ -277,9 +277,22 @@ State transitions:
    ┌──────────┐
    ↓          │
 pending ──→ active ──→ retired
+   │         ↑  │        ↑
+   │ restore │  │ suspend│
+   │         │  ↓        │
+   │        suspended ───┘
    │          │
    └──────────┴────→ quarantined
 ```
+
+**`suspended` is containment, and it is reversible.** An administrator suspends a Principal to
+stop it signing in while an incident is investigated, and restores it afterwards
+(`TDD-identity-control-005` §Containment Is Reversible). The kernel user is disabled and its
+sessions ended, and nothing else changes: its Memberships, ownerships and grants are kept, as
+Okta keeps a suspended user's assignments and reinstates them on unsuspend. **`quarantined` is
+different.** It is the reconciler's hold on a mapping whose invariants are broken: a Principal made
+outside the authorized path, or a duplicate. No administrator sets it, and only a relink or a
+retirement leaves it. A suspended Principal may be retired.
 
 **`relink` is the one way back from `active`.** A Principal outlives its Keycloak user.
 The user can be deleted in the console, or lost with a realm rebuilt from nothing, and
