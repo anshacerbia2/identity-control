@@ -34,6 +34,19 @@ func providerOnly(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// selfOnly serves a route to any authenticated Principal, acting on the Principal in its token
+// (route class self, TDD-identity-control-005 §Self-Service as Built). The handler names no other
+// subject: it reads the caller from the context, never from the path.
+func selfOnly(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := callerPrincipal(r); !ok {
+			httpapi.Problem(w, r, httpapi.AuthenticationRequired, "The request carries no authenticated caller")
+			return
+		}
+		next(w, r)
+	}
+}
+
 // registrationOf reads the registration a path names. The lifecycle route carries its action in the
 // same segment (`{registration_id}:suspend`), so the identifier is the part before the colon.
 func registrationOf(r *http.Request) (id.UUID, string, error) {

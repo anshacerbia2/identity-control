@@ -2100,7 +2100,7 @@ table "security_operation" {
     expr = "state IN ('pending', 'retrying', 'applied', 'refused', 'unresolved')"
   }
   check "security_operation_type_check" {
-    expr = "operation_type IN ('suspend', 'restore', 'sessions.terminate-all', 'authenticator.revoke')"
+    expr = "operation_type IN ('suspend', 'restore', 'sessions.terminate-all', 'authenticator.revoke', 'session.terminate', 'authenticator.remove')"
   }
 }
 

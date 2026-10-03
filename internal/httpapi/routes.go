@@ -32,6 +32,10 @@ type RoutesConfig struct {
 	// §Containment as Built). Nil, its routes are not mounted and :suspend and :restore are unknown.
 	Security *Security
 
+	// Me serves a person's own sessions and authenticators (TDD-identity-control-005 §Self-Service as
+	// Built). Nil, its routes are not mounted.
+	Me *Me
+
 	// Investigation serves a provider's reads of another Principal (TDD-identity-control-005). Nil,
 	// its routes are not mounted.
 	Investigation *Investigation
@@ -134,6 +138,16 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 		api.HandleFunc("GET /v1/principals/{principal_id}/authenticators", p(cfg.Investigation.Authenticators))
 		api.HandleFunc("GET /v1/principals/{principal_id}/federation-links", p(cfg.Investigation.FederationLinks))
 		api.HandleFunc("GET /v1/principals/{principal_id}/findings", p(cfg.Investigation.Findings))
+	}
+	// Route class self: any person, acting on the Principal in its token.
+	s := selfOnly
+	if cfg.Me != nil {
+		api.HandleFunc("GET /v1/me/sessions", s(cfg.Me.Sessions))
+		api.HandleFunc("POST /v1/me/sessions/{session_action}", s(cfg.Me.SessionAction))
+		api.HandleFunc("POST /v1/me/sessions:terminate-all", s(cfg.Me.TerminateAll))
+		api.HandleFunc("GET /v1/me/authenticators", s(cfg.Me.Authenticators))
+		api.HandleFunc("POST /v1/me/authenticators/{authenticator_action}", s(cfg.Me.AuthenticatorAction))
+		api.HandleFunc("GET /v1/me/security-operations/{operation_id}", s(cfg.Me.Operation))
 	}
 	if cfg.Security != nil {
 		api.HandleFunc("POST /v1/principals/{principal_id}/sessions:terminate-all", p(cfg.Security.TerminateAll))

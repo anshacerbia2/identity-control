@@ -40,6 +40,13 @@ const (
 // the administrative revocation (TDD-identity-control-005 §API).
 const PurposeAdminRevoke = "admin.authenticator.revoke"
 
+// The purposes a person's own handles are sealed for (TDD-identity-control-005 §Self-Service as
+// Built). None opens on an administrative route, and no administrative handle opens on these.
+const (
+	PurposeSelfSessionTerminate    = "self.session.terminate"
+	PurposeSelfAuthenticatorRemove = "self.authenticator.remove"
+)
+
 // ErrInvalid is any handle that does not open: tampered, expired, sealed for another kind, subject
 // or purpose, or under a key no longer held. One error for all of them, so a caller probing handles
 // learns nothing about which check failed.

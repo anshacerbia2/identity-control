@@ -34,6 +34,11 @@ const (
 	TypeRestore      = "restore"
 	TypeTerminateAll = "sessions.terminate-all"
 	TypeRevoke       = "authenticator.revoke"
+
+	// A person's own commands (TDD-identity-control-005 §Self-Service as Built). A self
+	// sessions.terminate-all is the type above with the actor as its subject.
+	TypeSessionTerminate    = "session.terminate"
+	TypeAuthenticatorRemove = "authenticator.remove"
 )
 
 // The operation states.
@@ -100,8 +105,10 @@ type Actor struct {
 	Assurance string
 }
 
-// Command is one security command.
+// Command is one security command. A self command (Self) is a person acting on their own
+// Principal: it carries no reason and no expected version, and its subject is the actor.
 type Command struct {
+	Self            bool
 	Type            string
 	Subject         id.UUID
 	Ref             string
@@ -174,8 +181,20 @@ func New(tx Transactor, kernel keycloak.Containment, refs *securityref.Codec, cf
 	return &Service{tx: tx, kernel: kernel, refs: refs, cfg: cfg, logger: logger, newID: id.NewV7, jitter: fullJitter}, nil
 }
 
-// Route is the route an operation type is commanded on, as its evidence records it.
-func Route(operationType string) string {
+// Route is the route an operation is commanded on, as its evidence records it. A self command is
+// one whose actor is its subject.
+func Route(operationType string, self bool) string {
+	if self {
+		switch operationType {
+		case TypeSessionTerminate:
+			return "POST /v1/me/sessions/{security_ref}:terminate"
+		case TypeTerminateAll:
+			return "POST /v1/me/sessions:terminate-all"
+		case TypeAuthenticatorRemove:
+			return "POST /v1/me/authenticators/{security_ref}:remove"
+		}
+		return ""
+	}
 	switch operationType {
 	case TypeSuspend:
 		return "POST /v1/principals/{principal_id}:suspend"
@@ -189,26 +208,45 @@ func Route(operationType string) string {
 	return ""
 }
 
+// referenced reports whether an operation type names one object by a reference.
+func referenced(operationType string) bool {
+	return operationType == TypeRevoke || operationType == TypeSessionTerminate || operationType == TypeAuthenticatorRemove
+}
+
 func (c Command) validate() error {
 	switch {
-	case Route(c.Type) == "":
+	case Route(c.Type, c.Self) == "":
 		return fmt.Errorf("%w: unknown operation %q", ErrInvalid, c.Type)
 	case c.Subject.IsNil() || c.Actor.Principal.IsNil():
 		return fmt.Errorf("%w: a subject and an actor are required", ErrInvalid)
-	case c.Actor.Principal == c.Subject:
+	case !c.Self && c.Actor.Principal == c.Subject:
 		return ErrSelfAction
+	case c.Self && c.Actor.Principal != c.Subject:
+		return fmt.Errorf("%w: a self command acts on the caller's own Principal", ErrInvalid)
 	case strings.TrimSpace(c.IdempotencyKey) == "" || len(c.IdempotencyKey) > 255:
 		return fmt.Errorf("%w: an Idempotency-Key of at most 255 characters is required", ErrInvalid)
-	case strings.TrimSpace(c.Reason) == "":
+	case !c.Self && strings.TrimSpace(c.Reason) == "":
 		return fmt.Errorf("%w: an administrative reason is required", ErrInvalid)
-	case c.ExpectedVersion < 1:
+	case !c.Self && c.ExpectedVersion < 1:
 		return fmt.Errorf("%w: expected_version is required", ErrInvalid)
-	case (c.Type == TypeRevoke) != (c.Ref != ""):
-		return fmt.Errorf("%w: a reference names the authenticator a revocation removes, and nothing else", ErrInvalid)
+	case referenced(c.Type) != (c.Ref != ""):
+		return fmt.Errorf("%w: a reference names the object a command acts on, and nothing else", ErrInvalid)
 	case strings.TrimSpace(c.Actor.Correlation) == "" || strings.TrimSpace(c.Actor.Assurance) == "":
 		return fmt.Errorf("%w: a correlation identifier and the caller's assurance are required", ErrInvalid)
 	}
 	return nil
+}
+
+// refBinding is the kind and purpose a command's reference must have been sealed for.
+func refBinding(operationType string) (securityref.Kind, string) {
+	switch operationType {
+	case TypeSessionTerminate:
+		return securityref.KindSession, securityref.PurposeSelfSessionTerminate
+	case TypeAuthenticatorRemove:
+		return securityref.KindCredential, securityref.PurposeSelfAuthenticatorRemove
+	default:
+		return securityref.KindCredential, securityref.PurposeAdminRevoke
+	}
 }
 
 // digest is what makes two requests under one key the same request.
@@ -278,7 +316,10 @@ func (s *Service) Accept(ctx context.Context, cmd Command) (Operation, error) {
 		if err := tx.QueryRow(ctx, lockSubjectStatement, cmd.Subject.String()).Scan(&version, &sequence); err != nil {
 			return fmt.Errorf("securitystate: lock the subject: %w", err)
 		}
-		if version != cmd.ExpectedVersion {
+		// A self command names no version: it records the one it was accepted against.
+		if cmd.Self {
+			cmd.ExpectedVersion = version
+		} else if version != cmd.ExpectedVersion {
 			return fmt.Errorf("%w: it is %d, the command names %d", ErrVersion, version, cmd.ExpectedVersion)
 		}
 		if _, err := tx.Exec(ctx, advanceSubjectStatement, cmd.Subject.String()); err != nil {
@@ -303,8 +344,12 @@ func (s *Service) Accept(ctx context.Context, cmd Command) (Operation, error) {
 		if cmd.Ref != "" {
 			ref = cmd.Ref
 		}
+		var reason any
+		if cmd.Reason != "" {
+			reason = cmd.Reason
+		}
 		rows, err := tx.Query(ctx, insertOperationStatement, operationID.String(), cmd.Subject.String(), sequence,
-			cmd.Actor.Principal.String(), cmd.IdempotencyKey, digest, cmd.Type, ref, cmd.ExpectedVersion, cmd.Reason,
+			cmd.Actor.Principal.String(), cmd.IdempotencyKey, digest, cmd.Type, ref, cmd.ExpectedVersion, reason,
 			cmd.Actor.Correlation, cmd.Actor.Assurance, cmd.Actor.Emergency)
 		if err != nil {
 			return fmt.Errorf("securitystate: record the operation: %w", err)
@@ -370,12 +415,17 @@ func (s *Service) admit(ctx context.Context, tx db.Tx, cmd Command) error {
 	case kernelUser == "":
 		return fmt.Errorf("%w: it has no kernel user", ErrState)
 	}
-	switch cmd.Type {
-	case TypeSuspend:
+	switch {
+	case cmd.Self:
+		// A suspended person's token can outlive the suspension by its lifetime; it commands nothing.
+		if state != "active" {
+			return fmt.Errorf("%w: it is %s, and only an active Principal acts on itself", ErrState, state)
+		}
+	case cmd.Type == TypeSuspend:
 		if state != "active" {
 			return fmt.Errorf("%w: it is %s, and only an active Principal is suspended", ErrState, state)
 		}
-	case TypeRestore:
+	case cmd.Type == TypeRestore:
 		if state != "suspended" {
 			return fmt.Errorf("%w: it is %s, and only a suspended Principal is restored", ErrState, state)
 		}
@@ -391,8 +441,9 @@ func (s *Service) admit(ctx context.Context, tx db.Tx, cmd Command) error {
 			return fmt.Errorf("%w: it is %s", ErrState, state)
 		}
 	}
-	if cmd.Type == TypeRevoke {
-		if _, err := s.refs.Open(cmd.Ref, securityref.KindCredential, cmd.Subject, securityref.PurposeAdminRevoke); err != nil {
+	if referenced(cmd.Type) {
+		kind, purpose := refBinding(cmd.Type)
+		if _, err := s.refs.Open(cmd.Ref, kind, cmd.Subject, purpose); err != nil {
 			return ErrNotFound
 		}
 	}

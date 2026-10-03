@@ -106,6 +106,12 @@ func TestEveryAPIRouteIsWrapped(t *testing.T) {
 		if slices.Contains(creatorRoutes, pattern) && strings.HasPrefix(handler, "creator(") {
 			continue // a provider, or an application developer within its bounds
 		}
+		if strings.HasPrefix(pattern, "GET /v1/me/") || strings.HasPrefix(pattern, "POST /v1/me/") {
+			if !strings.HasPrefix(handler, "s(") {
+				t.Errorf("%s is a self route served by %s, not selfOnly", pattern, handler)
+			}
+			continue // route class self: the caller's own Principal, named by no path segment
+		}
 		if !strings.HasPrefix(handler, "p(") && !strings.HasPrefix(handler, "owned(") {
 			t.Errorf("%s is served by %s, neither providerOnly nor owned", pattern, handler)
 		}
