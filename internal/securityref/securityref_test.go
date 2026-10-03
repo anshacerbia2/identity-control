@@ -151,3 +151,21 @@ func TestSealRefusesAnIncompleteReference(t *testing.T) {
 		t.Error("a reference with no object was sealed")
 	}
 }
+
+// An accepted command's handle opens after its TTL, and only for what it was sealed for.
+func TestAnAcceptedHandleOpensWithoutItsExpiry(t *testing.T) {
+	c, now := codec(t, key("k1", 1))
+	alice, bob := principal(t), principal(t)
+	handle, _ := c.Seal(KindCredential, alice, PurposeAdminRevoke, "scnehaux", "kc-credential-1")
+	*now = now.Add(time.Hour)
+	if _, err := c.Open(handle, KindCredential, alice, PurposeAdminRevoke); !errors.Is(err, ErrInvalid) {
+		t.Errorf("Open after the TTL: %v, want ErrInvalid", err)
+	}
+	ref, err := c.OpenAccepted(handle, KindCredential, alice, PurposeAdminRevoke)
+	if err != nil || ref.KernelID != "kc-credential-1" {
+		t.Errorf("OpenAccepted: %+v, %v", ref, err)
+	}
+	if _, err := c.OpenAccepted(handle, KindCredential, bob, PurposeAdminRevoke); !errors.Is(err, ErrInvalid) {
+		t.Errorf("OpenAccepted for another Principal: %v, want ErrInvalid", err)
+	}
+}

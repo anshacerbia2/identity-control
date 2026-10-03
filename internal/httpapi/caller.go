@@ -11,6 +11,7 @@ import (
 	"context"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // callerScopeKey carries the authenticated caller through the request context.
@@ -84,4 +85,23 @@ func ProviderEmergency(ctx context.Context) bool {
 func IsProvider(ctx context.Context) bool {
 	_, provider := ctx.Value(providerKey{}).(providerState)
 	return provider
+}
+
+type assuranceKey struct{}
+
+type assurance struct {
+	acr      string
+	authTime time.Time
+}
+
+// WithAssurance records how and when the caller last authenticated, from the verified token's acr
+// and auth_time. The authentication middleware sets it; tests in other packages set it directly.
+func WithAssurance(ctx context.Context, acr string, authTime time.Time) context.Context {
+	return context.WithValue(ctx, assuranceKey{}, assurance{acr: acr, authTime: authTime})
+}
+
+// Assurance returns the caller's acr and auth_time, and whether the request carries them.
+func Assurance(ctx context.Context) (string, time.Time, bool) {
+	a, ok := ctx.Value(assuranceKey{}).(assurance)
+	return a.acr, a.authTime, ok
 }

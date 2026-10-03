@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/anshacerbia2/foundation-platform/httpapi"
@@ -26,6 +27,10 @@ type RoutesConfig struct {
 	Workloads     *Workloads
 	Database      Prober
 	Telemetry     *observability.Telemetry
+
+	// Security serves a provider's security commands on another Principal (TDD-identity-control-005
+	// §Containment as Built). Nil, its routes are not mounted and :suspend and :restore are unknown.
+	Security *Security
 
 	// Investigation serves a provider's reads of another Principal (TDD-identity-control-005). Nil,
 	// its routes are not mounted.
@@ -120,7 +125,7 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	p, owned, creator := providerOnly, cfg.Registrations.owned, cfg.Registrations.creator
 	api := http.NewServeMux()
 	api.HandleFunc("POST /v1/principals", p(cfg.Principals.CreatePrincipal))
-	api.HandleFunc("POST /v1/principals/{target}", p(cfg.Principals.PrincipalAction))
+	api.HandleFunc("POST /v1/principals/{target}", p(principalAction(cfg)))
 	api.HandleFunc("GET /v1/principals:dangling", p(cfg.Principals.Dangling))
 	if cfg.Investigation != nil {
 		api.HandleFunc("GET /v1/principals:search", p(cfg.Investigation.Search))
@@ -129,6 +134,11 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 		api.HandleFunc("GET /v1/principals/{principal_id}/authenticators", p(cfg.Investigation.Authenticators))
 		api.HandleFunc("GET /v1/principals/{principal_id}/federation-links", p(cfg.Investigation.FederationLinks))
 		api.HandleFunc("GET /v1/principals/{principal_id}/findings", p(cfg.Investigation.Findings))
+	}
+	if cfg.Security != nil {
+		api.HandleFunc("POST /v1/principals/{principal_id}/sessions:terminate-all", p(cfg.Security.TerminateAll))
+		api.HandleFunc("POST /v1/principals/{principal_id}/authenticators/{authenticator_action}", p(cfg.Security.Revoke))
+		api.HandleFunc("GET /v1/security-operations/{operation_id}", p(cfg.Security.Operation))
 	}
 	api.HandleFunc("POST /v1/principals:reconcile", p(cfg.Principals.Reconcile))
 	// A provider registers anything; an application developer registers within its bounds.
@@ -190,4 +200,20 @@ func (s Surface) Mount(probeChain, apiChain func(http.Handler) http.Handler) htt
 	}
 	root.Handle("/", apiChain(reasonHeaders(s.API)))
 	return root
+}
+
+// principalAction dispatches POST /v1/principals/{target} by its action: :relink to the Principal
+// path, :suspend and :restore to the security commands when they are mounted.
+func principalAction(cfg RoutesConfig) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		subject, action, _ := strings.Cut(r.PathValue("target"), ":")
+		switch {
+		case action == "suspend" && cfg.Security != nil:
+			cfg.Security.Suspend(w, r, subject)
+		case action == "restore" && cfg.Security != nil:
+			cfg.Security.Restore(w, r, subject)
+		default:
+			cfg.Principals.PrincipalAction(w, r)
+		}
+	}
 }

@@ -47,6 +47,9 @@ BEGIN
               ('identity.provider_projection'),
               ('identity.ceremony_grant_retirement'),
               ('identity.privileged_access'),
+              ('identity.security_subject_state'),
+              ('identity.security_operation'),
+              ('identity.security_operation_attempt'),
               ('identity.principal_relink'),
               ('identity.principal_finding'),
               ('platform.outbox'),
@@ -175,6 +178,15 @@ REVOKE UPDATE, DELETE, TRUNCATE ON identity.ceremony_grant_retirement FROM ident
 -- protected from modification and deletion (NIST SP 800-53 AU-9), so the runtime inserts and reads
 -- and does nothing else.
 REVOKE UPDATE, DELETE, TRUNCATE ON identity.privileged_access FROM identity_runtime;
+-- A security command is the record of who asked to contain whom, why and when (TDD-identity-control-005
+-- §Containment as Built). Nothing deletes one, and its request is never rewritten: only its execution
+-- state is written after acceptance. An attempt is insert-only but for its own finish. The subject
+-- state is a counter, updated by every command and never deleted.
+REVOKE DELETE, TRUNCATE ON identity.security_subject_state FROM identity_runtime;
+REVOKE UPDATE, DELETE, TRUNCATE ON identity.security_operation FROM identity_runtime;
+GRANT UPDATE (state, attempts, next_attempt_at, result_code, last_error_class, applied_at) ON identity.security_operation TO identity_runtime;
+REVOKE UPDATE, DELETE, TRUNCATE ON identity.security_operation_attempt FROM identity_runtime;
+GRANT UPDATE (finished_at, outcome, error_class) ON identity.security_operation_attempt TO identity_runtime;
 
 -- platform.outbox_sequence is read by every append. Without USAGE the outbox write fails
 -- inside the caller's domain transaction, so a membership mutation would roll back.

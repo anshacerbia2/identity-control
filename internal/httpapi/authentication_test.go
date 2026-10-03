@@ -539,17 +539,24 @@ func TestProviderAuthorityComesFromTheRecordsDecision(t *testing.T) {
 				seen    bool
 				reached bool
 				urgent  bool
+				authAt  time.Time
+				acr     string
 			)
 			logger := slog.New(slog.NewJSONHandler(&logged, nil))
 			handler := authenticateLogging(t, realVerifier(t), decider{decision: c.decision, err: c.err, asked: &asked}, logger)(
 				http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 					reached, seen, urgent = true, httpapi.IsProvider(r.Context()), httpapi.ProviderEmergency(r.Context())
+					acr, authAt, _ = httpapi.Assurance(r.Context())
 				}))
 			w := httptest.NewRecorder()
 			handler.ServeHTTP(w, bearerRequest("Bearer "+token(t, validClaims())))
 
 			if w.Code != c.status || seen != c.provider || reached != (c.status == http.StatusOK) {
 				t.Errorf("status %d, reached %t, provider %t; want %d, provider %t", w.Code, reached, seen, c.status, c.provider)
+			}
+			// How and when the caller authenticated travels with the request, for a command's step-up.
+			if reached && (acr == "" || !authAt.Equal(time.Unix(authNow.Add(-2*time.Minute).Unix(), 0))) {
+				t.Errorf("assurance acr %q, auth_time %s; want the token's", acr, authAt)
 			}
 			// The basis travels with the request, so a read the caller makes is recorded as an
 			// emergency one (TDD-identity-control-005 §Evidence).

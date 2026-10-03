@@ -85,9 +85,33 @@ func TestLoadAppliesDefaults(t *testing.T) {
 	if cfg.HTTPRequestTimeout != 5*time.Second {
 		t.Errorf("HTTPRequestTimeout = %s, want 5s", cfg.HTTPRequestTimeout)
 	}
+	if cfg.StepUpMaxAge != 5*time.Minute || cfg.CommandBudget != 2*time.Second || cfg.AttemptTimeout != 500*time.Millisecond ||
+		cfg.MaxAttempts != 3 || cfg.OperationLease != 10*time.Second || cfg.ExecutorInterval != time.Second {
+		t.Errorf("security command defaults = %s, %s, %s, %d, %s, %s (TDD-identity-control-005 §Configuration)",
+			cfg.StepUpMaxAge, cfg.CommandBudget, cfg.AttemptTimeout, cfg.MaxAttempts, cfg.OperationLease, cfg.ExecutorInterval)
+	}
 	if cfg.SecurityRefTTL != 10*time.Minute || cfg.AdminSearchMinLength != 3 || cfg.AdminSearchPageSize != 25 {
 		t.Errorf("investigation defaults = %s, %d, %d; want 10m, 3, 25 (TDD-identity-control-005 §Configuration)",
 			cfg.SecurityRefTTL, cfg.AdminSearchMinLength, cfg.AdminSearchPageSize)
+	}
+}
+
+func TestALeaseShorterThanASuspensionIsRefused(t *testing.T) {
+	t.Setenv("IDENTITY_DATABASE_URL", "postgres://runtime@localhost:5432/identity")
+	t.Setenv("IDENTITY_KEYCLOAK_REALM", "scnehaux")
+	t.Setenv("IDENTITY_KEYCLOAK_BASE_URL", "https://identity.example.com")
+	t.Setenv("IDENTITY_KEYCLOAK_CLIENT_ID", "identity-control")
+	t.Setenv("IDENTITY_KEYCLOAK_CLIENT_KEY_FILE", "/keys/identity-control.pem")
+	t.Setenv("IDENTITY_TOKEN_ISSUER", "https://identity.example.com/realms/scnehaux")
+	t.Setenv("IDENTITY_TOKEN_AUDIENCE", "identity-control")
+	t.Setenv("IDENTITY_JWKS_URL", "https://identity.example.com/realms/scnehaux/protocol/openid-connect/certs")
+	t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID", "identity-control-registration")
+	t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_KEY_FILE", "/keys/identity-control-registration.pem")
+	t.Setenv("IDENTITY_SECURITY_REF_KEY_FILE", "/keys/security-ref.json")
+	t.Setenv("IDENTITY_SECURITY_OPERATION_LEASE", "2s")
+
+	if _, err := config.Load(); err == nil || !strings.Contains(err.Error(), "IDENTITY_SECURITY_OPERATION_LEASE") {
+		t.Fatalf("Load with a 2s lease over 500ms calls: %v", err)
 	}
 }
 

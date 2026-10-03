@@ -106,6 +106,9 @@ type Principal struct {
 	QuarantinedAt    *time.Time `json:"quarantined_at"`
 	QuarantineReason string     `json:"quarantine_reason,omitempty"`
 	Version          int64      `json:"version"`
+	// SecurityVersion is the version a security command on the Principal names as expected_version:
+	// 1 before any command (TDD-identity-control-005 §Containment as Built).
+	SecurityVersion int64 `json:"security_version"`
 }
 
 // Session is one of a Principal's sessions. No IP address, user agent or kernel identifier.
@@ -140,7 +143,7 @@ type Finding struct {
 
 // PurposeRevoke is the purpose an authenticator's reference is sealed for: the administrative
 // revocation (TDD-identity-control-005 §API).
-const PurposeRevoke = "admin.authenticator.revoke"
+const PurposeRevoke = securityref.PurposeAdminRevoke
 
 const recordStatement = `INSERT INTO identity.privileged_access
     (access_id, actor_principal_id, subject_principal_id, action, route, query, result_count, outcome,
@@ -221,11 +224,12 @@ func (s *Service) Search(ctx context.Context, actor Actor, query string) ([]Summ
 	return results, err
 }
 
-const principalStatement = `SELECT principal_id::text, username, coalesce(email, ''), subject_type, state, realm,
-       coalesce(workload_owner::text, ''), created_at, activated_at, quarantined_at,
-       coalesce(quarantine_reason, ''), version, coalesce(keycloak_user_id, '')
-FROM identity.principal_mapping
-WHERE principal_id = $1 AND realm = $2`
+const principalStatement = `SELECT m.principal_id::text, m.username, coalesce(m.email, ''), m.subject_type, m.state, m.realm,
+       coalesce(m.workload_owner::text, ''), m.created_at, m.activated_at, m.quarantined_at,
+       coalesce(m.quarantine_reason, ''), m.version, coalesce(m.keycloak_user_id, ''), coalesce(s.version, 1)
+FROM identity.principal_mapping m
+LEFT JOIN identity.security_subject_state s ON s.principal_id = m.principal_id
+WHERE m.principal_id = $1 AND m.realm = $2`
 
 // readPrincipal reads one mapping and its kernel user identifier, which stays in this package.
 func (s *Service) readPrincipal(ctx context.Context, tx db.Tx, principalID id.UUID) (Principal, keycloak.UserID, error) {
@@ -245,7 +249,7 @@ func (s *Service) readPrincipal(ctx context.Context, tx db.Tx, principalID id.UU
 		pid, owner, kernelUser string
 	)
 	if err := rows.Scan(&pid, &p.Username, &p.Email, &p.SubjectType, &p.State, &p.Realm, &owner, &p.CreatedAt,
-		&p.ActivatedAt, &p.QuarantinedAt, &p.QuarantineReason, &p.Version, &kernelUser); err != nil {
+		&p.ActivatedAt, &p.QuarantinedAt, &p.QuarantineReason, &p.Version, &kernelUser, &p.SecurityVersion); err != nil {
 		return Principal{}, "", fmt.Errorf("investigation: scan the Principal: %w", err)
 	}
 	if p.PrincipalID, err = id.Parse(pid); err != nil {

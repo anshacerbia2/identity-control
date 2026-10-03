@@ -546,7 +546,16 @@ Built in the order TDD-005 §Build Order states, one PR per slice:
   - Sessions, authenticators and federation links are read from the kernel through the Admin API's user sub-resources, with the Principal credential's `view-users`. No IP address, no credential secret or data, and no kernel identifier leaves the service.
   - An authenticator carries a `security_ref`: its kernel identifier sealed with AES-256-GCM (RFC 5116), bound to the kind, the subject Principal and the revocation purpose, for `IDENTITY_SECURITY_REF_TTL`. The key ring is `IDENTITY_SECURITY_REF_KEY_FILE`, made on a server by `deploy/dev/create-security-ref-key.sh`.
   - Every served read writes one row to the insert-only `identity.privileged_access` (NIST SP 800-53 AU-3, AU-9): actor, subject, action, route, query, result count, correlation and whether the provider authority was emergency. A read whose record does not commit is not served, and a refused or failed read records nothing.
-- **2 · Containment.** Suspend and restore, terminate every session, revoke one authenticator, through the durable operation executor.
+- ✅ **2 · Containment** (TDD-005 2.2.0 §Containment as Built). `POST /v1/principals/{id}:suspend`, `:restore`, `/sessions:terminate-all`, `/authenticators/{security_ref}:revoke`, and `GET /v1/security-operations/{id}`. All are provider-only, for human Principals.
+  - Each command carries an `Idempotency-Key`, an `X-Administrative-Reason`, and `expected_version`, which `GET /v1/principals/{id}` serves as `security_version`. Each needs an authentication within `IDENTITY_STEP_UP_MAX_AGE`; an older one is answered `401 insufficient_user_authentication` (RFC 9470).
+  - A provider cannot act on its own Principal. A workload is refused with the `/v1/workloads` route.
+  - **Acceptance.** It is one transaction: the idempotency lookup first, then the mapping (`active ⇄ suspended`), the version and sequence in `security_subject_state`, and the operation.
+  - **Execution.** A lease. A `SKIP LOCKED` claim takes an operation only when every earlier operation of the same Principal is final, writes an attempt row, and commits before the kernel calls. A second transaction writes the outcome, with the `privileged_access` row when it is final.
+  - **Retries and parking.** A transient failure is retried with full-jitter backoff. After `IDENTITY_SECURITY_MAX_ATTEMPTS`, or after a permanent failure, the operation is parked as `unresolved`, logged as `security operation unresolved`, and blocks that Principal's later commands.
+  - **Kernel calls.** `suspend` disables the user and logs it out. A disable alone only pauses the sessions (identity-kernel compat run 37125613572). `restore` enables the user. Every call is read back before the operation counts as applied.
+  - **Revocation.** It refuses the last first factor (`last_authenticator`). On this realm that is the password, so a compromised password is contained by suspension.
+  - Inline within `IDENTITY_SECURITY_COMMAND_BUDGET`, a command answers `200` with the final operation. Otherwise it answers `202` with `Location`. The executor runs every `IDENTITY_SECURITY_EXECUTOR_INTERVAL`.
+  - Not yet built: an operator re-drive for an `unresolved` operation (STD-GLB-011 §3.9 replay), and the OTLP counters STD-GLB-011 §3.15 lists. Until then the logs carry them.
 - **3 · Self-service.** `/v1/me` security reads and commands.
 - **4 · Enrollment and the assurance floor.** Needs the kernel's LoA mapping first.
 
