@@ -40,8 +40,11 @@ Add-Type -AssemblyName System.Net.Http
 # used to call is prohibited by STD-IAM-001 3.2 and could not have produced a conformant
 # privileged token: auth_time exists only for an authentication ceremony.
 . "$PSScriptRoot\dev-token.ps1"
+# Every provider route requires aal2 (ADR-IAM-004). With IDENTITY_OPERATOR_TOTP_FILE set, as the CI stack
+# sets it, the operator's TOTP is enrolled into that file on first use and read from it after.
+$operatorTotp = if ($env:IDENTITY_OPERATOR_TOTP_FILE) { @{ OperatorTotpFile = $env:IDENTITY_OPERATOR_TOTP_FILE } } else { @{} }
 $token = Get-ScnehauxToken -Username "bootstrap-operator" `
-    -Password $env:IDENTITY_CALLER_PASSWORD -KeyFile $env:IDENTITY_CALLER_KEY_FILE
+    -Password $env:IDENTITY_CALLER_PASSWORD -KeyFile $env:IDENTITY_CALLER_KEY_FILE @operatorTotp
 
 function Decode-Segment($segment) {
     $s = $segment.Replace('-', '+').Replace('_', '/')

@@ -77,11 +77,6 @@ jobs:
             echo "KEYS_OWNER=$(id -u):$(id -g)"
             # Short enough that Proof B sees the schedule run within the job.
             echo "IDENTITY_REGISTRATION_RECONCILE_INTERVAL=20s"
-            # The smoke signs the bootstrap operator in with a password; it enrolls no TOTP, so its
-            # token is below the aal2 every provider route requires (ADR-IAM-004). report serves it
-            # and logs the shortfall. The enforce path is asserted by internal/httpapi's tests, and
-            # the levels themselves by identity-kernel's compat/levels_test.go.
-            echo "IDENTITY_ASSURANCE=report"
           } > .env
 
       - name: register this service's clients in the kernel
@@ -167,7 +162,10 @@ jobs:
       - name: smoke the API with a provider-scope token
         run: |
           set -a; . deploy/dev/.env; set +a
+          # Provider routes require aal2 (ADR-IAM-004), enforced here: the smoke enrolls the bootstrap
+          # operator's TOTP on its first sign-in and computes its codes after.
           export IDENTITY_API_URL=http://127.0.0.1:8082 KC_BASE_URL=https://localhost
+          export IDENTITY_OPERATOR_TOTP_FILE="$RUNNER_TEMP/operator-totp.json"
           pwsh -NoProfile -File scripts/dev-smoke.ps1
 
       # identity-control ROADMAP §Proof B: both drift scenarios, a drift exception and its expiry,
@@ -177,6 +175,7 @@ jobs:
         run: |
           set -a; . deploy/dev/.env; set +a
           export IDENTITY_API_URL=http://127.0.0.1:8082 KC_BASE_URL=https://localhost KC_ADMIN_URL=http://localhost:8080
+          export IDENTITY_OPERATOR_TOTP_FILE="$RUNNER_TEMP/operator-totp.json"
           pwsh -NoProfile -File scripts/dev-proof-b.ps1
       - name: stack logs
         if: failure()
