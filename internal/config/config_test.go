@@ -22,6 +22,7 @@ func TestLoadRequiresDatabaseURL(t *testing.T) {
 	t.Setenv("IDENTITY_JWKS_URL", "https://identity.example.com/realms/scnehaux/protocol/openid-connect/certs")
 	t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID", "identity-control-registration")
 	t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_KEY_FILE", "/keys/identity-control-registration.pem")
+	t.Setenv("IDENTITY_SECURITY_REF_KEY_FILE", "/keys/security-ref.json")
 
 	if _, err := config.Load(); err == nil {
 		t.Fatal("Load succeeded without IDENTITY_DATABASE_URL")
@@ -59,6 +60,7 @@ func TestLoadAppliesDefaults(t *testing.T) {
 	t.Setenv("IDENTITY_JWKS_URL", "https://identity.example.com/realms/scnehaux/protocol/openid-connect/certs")
 	t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID", "identity-control-registration")
 	t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_KEY_FILE", "/keys/identity-control-registration.pem")
+	t.Setenv("IDENTITY_SECURITY_REF_KEY_FILE", "/keys/security-ref.json")
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -83,6 +85,28 @@ func TestLoadAppliesDefaults(t *testing.T) {
 	if cfg.HTTPRequestTimeout != 5*time.Second {
 		t.Errorf("HTTPRequestTimeout = %s, want 5s", cfg.HTTPRequestTimeout)
 	}
+	if cfg.SecurityRefTTL != 10*time.Minute || cfg.AdminSearchMinLength != 3 || cfg.AdminSearchPageSize != 25 {
+		t.Errorf("investigation defaults = %s, %d, %d; want 10m, 3, 25 (TDD-identity-control-005 §Configuration)",
+			cfg.SecurityRefTTL, cfg.AdminSearchMinLength, cfg.AdminSearchPageSize)
+	}
+}
+
+func TestLoadRequiresTheSecurityRefKeyRing(t *testing.T) {
+	t.Setenv("IDENTITY_DATABASE_URL", "postgres://runtime@localhost:5432/identity")
+	t.Setenv("IDENTITY_KEYCLOAK_REALM", "scnehaux")
+	t.Setenv("IDENTITY_KEYCLOAK_BASE_URL", "https://identity.example.com")
+	t.Setenv("IDENTITY_KEYCLOAK_CLIENT_ID", "identity-control")
+	t.Setenv("IDENTITY_KEYCLOAK_CLIENT_KEY_FILE", "/keys/identity-control.pem")
+	t.Setenv("IDENTITY_TOKEN_ISSUER", "https://identity.example.com/realms/scnehaux")
+	t.Setenv("IDENTITY_TOKEN_AUDIENCE", "identity-control")
+	t.Setenv("IDENTITY_JWKS_URL", "https://identity.example.com/realms/scnehaux/protocol/openid-connect/certs")
+	t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID", "identity-control-registration")
+	t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_KEY_FILE", "/keys/identity-control-registration.pem")
+	t.Setenv("IDENTITY_SECURITY_REF_KEY_FILE", "")
+
+	if _, err := config.Load(); err == nil || !strings.Contains(err.Error(), "IDENTITY_SECURITY_REF_KEY_FILE") {
+		t.Fatalf("Load without a key ring: %v", err)
+	}
 }
 
 func TestLoadOverridesFromEnvironment(t *testing.T) {
@@ -96,6 +120,7 @@ func TestLoadOverridesFromEnvironment(t *testing.T) {
 	t.Setenv("IDENTITY_JWKS_URL", "https://identity.example.com/realms/scnehaux/protocol/openid-connect/certs")
 	t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID", "identity-control-registration")
 	t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_KEY_FILE", "/keys/identity-control-registration.pem")
+	t.Setenv("IDENTITY_SECURITY_REF_KEY_FILE", "/keys/security-ref.json")
 	t.Setenv("IDENTITY_LISTEN_ADDRESS", "127.0.0.1:9090")
 	t.Setenv("DB_MAX_CONNS", "8")
 	t.Setenv("HTTP_REQUEST_TIMEOUT", "250ms")
@@ -144,6 +169,7 @@ func TestLoadRejectsMalformedValues(t *testing.T) {
 			t.Setenv("IDENTITY_JWKS_URL", "https://identity.example.com/realms/scnehaux/protocol/openid-connect/certs")
 			t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID", "identity-control-registration")
 			t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_KEY_FILE", "/keys/identity-control-registration.pem")
+			t.Setenv("IDENTITY_SECURITY_REF_KEY_FILE", "/keys/security-ref.json")
 			t.Setenv(tc.key, tc.value)
 
 			if _, err := config.Load(); err == nil {
@@ -189,6 +215,7 @@ func TestLoadRequiresTheRegistrationCredential(t *testing.T) {
 			t.Setenv("IDENTITY_JWKS_URL", "https://identity.example.com/realms/scnehaux/protocol/openid-connect/certs")
 			t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID", "identity-control-registration")
 			t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_KEY_FILE", "/keys/identity-control-registration.pem")
+			t.Setenv("IDENTITY_SECURITY_REF_KEY_FILE", "/keys/security-ref.json")
 			t.Setenv(missing, "")
 
 			_, err := config.Load()
@@ -219,6 +246,7 @@ func TestTheRegistrationSweepIntervalDefaultsAndIsBoundedByEventRetention(t *tes
 		t.Setenv("IDENTITY_JWKS_URL", "https://identity.example.com/realms/scnehaux/protocol/openid-connect/certs")
 		t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID", "identity-control-registration")
 		t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_KEY_FILE", "/keys/identity-control-registration.pem")
+		t.Setenv("IDENTITY_SECURITY_REF_KEY_FILE", "/keys/security-ref.json")
 		t.Setenv("IDENTITY_REGISTRATION_RECONCILE_INTERVAL", c.value)
 
 		cfg, err := config.Load()
@@ -254,6 +282,7 @@ func TestTheClientKeyWindowsDefaultAndTheOverlapIsShorterThanTheLifetime(t *test
 		t.Setenv("IDENTITY_JWKS_URL", "https://identity.example.com/realms/scnehaux/protocol/openid-connect/certs")
 		t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID", "identity-control-registration")
 		t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_KEY_FILE", "/keys/identity-control-registration.pem")
+		t.Setenv("IDENTITY_SECURITY_REF_KEY_FILE", "/keys/security-ref.json")
 		t.Setenv("IDENTITY_CLIENT_KEY_LIFETIME", c.lifetime)
 		t.Setenv("IDENTITY_CLIENT_KEY_ROTATION_OVERLAP", c.overlap)
 
@@ -284,6 +313,7 @@ func TestUnmanagedClientsAreReportedUnlessDisablingIsAsked(t *testing.T) {
 		t.Setenv("IDENTITY_JWKS_URL", "https://identity.example.com/realms/scnehaux/protocol/openid-connect/certs")
 		t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID", "identity-control-registration")
 		t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_KEY_FILE", "/keys/identity-control-registration.pem")
+		t.Setenv("IDENTITY_SECURITY_REF_KEY_FILE", "/keys/security-ref.json")
 		t.Setenv("IDENTITY_UNMANAGED_CLIENTS", c.value)
 		cfg, err := config.Load()
 		if c.ok && (err != nil || cfg.DisableUnmanagedClients != c.disable) {
@@ -311,6 +341,7 @@ func TestTheTokenTypeIsReportedUnlessEnforcementIsAsked(t *testing.T) {
 		t.Setenv("IDENTITY_JWKS_URL", "https://identity.example.com/realms/scnehaux/protocol/openid-connect/certs")
 		t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID", "identity-control-registration")
 		t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_KEY_FILE", "/keys/identity-control-registration.pem")
+		t.Setenv("IDENTITY_SECURITY_REF_KEY_FILE", "/keys/security-ref.json")
 		t.Setenv("IDENTITY_TOKEN_TYPE", c.value)
 		cfg, err := config.Load()
 		if c.ok && (err != nil || cfg.EnforceAccessTokenType != c.enforce) {
@@ -345,6 +376,7 @@ func TestTheEnvironmentIsProductionUnlessStated(t *testing.T) {
 		t.Setenv("IDENTITY_JWKS_URL", "https://identity.example.com/realms/scnehaux/protocol/openid-connect/certs")
 		t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID", "identity-control-registration")
 		t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_KEY_FILE", "/keys/identity-control-registration.pem")
+		t.Setenv("IDENTITY_SECURITY_REF_KEY_FILE", "/keys/security-ref.json")
 		t.Setenv("IDENTITY_ENVIRONMENT", c.value)
 
 		cfg, err := config.Load()
@@ -369,6 +401,7 @@ func setRequired(t *testing.T) {
 	t.Setenv("IDENTITY_JWKS_URL", "https://identity.example.com/realms/scnehaux/protocol/openid-connect/certs")
 	t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID", "identity-control-registration")
 	t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_KEY_FILE", "/keys/identity-control-registration.pem")
+	t.Setenv("IDENTITY_SECURITY_REF_KEY_FILE", "/keys/security-ref.json")
 }
 
 func setOrganization(t *testing.T) {
@@ -449,6 +482,7 @@ func TestLoadBootstrapRequiresWhatRegistersTheResource(t *testing.T) {
 		t.Setenv("IDENTITY_KEYCLOAK_CLIENT_KEY_FILE", "/keys/identity-control.pem")
 		t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID", "identity-control-registration")
 		t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_KEY_FILE", "/keys/identity-control-registration.pem")
+		t.Setenv("IDENTITY_SECURITY_REF_KEY_FILE", "/keys/security-ref.json")
 		t.Setenv("IDENTITY_TOKEN_AUDIENCE", "identity-control-api")
 	}
 	set()

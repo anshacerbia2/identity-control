@@ -19,11 +19,13 @@
       "internal/config",
       "internal/httpapi",
       "internal/identity/provisioning",
+      "internal/investigation",
       "internal/keycloak",
       "internal/organization",
       "internal/providerauthority",
       "internal/reconcile",
       "internal/registration",
+      "internal/securityref",
       "internal/workload"
     ],
     "cmd/identity-migrate": ["internal/controldb"],
@@ -91,8 +93,21 @@
       "internal/organization",
       "internal/providerauthority"
     ],
+    "_comment_investigation": [
+      "internal/investigation serves a provider's reads of another Principal and records each",
+      "one (TDD-identity-control-005). It reads the kernel through keycloak's SecurityReader and",
+      "seals object handles with internal/securityref, which reaches no internal package: it is",
+      "the AEAD codec and nothing else."
+    ],
+    "internal/securityref": [],
+    "internal/investigation": [
+      "internal/keycloak",
+      "internal/keycloak/keycloakfake",
+      "internal/securityref"
+    ],
     "internal/httpapi": [
       "internal/identity/provisioning",
+      "internal/investigation",
       "internal/keycloak",
       "internal/providerauthority",
       "internal/reconcile",

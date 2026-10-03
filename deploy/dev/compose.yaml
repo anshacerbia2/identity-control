@@ -116,6 +116,9 @@ services:
       IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID: identity-control-registration
       IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_KEY_FILE: /keys/identity-control-registration.pem
       IDENTITY_REGISTRATION_RECONCILE_INTERVAL: ${IDENTITY_REGISTRATION_RECONCILE_INTERVAL:-1h}
+      # The key ring that seals security_ref handles, made by create-security-ref-key.sh
+      # (TDD-identity-control-005 §Configuration).
+      IDENTITY_SECURITY_REF_KEY_FILE: /keys/security-ref.json
       # The two rollout switches (TDD-identity-control-003 §Configuration, TDD-identity-control-001
       # §Caller Token). Both default to report, so a server that sets neither runs as before; set
       # either in .env and recreate the service. compose passes a container only what is listed here,

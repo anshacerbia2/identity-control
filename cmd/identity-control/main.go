@@ -30,11 +30,13 @@ import (
 	"github.com/anshacerbia2/identity-control/internal/config"
 	"github.com/anshacerbia2/identity-control/internal/httpapi"
 	"github.com/anshacerbia2/identity-control/internal/identity/provisioning"
+	"github.com/anshacerbia2/identity-control/internal/investigation"
 	"github.com/anshacerbia2/identity-control/internal/keycloak"
 	"github.com/anshacerbia2/identity-control/internal/organization"
 	"github.com/anshacerbia2/identity-control/internal/providerauthority"
 	"github.com/anshacerbia2/identity-control/internal/reconcile"
 	"github.com/anshacerbia2/identity-control/internal/registration"
+	"github.com/anshacerbia2/identity-control/internal/securityref"
 	"github.com/anshacerbia2/identity-control/internal/workload"
 )
 
@@ -195,6 +197,31 @@ func run() error {
 		return fmt.Errorf("principal handler: %w", err)
 	}
 
+	// A provider's reads of another Principal (TDD-identity-control-005). The kernel's security
+	// state is read with the Principal credential, which holds view-users; the handles that name a
+	// session or authenticator are sealed with the service's own key ring.
+	refKeys, err := securityref.LoadKeyRing(cfg.SecurityRefKeyFile)
+	if err != nil {
+		return err
+	}
+	refs, err := securityref.New(refKeys, cfg.SecurityRefTTL)
+	if err != nil {
+		return err
+	}
+	investigator, err := investigation.New(pool, kernel, refs, investigation.Config{
+		Realm:          keycloak.Realm(cfg.KeycloakRealm),
+		SearchMinRunes: cfg.AdminSearchMinLength,
+		SearchPageSize: cfg.AdminSearchPageSize,
+		CallTimeout:    cfg.ProvisionTimeout,
+	})
+	if err != nil {
+		return fmt.Errorf("investigation service: %w", err)
+	}
+	investigationHandler, err := httpapi.NewInvestigation(investigator)
+	if err != nil {
+		return fmt.Errorf("investigation handler: %w", err)
+	}
+
 	// The key source performs no fetch here. A cold replica loads the key set on its first
 	// verification, and NewJWKS deliberately touches no network so the composition root decides
 	// when that happens rather than the linker.
@@ -210,6 +237,7 @@ func run() error {
 		Principals:    principals,
 		Registrations: registrations,
 		Workloads:     workloadHandler,
+		Investigation: investigationHandler,
 		Database:      pool,
 		Telemetry:     telemetry,
 	}

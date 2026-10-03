@@ -538,17 +538,23 @@ func TestProviderAuthorityComesFromTheRecordsDecision(t *testing.T) {
 				asked   id.UUID
 				seen    bool
 				reached bool
+				urgent  bool
 			)
 			logger := slog.New(slog.NewJSONHandler(&logged, nil))
 			handler := authenticateLogging(t, realVerifier(t), decider{decision: c.decision, err: c.err, asked: &asked}, logger)(
 				http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
-					reached, seen = true, httpapi.IsProvider(r.Context())
+					reached, seen, urgent = true, httpapi.IsProvider(r.Context()), httpapi.ProviderEmergency(r.Context())
 				}))
 			w := httptest.NewRecorder()
 			handler.ServeHTTP(w, bearerRequest("Bearer "+token(t, validClaims())))
 
 			if w.Code != c.status || seen != c.provider || reached != (c.status == http.StatusOK) {
 				t.Errorf("status %d, reached %t, provider %t; want %d, provider %t", w.Code, reached, seen, c.status, c.provider)
+			}
+			// The basis travels with the request, so a read the caller makes is recorded as an
+			// emergency one (TDD-identity-control-005 §Evidence).
+			if urgent != (c.provider && c.decision.Emergency) {
+				t.Errorf("emergency %t; want %t", urgent, c.provider && c.decision.Emergency)
 			}
 			if asked.String() != "019235f1-8c4a-7c1e-9d0b-3f4a2b6e5d71" {
 				t.Errorf("the decision was asked for %s, not the token's principal_id", asked)
