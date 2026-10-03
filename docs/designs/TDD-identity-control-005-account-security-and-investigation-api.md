@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-005
   title: Account Security and Investigation API Mediation
   owner: Core Platform Team
-  version: 2.4.0
+  version: 2.5.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -170,6 +170,60 @@ GET   /v1/me/security-operations/{operation_id}
   A handle is used within its TTL. It is not an identifier to keep or compare.
 - **After `terminate-all`.** The BFF ends its own session as well (`TDD-identity-experience-001`), because
   the Keycloak session behind it is gone.
+
+## Operating the Executor (2.5.0)
+
+An `unresolved` operation is parked, not discarded. STD-GLB-011 §3.9 says that "Exhausted or
+non-retryable Jobs MUST become explicitly inspectable terminal/dead-letter state", and that "Replay
+MUST preserve original Job/business correlation". A parked operation blocks the Principal's later
+commands until an operator acts.
+
+```text
+GET   /v1/security-operations:unresolved
+POST  /v1/security-operations/{operation_id}:redrive        X-Administrative-Reason
+```
+
+**Listing.** `:unresolved` lists parked operations, oldest first, at most 100. Each entry carries its
+type, subject, attempts, last error class and age. Like every provider route, it requires `aal2`.
+
+**Re-driving.**
+- **What it does.** `:redrive` returns an `unresolved` operation to `retrying`, due now, with a new
+  attempt budget.
+  - The operation keeps its identifier, its correlation and its attempt history.
+  - `redriven_at` records the attempt count at the re-drive. The executor parks the operation again
+    after `IDENTITY_SECURITY_MAX_ATTEMPTS` further attempts.
+- **Who and how.** It is a provider command: `aal2` within `IDENTITY_STEP_UP_MAX_AGE`, with a reason.
+  - The response is the operation, followed inline within the command budget, as an accepted command
+    is.
+  - Re-driving an operation that is not `unresolved` is refused with `409`. That is also the answer
+    to a repeated request, and it says the re-drive already happened. So the route takes no
+    Idempotency-Key: the operation's state already makes the request idempotent.
+- **Evidence.** It writes a `privileged_access` row with action `operation.redrive`, the reason, and
+  the request's correlation.
+- **Why replaying is safe.** STD-GLB-011 §3.9 requires that "Replay of a non-idempotent side effect
+  MUST require the owning Product's duplicate-safety/revalidation path". Every executor action is
+  idempotent and confirmed by read-back. The executor re-reads the kernel user, and for a revocation
+  the credentials, on every attempt (§Containment as Built).
+- **No abandon.** An operation cannot be marked failed by hand. §Durable Command Execution says a
+  suspension or a session termination "is never discarded". A parked operation is resolved by fixing
+  its cause (the kernel, or a relink) and re-driving it.
+
+**Metrics.** STD-GLB-011 §3.15 lists what every durable job implementation exposes. The service
+exports OTLP to the Collector named by `OTEL_EXPORTER_OTLP_ENDPOINT`, as organization-control does.
+Unset, it logs once that no metric leaves the process.
+
+| Instrument | Kind | Attributes | §3.15 item |
+| :-- | :-- | :-- | :-- |
+| `identity.security_operation.accepted` | counter | `operation_type`, `replay` | accepted counts; duplicate/idempotency outcomes |
+| `identity.security_operation.attempts` | counter | `operation_type`, `outcome` (`applied`, `refused`, `retry`, `unresolved`) | succeeded/failed/dead-letter counts; attempts/retries |
+| `identity.security_operation.wait` | histogram, s | `operation_type` | queue/wait time, from acceptance to the attempt's claim |
+| `identity.security_operation.duration` | histogram, s | `operation_type` | execution duration of one attempt |
+| `identity.security_operation.lease_lost` | counter | `operation_type` | lease expiry/recovery |
+| `identity.security_operation.unresolved` | gauge | none | the parked count §Operational Notes alerts on (critical at any) |
+| `identity.security_operation.redrives` | counter | `operation_type` | replay |
+
+The trace and correlation identifiers are on the operation and in every log line (§3.15 "trace/
+correlation identifiers"). The workload identity is the service's own resource attribute.
 
 ## Containment as Built (2.2.0)
 
@@ -377,6 +431,7 @@ CREATE TABLE identity.security_operation (
     last_error_class   TEXT,
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
     applied_at         TIMESTAMPTZ,
+    redriven_at        INTEGER     NOT NULL DEFAULT 0,  -- attempts at the last re-drive (2.5.0)
     CONSTRAINT security_operation_state_check
         CHECK (state IN ('pending', 'retrying', 'applied', 'refused', 'unresolved')),
     CONSTRAINT security_operation_type_check
