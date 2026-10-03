@@ -189,6 +189,12 @@ psql -U identity_app -d identity_control_dev `
 ## 6. Run the service
 
 ```powershell
+# Once: the key ring that seals security_ref handles. 32 random bytes, never printed.
+if (-not (Test-Path deploy/dev/keys/security-ref.json)) {
+    $bytes = [byte[]]::new(32); [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+    @{ keys = @(@{ kid = 'k1'; key = [Convert]::ToBase64String($bytes) }) } | ConvertTo-Json -Depth 3 -Compress |
+        Set-Content -NoNewline deploy/dev/keys/security-ref.json
+}
 $env:IDENTITY_DATABASE_URL           = "postgres://identity_app:$($env:IDENTITY_APP_PASSWORD)@127.0.0.1:5432/identity_control_dev?sslmode=disable"
 $env:IDENTITY_LISTEN_ADDRESS         = ':8090'
 $env:IDENTITY_KEYCLOAK_REALM         = 'scnehaux'
@@ -197,6 +203,7 @@ $env:IDENTITY_KEYCLOAK_CLIENT_ID     = 'identity-control'
 $env:IDENTITY_KEYCLOAK_CLIENT_KEY_FILE = (Resolve-Path deploy/dev/keys/identity-control.pem).Path
 $env:IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID       = 'identity-control-registration'
 $env:IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_KEY_FILE = (Resolve-Path deploy/dev/keys/identity-control-registration.pem).Path
+$env:IDENTITY_SECURITY_REF_KEY_FILE  = (Resolve-Path deploy/dev/keys/security-ref.json).Path
 $env:IDENTITY_TOKEN_ISSUER           = 'http://127.0.0.1:8081/realms/scnehaux'
 $env:IDENTITY_TOKEN_AUDIENCE         = 'identity-control-api'
 $env:IDENTITY_JWKS_URL               = 'http://127.0.0.1:8081/realms/scnehaux/protocol/openid-connect/certs'

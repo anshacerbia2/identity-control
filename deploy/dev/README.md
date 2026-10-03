@@ -39,6 +39,7 @@ cp .env.example .env
 
 ./create-kernel-clients.sh >> .env           # both clients, each with its own key in ./keys
 ./create-registration-client.sh              # the registration client, with its key
+./create-security-ref-key.sh                 # the key ring that seals security_ref handles
 docker compose up -d --build
 curl -fsS http://127.0.0.1:8082/readyz       # ready once the migration job has succeeded
 
@@ -185,6 +186,12 @@ server's values from `deploy/dev/.env` and the laptop's own keys:
 ```powershell
 devtunnel connect <tunnel>
 
+# Once: the key ring that seals security_ref handles. 32 random bytes, never printed.
+if (-not (Test-Path deploy/dev/keys/security-ref.json)) {
+    $bytes = [byte[]]::new(32); [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+    @{ keys = @(@{ kid = 'k1'; key = [Convert]::ToBase64String($bytes) }) } | ConvertTo-Json -Depth 3 -Compress |
+        Set-Content -NoNewline deploy/dev/keys/security-ref.json
+}
 $env:IDENTITY_DATABASE_URL           = "postgres://identity_app:<IDENTITY_APP_PASSWORD>@localhost:5433/identity_control?sslmode=disable"
 $env:IDENTITY_LISTEN_ADDRESS         = ':8090'
 $env:IDENTITY_KEYCLOAK_REALM         = 'scnehaux'
@@ -193,6 +200,7 @@ $env:IDENTITY_KEYCLOAK_CLIENT_ID     = 'identity-control'
 $env:IDENTITY_KEYCLOAK_CLIENT_KEY_FILE = (Resolve-Path deploy/dev/keys/identity-control.pem).Path
 $env:IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID       = 'identity-control-registration'
 $env:IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_KEY_FILE = (Resolve-Path deploy/dev/keys/identity-control-registration.pem).Path
+$env:IDENTITY_SECURITY_REF_KEY_FILE  = (Resolve-Path deploy/dev/keys/security-ref.json).Path
 $env:IDENTITY_TOKEN_ISSUER           = '<KEYCLOAK_ISSUER>'
 $env:IDENTITY_TOKEN_AUDIENCE         = 'identity-control-api'
 $env:IDENTITY_JWKS_URL               = 'http://localhost:8081/realms/scnehaux/protocol/openid-connect/certs'
@@ -323,6 +331,19 @@ still accepts, and the audience change needs the new binary while the old audien
 
 5. **Verify the new audience.** Remove `IDENTITY_TOKEN_AUDIENCE` from `.env` and
    `docker compose up -d identity-control`. A fresh token now works.
+
+## The investigation reads, on a server that ran before them
+
+The service needs the key ring that seals `security_ref` handles (TDD-identity-control-005
+§Configuration) and refuses to start without it. On a server that ran before the reads, make it
+once, then update as usual:
+
+```sh
+./create-security-ref-key.sh
+git pull && docker compose up -d --build
+```
+
+The script refuses when `keys/security-ref.json` exists. It never prints the key.
 
 ## Keys, and moving a server from secrets to keys
 

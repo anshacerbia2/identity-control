@@ -60,17 +60,28 @@ type providerKey struct{}
 
 // withProvider records that the authenticated caller holds provider authority. Only the
 // authentication middleware sets it, from the provider decision for this request.
-func withProvider(ctx context.Context) context.Context {
-	return context.WithValue(ctx, providerKey{}, true)
+//
+// emergency is whether the decision's basis was emergency authority, which every record of the
+// caller's privileged access carries (TDD-identity-control-005 §Evidence).
+func withProvider(ctx context.Context, emergency bool) context.Context {
+	return context.WithValue(ctx, providerKey{}, providerState{emergency: emergency})
 }
+
+type providerState struct{ emergency bool }
 
 // WithProvider is withProvider for tests in other packages, which establish a caller without a
 // token, as WithCallerScope is.
-func WithProvider(ctx context.Context) context.Context { return withProvider(ctx) }
+func WithProvider(ctx context.Context) context.Context { return withProvider(ctx, false) }
+
+// ProviderEmergency reports whether the caller is a provider by emergency authority.
+func ProviderEmergency(ctx context.Context) bool {
+	state, ok := ctx.Value(providerKey{}).(providerState)
+	return ok && state.emergency
+}
 
 // IsProvider reports whether the caller holds provider authority. A caller without it is a
 // registration owner, served only by the owner routes.
 func IsProvider(ctx context.Context) bool {
-	provider, _ := ctx.Value(providerKey{}).(bool)
+	_, provider := ctx.Value(providerKey{}).(providerState)
 	return provider
 }

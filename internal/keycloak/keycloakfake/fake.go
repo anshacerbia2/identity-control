@@ -75,8 +75,12 @@ type Client struct {
 	// performed no remote call.
 	Calls Calls
 
-	users  map[keycloak.UserID]stored
-	nextID int
+	// FailSecurity, when set, is returned by every security-state read.
+	FailSecurity error
+
+	users    map[keycloak.UserID]stored
+	security map[keycloak.UserID]Security
+	nextID   int
 }
 
 // Calls records how many times each operation ran.
@@ -86,6 +90,7 @@ type Calls struct {
 	ListUsers         int
 	DisableUser       int
 	WriteWorkload     int
+	SecurityReads     int
 }
 
 type stored struct {

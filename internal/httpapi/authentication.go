@@ -186,7 +186,7 @@ func Authenticate(verifier TokenVerifier, providers ProviderDecider, logger *slo
 			}
 			switch {
 			case decision.Provider:
-				ctx = withProvider(ctx)
+				ctx = withProvider(ctx, decision.Emergency)
 				// Every use of break-glass authority is reported (ADR-ORG-002 §5.2).
 				if decision.Emergency {
 					logger.WarnContext(ctx, "emergency provider authority used",

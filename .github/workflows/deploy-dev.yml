@@ -97,6 +97,15 @@ jobs:
             exit 1
           fi
 
+      - name: make the security_ref key ring
+        working-directory: deploy/dev
+        run: |
+          bash ./create-security-ref-key.sh
+          if bash ./create-security-ref-key.sh; then
+            echo "::error::create-security-ref-key.sh ran twice; it must refuse an existing ring"
+            exit 1
+          fi
+
       # TDD-identity-control-003 §Testing Strategy: the registration credential cannot touch a user,
       # and the Principal path's cannot touch a client. Asserted against this live kernel.
       - name: the two Admin API credentials are split

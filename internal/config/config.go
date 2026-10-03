@@ -114,6 +114,18 @@ type Config struct {
 	PendingRecoveryAfter time.Duration
 	ReconcilePageSize    int
 
+	// SecurityRefKeyFile is IDENTITY_SECURITY_REF_KEY_FILE, the key ring that seals the opaque
+	// security_ref handles (TDD-identity-control-005 §Technical Context). SecurityRefTTL is a
+	// handle's life.
+	SecurityRefKeyFile string
+	SecurityRefTTL     time.Duration
+
+	// AdminSearchMinLength and AdminSearchPageSize bound a provider's Principal search: a query
+	// shorter than the floor is refused, and a page holds at most the size (TDD-identity-control-005
+	// §Read Authorization and Disclosure).
+	AdminSearchMinLength int
+	AdminSearchPageSize  int
+
 	LogLevel string
 }
 
@@ -218,6 +230,17 @@ func Load() (Config, error) {
 		} else {
 			cfg.DeliveryPrincipal = parsed
 		}
+	}
+
+	cfg.SecurityRefKeyFile = strings.TrimSpace(os.Getenv("IDENTITY_SECURITY_REF_KEY_FILE"))
+	if cfg.SecurityRefKeyFile == "" {
+		problems = append(problems, errors.New("IDENTITY_SECURITY_REF_KEY_FILE is required"))
+	}
+	cfg.SecurityRefTTL = durationOr("IDENTITY_SECURITY_REF_TTL", 10*time.Minute, &problems)
+	cfg.AdminSearchMinLength = intOr("IDENTITY_ADMIN_SEARCH_MIN_LENGTH", 3, &problems)
+	cfg.AdminSearchPageSize = intOr("IDENTITY_ADMIN_SEARCH_PAGE_SIZE", 25, &problems)
+	if cfg.SecurityRefTTL <= 0 || cfg.AdminSearchMinLength <= 0 || cfg.AdminSearchPageSize <= 0 {
+		problems = append(problems, errors.New("IDENTITY_SECURITY_REF_TTL, IDENTITY_ADMIN_SEARCH_MIN_LENGTH and IDENTITY_ADMIN_SEARCH_PAGE_SIZE must be positive"))
 	}
 
 	cfg.Organization = loadOrganization(&problems)

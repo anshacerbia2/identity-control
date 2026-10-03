@@ -27,6 +27,10 @@ type RoutesConfig struct {
 	Database      Prober
 	Telemetry     *observability.Telemetry
 
+	// Investigation serves a provider's reads of another Principal (TDD-identity-control-005). Nil,
+	// its routes are not mounted.
+	Investigation *Investigation
+
 	// Deliveries applies Organization's provider grant events, and DeliveryVerifier admits the
 	// delivering workload alone (TDD-identity-control-006). Either nil, the intake answers 503.
 	Deliveries       Applier
@@ -118,6 +122,14 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	api.HandleFunc("POST /v1/principals", p(cfg.Principals.CreatePrincipal))
 	api.HandleFunc("POST /v1/principals/{target}", p(cfg.Principals.PrincipalAction))
 	api.HandleFunc("GET /v1/principals:dangling", p(cfg.Principals.Dangling))
+	if cfg.Investigation != nil {
+		api.HandleFunc("GET /v1/principals:search", p(cfg.Investigation.Search))
+		api.HandleFunc("GET /v1/principals/{principal_id}", p(cfg.Investigation.Principal))
+		api.HandleFunc("GET /v1/principals/{principal_id}/sessions", p(cfg.Investigation.Sessions))
+		api.HandleFunc("GET /v1/principals/{principal_id}/authenticators", p(cfg.Investigation.Authenticators))
+		api.HandleFunc("GET /v1/principals/{principal_id}/federation-links", p(cfg.Investigation.FederationLinks))
+		api.HandleFunc("GET /v1/principals/{principal_id}/findings", p(cfg.Investigation.Findings))
+	}
 	api.HandleFunc("POST /v1/principals:reconcile", p(cfg.Principals.Reconcile))
 	// A provider registers anything; an application developer registers within its bounds.
 	api.HandleFunc("POST /v1/registrations", creator(cfg.Registrations.Register))

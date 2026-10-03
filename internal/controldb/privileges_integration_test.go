@@ -535,3 +535,20 @@ func TestTheCeremonyGrantRetirementIsInsertOnly(t *testing.T) {
 		}
 	}
 }
+
+// The privileged-access record is insert-only: audit information is protected from modification
+// and deletion (TDD-identity-control-005 §Evidence, NIST SP 800-53 AU-9).
+func TestThePrivilegedAccessRecordIsInsertOnly(t *testing.T) {
+	pool, ctx := openPool(t)
+	const table = "identity.privileged_access"
+	for _, privilege := range []string{"SELECT", "INSERT"} {
+		if !queryBool(t, pool, ctx, `SELECT has_table_privilege($1, $2, $3)`, runtimeRole, table, privilege) {
+			t.Errorf("%s lacks %s on %s; evidence cannot be written or read", runtimeRole, privilege, table)
+		}
+	}
+	for _, privilege := range []string{"UPDATE", "DELETE", "TRUNCATE"} {
+		if queryBool(t, pool, ctx, `SELECT has_table_privilege($1, $2, $3)`, runtimeRole, table, privilege) {
+			t.Errorf("%s holds %s on %s; evidence could be rewritten", runtimeRole, privilege, table)
+		}
+	}
+}

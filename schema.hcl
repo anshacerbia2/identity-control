@@ -1866,3 +1866,79 @@ table "ceremony_grant_retirement" {
     expr = "id = 1"
   }
 }
+
+// Every administrative read and command, written in the transaction that serves or records it
+// (TDD-identity-control-005 §Evidence). Insert-only: grants.sql revokes UPDATE, DELETE and TRUNCATE.
+table "privileged_access" {
+  schema  = schema.identity
+  comment = "Every administrative read and command, insert-only (NIST SP 800-53 AU-3, AU-9). TDD-identity-control-005."
+
+  column "access_id" {
+    null = false
+    type = uuid
+  }
+  column "actor_principal_id" {
+    null = false
+    type = uuid
+  }
+  column "subject_principal_id" {
+    null = true
+    type = uuid
+  }
+  column "action" {
+    null = false
+    type = text
+  }
+  column "route" {
+    null = false
+    type = text
+  }
+  column "reason" {
+    null = true
+    type = text
+  }
+  column "query" {
+    null = true
+    type = text
+  }
+  column "result_count" {
+    null = true
+    type = integer
+  }
+  column "outcome" {
+    null = false
+    type = text
+  }
+  column "correlation_id" {
+    null = false
+    type = text
+  }
+  column "emergency" {
+    null = false
+    type = boolean
+  }
+  column "recorded_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+
+  primary_key {
+    columns = [column.access_id]
+  }
+
+  index "privileged_access_subject" {
+    columns = [column.subject_principal_id, column.recorded_at]
+  }
+  index "privileged_access_actor" {
+    columns = [column.actor_principal_id, column.recorded_at]
+  }
+
+  check "privileged_access_outcome_check" {
+    expr = "outcome = ANY (ARRAY['served'::text, 'applied'::text, 'refused'::text])"
+  }
+  check "privileged_access_action_check" {
+    expr = "btrim(action) <> ''::text"
+  }
+}
+
