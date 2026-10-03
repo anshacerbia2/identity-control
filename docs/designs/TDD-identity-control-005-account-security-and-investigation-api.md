@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-005
   title: Account Security and Investigation API Mediation
   owner: Core Platform Team
-  version: 2.1.0
+  version: 2.2.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -100,6 +100,148 @@ cannot suspend, restore, or revoke an authenticator of, the Principal in its own
 4. Enrollment, and the last-authenticator guard's assurance floor, once the kernel defines levels of
    authentication (§Step-Up).
 
+## Containment as Built (2.2.0)
+
+Slice 2 builds `:suspend`, `:restore`, `sessions:terminate-all`, `authenticators/{security_ref}:revoke`
+and `GET /v1/security-operations/{operation_id}`. This section records what the sections below left
+open, and each decision's source.
+
+**Subjects.** These routes act on human Principals. A workload is suspended and restored through
+`TDD-identity-control-004`, whose lifecycle stops the client and the Principal together, so a
+workload here is refused with `409` and the route to use. `:retire` is not in the slice, and waits for
+human retirement in `TDD-identity-control-001`.
+
+**The version a command names.** `expected_version` is `security_subject_state.version`.
+`GET /v1/principals/{principal_id}` serves it as `security_version`, `1` before any command, as the
+column's default. A command that names another version is refused with `409` `version-conflict`
+before anything is written. STD-GLB-004 §3.11 asks that a mutation of a versioned aggregate "carry/compare the
+... aggregate version needed to prevent an older delivery from overwriting a newer accepted state"
+[R12].
+
+**Idempotency.** The key is unique per actor, `UNIQUE (actor_principal_id, idempotency_key)`, and the
+operation keeps `request_digest`, a SHA-256 over the operation type, subject, reference, expected
+version and reason.
+- The same key with the same request returns the same operation in its current state, and never
+  repeats an effect.
+- The same key with another request is refused with `409` `idempotency-key-conflict`, foundation-platform's registered type.
+  The idempotency-key draft says a key "MUST NOT be reused with another request with a different
+  request payload" [R7].
+
+**State.** The acceptance transaction checks the mapping state and changes it.
+- `:suspend` takes a mapping from `active` to `suspended`.
+- `:restore` takes it back from `suspended` to `active`.
+- Both increment `principal_mapping.version`.
+- Any other state is refused with `409` `state-transition-refused`, as is a mapping with no kernel
+  user.
+- `sessions:terminate-all` and `:revoke` accept a Principal that is `active` or `suspended`. A
+  credential can be revoked while its Principal is contained.
+- `:restore` is also refused while any unresolved `principal_finding` names the Principal. The one
+  finding class, `dangling`, means the kernel user is gone.
+
+**A repeated key first.** The idempotency key is looked up before any check that the operation's
+own effect could change. A repeated request finds its operation and returns it, even though that
+operation moved the version and the mapping state it was checked against.
+
+**Refusal order.** For a new key, each refusal below happens before anything is written:
+1. Provider authority (`403`).
+2. The self-action boundary (`403`).
+3. `Idempotency-Key`, `X-Administrative-Reason` and `expected_version` (`400`).
+4. Step-up (`401`, §Step-Up).
+5. The subject (`404`, or `409` for a workload or a disallowed state).
+6. The version (`409`).
+7. The same key with another request (`409`), found by the first lookup.
+
+A `security_ref` that does not open for this subject and purpose is `404`. The codec reports one error
+for every reason a handle fails, so the response cannot tell a caller which check failed.
+
+**Step-up.** The authentication middleware carries the token's `auth_time` and `acr` in the request
+context. A command is refused once `now - auth_time` exceeds `IDENTITY_STEP_UP_MAX_AGE`. The
+operation's `assurance` records `acr=<acr>;auth_time=<RFC 3339>`. The BFF must treat this `401` as a
+re-authentication request, not as an expired session.
+
+**Execution.** STD-GLB-011 governs the executor, because it is a background job.
+- **Acceptance is durable.** The operation is inserted in the transaction that changes the owner
+  state, as §3.3 requires: acceptance must be "transactionally coordinated with the owner state that
+  requires the Job" [R11].
+- **Claim.** A worker claims a due operation in a short transaction:
+  `SELECT … FOR UPDATE SKIP LOCKED`. PostgreSQL documents SKIP LOCKED as a way "to avoid lock contention with multiple consumers
+  accessing a queue-like table" [R8].
+- **Sequence.** The claim takes an operation only when no earlier `subject_sequence` of the same
+  Principal is `pending`, `retrying` or `unresolved`. Commands on one Principal run in the order
+  they were accepted.
+- **Lease.** The claim moves `next_attempt_at` forward by `IDENTITY_SECURITY_OPERATION_LEASE` and
+  commits before any kernel call. No transaction is held across a remote call. A worker that dies
+  leaves the operation claimable again when the lease ends. This is Amazon SQS's visibility timeout,
+  where "if you don't delete it before the timeout expires, the message becomes visible again in the
+  queue" [R9]. STD-GLB-011 §3.4 asks that "lease expiry/recovery semantics MUST be deterministic"
+  [R11].
+- **Attempts.** Each claim inserts a row in the insert-only `security_operation_attempt`, numbered
+  from 1. The operation is the job and the row is the attempt, so the two identifiers stay distinct,
+  as §3.4 asks [R11].
+- **Backoff.** A transient failure (kernel unavailable, timeout, `5xx`) is retried after a full-jitter
+  delay, `random(0, min(30s, 1s × 2^attempt))`. That is AWS's formula
+  `sleep = random(0, min(cap, base * 2 ** attempt))`: "The solution isn't to remove backoff. It's to
+  add jitter" [R10].
+- **Dead letter.** A permanent failure (`403`, or `404` for the user) is not retried, as STD-GLB-011
+  §3.6 requires. After `IDENTITY_SECURITY_MAX_ATTEMPTS`, or after a permanent failure, the operation
+  becomes `unresolved`.
+  - It is logged at ERROR as `security operation unresolved`, the alert signal.
+  - It blocks later operations of the same Principal until an operator resolves it. STD-GLB-004
+    §3.10 says "DLQ/parking is not disposal" [R12].
+- **Inline execution.** The request that accepted a command runs one claim-and-execute of it within
+  `IDENTITY_SECURITY_COMMAND_BUDGET`. If it is final, the response is `200` with the operation.
+  Otherwise the response is `202` with `Location: /v1/security-operations/{operation_id}`.
+  RFC 9110 says a 202 representation "ought to describe the request's current status and point to
+  (or embed) a status monitor" [R13].
+- **Background executor.** It claims due operations every `IDENTITY_SECURITY_EXECUTOR_INTERVAL`,
+  using the service's own Admin API client, which is a non-human identity as STD-GLB-011 §3.2 asks.
+
+**Each command's kernel calls.** Every call is idempotent. An operation is applied only once its
+read-back agrees.
+
+| Operation | Calls | Applied when |
+| :-- | :-- | :-- |
+| `suspend` | `PUT /users/{id}` with `enabled: false`, then `POST /users/{id}/logout` | The user reads back disabled and its session list is empty |
+| `restore` | `PUT /users/{id}` with `enabled: true`. No session is restored | The user reads back enabled |
+| `sessions.terminate-all` | `POST /users/{id}/logout` | The session list is empty |
+| `authenticator.revoke` | Re-read the credentials, then `DELETE /users/{id}/credentials/{credentialId}` | The credential is absent. It is also applied if it was already absent |
+
+Keycloak's own descriptions of these endpoints are "Remove all user sessions associated with the
+user" and "Remove a credential for a user" [R14]. `authenticator.revoke` re-reads the credentials
+before deleting (§Authenticator Guard). A refusal is final, not retried.
+
+**What "usable" means.** The guard counts first factors, the credentials that can begin a sign-in.
+The realm uses Keycloak's built-in browser flow, whose "first execution is the Username Password
+Form … It is marked as required, so the user must enter a valid username and password" [R15]. A
+passkey (`webauthn-passwordless`) is the other first factor Keycloak offers, once a flow admits it.
+- Revoking a first factor is refused, with `result_code` `last_authenticator`, when no other first
+  factor would remain.
+- Revoking a second factor (`otp`, `webauthn`) or a recovery code is never refused by the guard.
+
+So on this realm a password cannot be revoked. A compromised password is contained by suspension
+until the self-service slices bring a reset.
+
+The operation stores the sealed reference, never the kernel identifier. The handle's TTL bounds how
+long a browser may use it, so the executor opens a stored handle without the expiry check. The
+handle was already checked when the command was accepted, and its kind, subject and purpose binding
+still hold.
+
+**Evidence.** The transaction that marks an operation `applied` or `refused` also writes its
+`privileged_access` row.
+- `action` is the operation type, and `outcome` is `applied` or `refused`.
+- The row records the reason and the correlation identifier.
+- `emergency` is the actor's basis at acceptance, which the operation keeps.
+
+A refusal before acceptance writes no row. The request log records it, with its status and
+correlation identifier.
+
+**Reads of an operation.** `GET /v1/security-operations/{operation_id}` is `providerOnly` in this
+slice. It returns the operation's identifier, subject, type, state, attempts, result code and times,
+and never the reference or an error's text.
+
+**Package.** The reference codec built in slice 1 is `internal/securityref`, not
+`internal/securitystate`. It is a pure AEAD codec that both the read path and the commands use.
+
 ## Component Design
 
 | Component | Package | Responsibility |
@@ -149,12 +291,14 @@ CREATE TABLE identity.security_operation (
     subject_sequence   BIGINT      NOT NULL,
     actor_principal_id UUID        NOT NULL,
     idempotency_key    TEXT        NOT NULL,
+    request_digest     TEXT        NOT NULL,
     operation_type     TEXT        NOT NULL,
     sealed_object_ref  TEXT,
     expected_version   BIGINT      NOT NULL,
     reason             TEXT,
-    correlation_id     UUID        NOT NULL,
+    correlation_id     TEXT        NOT NULL,
     assurance          TEXT        NOT NULL,
+    emergency          BOOLEAN     NOT NULL,
     state              TEXT        NOT NULL DEFAULT 'pending',
     attempts           INTEGER     NOT NULL DEFAULT 0,
     next_attempt_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -164,6 +308,8 @@ CREATE TABLE identity.security_operation (
     applied_at         TIMESTAMPTZ,
     CONSTRAINT security_operation_state_check
         CHECK (state IN ('pending', 'retrying', 'applied', 'refused', 'unresolved')),
+    CONSTRAINT security_operation_type_check
+        CHECK (operation_type IN ('suspend', 'restore', 'sessions.terminate-all', 'authenticator.revoke')),
     UNIQUE (principal_id, subject_sequence),
     UNIQUE (actor_principal_id, idempotency_key)
 );
@@ -171,6 +317,19 @@ CREATE TABLE identity.security_operation (
 CREATE INDEX security_operation_claim
     ON identity.security_operation (next_attempt_at, created_at)
     WHERE state IN ('pending', 'retrying');
+
+-- One row per claim: the operation is the job, the row its attempt (STD-GLB-011 §3.4). Insert-only
+-- but for its own finish, which the attempt's worker writes once.
+CREATE TABLE identity.security_operation_attempt (
+    operation_id  UUID        NOT NULL REFERENCES identity.security_operation(operation_id),
+    attempt       INTEGER     NOT NULL,
+    claimed_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    lease_until   TIMESTAMPTZ NOT NULL,
+    finished_at   TIMESTAMPTZ,
+    outcome       TEXT,        -- applied, refused, retry, unresolved
+    error_class   TEXT,
+    PRIMARY KEY (operation_id, attempt)
+);
 ```
 
 The command transaction locks `security_subject_state`, checks `expected_version`,
@@ -383,6 +542,8 @@ transaction, and the table stays the local record.
 | `IDENTITY_SECURITY_COMMAND_BUDGET` | `2s` | Inline execution wait before returning 202 |
 | `IDENTITY_SECURITY_ATTEMPT_TIMEOUT` | `500ms` | One supported Admin API attempt |
 | `IDENTITY_SECURITY_MAX_ATTEMPTS` | `3` | Attempts before unresolved state |
+| `IDENTITY_SECURITY_OPERATION_LEASE` | `10s` | How long a claim hides an operation from other workers. Longer than one attempt's calls: `suspend` makes four, at `IDENTITY_SECURITY_ATTEMPT_TIMEOUT` each |
+| `IDENTITY_SECURITY_EXECUTOR_INTERVAL` | `1s` | How often the background executor claims due operations |
 | `IDENTITY_ADMIN_SEARCH_MIN_LENGTH` | `3` | Minimum search specificity |
 | `IDENTITY_ADMIN_SEARCH_PAGE_SIZE` | `25` | Maximum results per page |
 | `IDENTITY_AUDIT_QUERY_TIMEOUT` | `1s` | Enterprise evidence read budget |
@@ -475,6 +636,7 @@ degradation.
 | Governed by | ADR-IAM-001 - supported Keycloak interfaces and Control Service mediation |
 | Conforms to | STD-IAM-001 sections 3.1 and 3.9 - authenticator policy and BFF authorization boundary |
 | Conforms to | STD-GLB-004 - durable external side-effect operation and bounded retry |
+| Conforms to | STD-GLB-011 - background job lease, attempts, backoff and dead letter |
 | Extends | `TDD-identity-control-001` - Principal containment and retirement state |
 | Depends on | `TDD-identity-control-003` - consent client and token-lifetime registration |
 | Consumed by | `TDD-identity-experience-002` - self-service account security |
@@ -490,3 +652,12 @@ degradation.
 | R4 | IETF RFC 9470, *OAuth 2.0 Step Up Authentication Challenge Protocol*, §3, <https://www.rfc-editor.org/rfc/rfc9470>: `insufficient_user_authentication`; `acr_values`; `max_age`. |
 | R5 | IETF RFC 5116, *An Interface and Algorithms for Authenticated Encryption*, <https://www.rfc-editor.org/rfc/rfc5116>: AEAD checks the integrity and authenticity of the plaintext and of the associated data; §5.2 defines AEAD_AES_256_GCM. |
 | R6 | NIST SP 800-53 Rev. 5, *AU-3 Content of Audit Records* and *AU-9 Protection of Audit Information*, from NIST's OSCAL catalog <https://github.com/usnistgov/oscal-content/blob/main/nist.gov/SP800-53/rev5/json/NIST_SP-800-53_rev5_catalog.json>, accessed 2026-10-03: AU-3 as quoted in §Evidence; AU-9 a. "Protect audit information and audit logging tools from unauthorized access, modification, and deletion". |
+| R7 | IETF, *The Idempotency-Key HTTP Header Field*, draft-ietf-httpapi-idempotency-key-header-07, <https://datatracker.ietf.org/doc/html/draft-ietf-httpapi-idempotency-key-header>, accessed 2026-10-03: "The idempotency key MUST be unique and MUST NOT be reused with another request with a different request payload." |
+| R8 | PostgreSQL, *SELECT, The Locking Clause*, <https://www.postgresql.org/docs/current/sql-select.html>, accessed 2026-10-03: "Skipping locked rows provides an inconsistent view of the data, so this is not suitable for general purpose work, but can be used to avoid lock contention with multiple consumers accessing a queue-like table." |
+| R9 | Amazon Web Services, *Amazon SQS visibility timeout*, <https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-visibility-timeout.html>, accessed 2026-10-03: "If you don't delete it before the timeout expires, the message becomes visible again in the queue and can be retrieved by another consumer." |
+| R10 | Marc Brooker, *Exponential Backoff And Jitter*, AWS Architecture Blog, 2015-03-04, <https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/>: "The solution isn't to remove backoff. It's to add jitter."; Full Jitter "sleep = random(0, min(cap, base * 2 ** attempt))". |
+| R11 | STD-GLB-011 1.1.0, *Enterprise Background Job Execution Standard*, §3.2–§3.6, §3.9. |
+| R12 | STD-GLB-004 3.0.1, *Enterprise Event-Driven Architecture & Messaging Standard*, §3.10 and §3.11. |
+| R13 | IETF RFC 9110, *HTTP Semantics*, §15.3.3, <https://www.rfc-editor.org/rfc/rfc9110#section-15.3.3>: "The representation sent with this response ought to describe the request's current status and point to (or embed) a status monitor". |
+| R14 | Keycloak, *Admin REST API* (OpenAPI, `docs-api/latest`), <https://www.keycloak.org/docs-api/latest/rest-api/index.html>, accessed 2026-10-03: `POST /admin/realms/{realm}/users/{user-id}/logout` "Remove all user sessions associated with the user"; `DELETE /admin/realms/{realm}/users/{user-id}/credentials/{credentialId}` "Remove a credential for a user"; `PUT /admin/realms/{realm}/users/{user-id}` "Update the user". The pinned kernel, 26.7.5, is proved by identity-kernel's compat suite (§Kernel Compatibility). |
+| R15 | Keycloak, *Server Administration Guide*, Authentication flows, the built-in browser flow, <https://www.keycloak.org/docs/latest/server_admin/index.html>, accessed 2026-10-03: "The first execution is the Username Password Form, an authentication type that renders the username and password page. It is marked as required, so the user must enter a valid username and password." |
