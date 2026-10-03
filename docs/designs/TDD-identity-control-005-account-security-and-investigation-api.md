@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-005
   title: Account Security and Investigation API Mediation
   owner: Core Platform Team
-  version: 2.5.0
+  version: 2.6.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -224,6 +224,45 @@ Unset, it logs once that no metric leaves the process.
 
 The trace and correlation identifiers are on the operation and in every log line (§3.15 "trace/
 correlation identifiers"). The workload identity is the service's own resource attribute.
+
+## Enrollment and the Assurance Floor (2.6.0)
+
+Slice 4 is built in two parts. **4a**, built here, is enrolling a TOTP authenticator through this
+API, and the assurance floor. **4b** is WebAuthn. It needs a browser flow in which a person reaches
+`aal2` with either factor, and identity-kernel's first attempt at that refused a person who held
+neither (TDD-identity-kernel-001 §Authentication Levels).
+
+```text
+POST  /v1/me/authenticators:enroll          Idempotency-Key       {"type":"totp"}
+```
+
+**Enrolling.**
+- **What the API returns.** It authorizes the enrollment and returns the kernel action that performs
+  it, `{"action":"CONFIGURE_TOTP"}`. The BFF drives that action as an OIDC sign-in with
+  `kc_action`, the kernel's supported application-initiated action (TDD-identity-kernel-001;
+  identity-kernel compat proves `CONFIGURE_TOTP`).
+- **No material passes through.** The API never accepts or returns authenticator material, as
+  §API / Interface says.
+- **The level required.** NIST requires that binding "requires authentication at either the maximum
+  AAL currently available in the subscriber account or the maximum AAL at which the new
+  authenticator will be used, whichever is lower" (NIST SP 800-63B-4 §4.1.2.1). So a person who
+  already holds a second factor enrolls at `aal2`, and one who holds none at `aal1`. Either way the
+  authentication must be within `IDENTITY_STEP_UP_MAX_AGE`.
+  - The API reads the person's credentials from the kernel to decide which level applies.
+  - It answers a shortfall with the RFC 9470 challenge for that level.
+- **Evidence.** The authorization is recorded as `authenticator.enroll` with outcome `served`. The
+  binding itself is the kernel's event.
+
+**The assurance floor.** `ADR-IAM-004` requires `aal2` of a provider, so a provider must keep a way
+to reach it.
+- **What it refuses.** The executor refuses to remove or revoke a Principal's last second factor
+  (`otp`, `webauthn`) while the provider decision names that Principal (TDD-identity-control-006),
+  with `result_code` `assurance_floor`. This applies to the person's own removal and to another
+  provider's revocation alike.
+- **Containing a compromised factor.** It is contained by suspension, then replaced, not by leaving
+  a provider at one factor.
+- **Why.** A provider at one factor would re-enroll on the next `aal2` sign-in (`ADR-IAM-004 §5.4`),
+  and that is exactly the path an attacker holding the password would use.
 
 ## Containment as Built (2.2.0)
 
@@ -560,8 +599,9 @@ discarded.
 
 Enrollment and removal require fresh step-up. Immediately before removal, the executor
 re-reads usable authenticators and the Principal's assurance policy. It refuses when
-the target is the last usable authenticator or removal would fall below the policy
-floor. Subject sequencing prevents two concurrent removals from both validating
+the target is the last usable authenticator (`last_authenticator`, §Containment as Built) or
+removal would fall below the policy floor (`assurance_floor`, §Enrollment and the Assurance
+Floor). Subject sequencing prevents two concurrent removals from both validating
 against the same pre-removal count.
 
 ### Session and Consent Semantics
