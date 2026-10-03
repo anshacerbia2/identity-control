@@ -347,6 +347,34 @@ TDD-identity-control-005 §Step-Up). The kernel must map the levels first.
 4. **For a token from the scripts**, ask for the level and pass the current code:
    `Get-ScnehauxToken … -AcrValues aal2 -Otp 123456`.
 
+### The server's own TOTP for the bootstrap operator
+
+The agent that operates this server needs `aal2` tokens, and nobody can relay a 30-second code to it.
+So the server holds a second TOTP for the bootstrap operator (ADR-IAM-004 §5.5). It is bound at
+`aal2`, as NIST SP 800-63B-4 §4.1.2.1 requires: once, with one code the owner reads from their own
+authenticator.
+
+```powershell
+. ./scripts/dev-token.ps1
+# -Otp is the owner's current code, read from their phone; it is good for about a minute.
+Get-ScnehauxToken -Username bootstrap-operator -Password $env:IDENTITY_CALLER_PASSWORD `
+  -KeyFile $env:IDENTITY_CALLER_KEY_FILE -EnrollTotpFile deploy/dev/keys/operator-totp.json -Otp <code>
+```
+
+The script signs in at `aal2` and asks the kernel to set up another TOTP labelled `dev-server`. It
+then writes the secret to `deploy/dev/keys/operator-totp.json`, mode 0600. The secret is never
+printed, and the script refuses when the file exists. From then on:
+
+```powershell
+Get-ScnehauxToken … -AcrValues aal2 -TotpSecretFile deploy/dev/keys/operator-totp.json
+```
+
+Rules:
+- **Development servers only.** On this server the password and this TOTP sit together, so for
+  this account the two factors are one place.
+- **To end it,** a provider revokes the `dev-server` authenticator of the bootstrap operator from the
+  Admin Portal. That removes the server's TOTP without touching the owner's.
+
 ## The investigation reads, on a server that ran before them
 
 The service needs the key ring that seals `security_ref` handles (TDD-identity-control-005
