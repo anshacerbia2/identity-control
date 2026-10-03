@@ -180,7 +180,7 @@ commands until an operator acts.
 
 ```text
 GET   /v1/security-operations:unresolved
-POST  /v1/security-operations/{operation_id}:redrive        X-Administrative-Reason, Idempotency-Key
+POST  /v1/security-operations/{operation_id}:redrive        X-Administrative-Reason
 ```
 
 **Listing.** `:unresolved` lists parked operations, oldest first, at most 100. Each entry carries its
@@ -195,7 +195,9 @@ type, subject, attempts, last error class and age. Like every provider route, it
 - **Who and how.** It is a provider command: `aal2` within `IDENTITY_STEP_UP_MAX_AGE`, with a reason.
   - The response is the operation, followed inline within the command budget, as an accepted command
     is.
-  - Re-driving an operation that is not `unresolved` is refused with `409`.
+  - Re-driving an operation that is not `unresolved` is refused with `409`. That is also the answer
+    to a repeated request, and it says the re-drive already happened. So the route takes no
+    Idempotency-Key: the operation's state already makes the request idempotent.
 - **Evidence.** It writes a `privileged_access` row with action `operation.redrive`, the reason, and
   the request's correlation.
 - **Why replaying is safe.** STD-GLB-011 §3.9 requires that "Replay of a non-idempotent side effect
