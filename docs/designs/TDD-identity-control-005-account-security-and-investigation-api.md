@@ -133,17 +133,23 @@ version and reason.
 - Both increment `principal_mapping.version`.
 - Any other state is refused with `409` `state-transition-refused`, as is a mapping with no kernel
   user.
+- `sessions:terminate-all` and `:revoke` accept a Principal that is `active` or `suspended`. A
+  credential can be revoked while its Principal is contained.
 - `:restore` is also refused while any unresolved `principal_finding` names the Principal. The one
   finding class, `dangling`, means the kernel user is gone.
 
-**Refusal order.** Each refusal below happens before anything is written:
+**A repeated key first.** The idempotency key is looked up before any check that the operation's
+own effect could change. A repeated request finds its operation and returns it, even though that
+operation moved the version and the mapping state it was checked against.
+
+**Refusal order.** For a new key, each refusal below happens before anything is written:
 1. Provider authority (`403`).
 2. The self-action boundary (`403`).
 3. `Idempotency-Key`, `X-Administrative-Reason` and `expected_version` (`400`).
 4. Step-up (`401`, §Step-Up).
 5. The subject (`404`, or `409` for a workload or a disallowed state).
 6. The version (`409`).
-7. The idempotency key (`409`).
+7. The same key with another request (`409`), found by the first lookup.
 
 A `security_ref` that does not open for this subject and purpose is `404`. The codec reports one error
 for every reason a handle fails, so the response cannot tell a caller which check failed.
@@ -202,8 +208,18 @@ read-back agrees.
 
 Keycloak's own descriptions of these endpoints are "Remove all user sessions associated with the
 user" and "Remove a credential for a user" [R14]. `authenticator.revoke` re-reads the credentials
-before deleting and refuses when the target is the Principal's only credential (§Authenticator
-Guard). A refusal is final, not retried.
+before deleting (§Authenticator Guard). A refusal is final, not retried.
+
+**What "usable" means.** The guard counts first factors, the credentials that can begin a sign-in.
+The realm uses Keycloak's built-in browser flow, whose "first execution is the Username Password
+Form … It is marked as required, so the user must enter a valid username and password" [R15]. A
+passkey (`webauthn-passwordless`) is the other first factor Keycloak offers, once a flow admits it.
+- Revoking a first factor is refused, with `result_code` `last_authenticator`, when no other first
+  factor would remain.
+- Revoking a second factor (`otp`, `webauthn`) or a recovery code is never refused by the guard.
+
+So on this realm a password cannot be revoked. A compromised password is contained by suspension
+until the self-service slices bring a reset.
 
 The operation stores the sealed reference, never the kernel identifier. The handle's TTL bounds how
 long a browser may use it, so the executor opens a stored handle without the expiry check. The
@@ -644,3 +660,4 @@ degradation.
 | R12 | STD-GLB-004 3.0.1, *Enterprise Event-Driven Architecture & Messaging Standard*, §3.10 and §3.11. |
 | R13 | IETF RFC 9110, *HTTP Semantics*, §15.3.3, <https://www.rfc-editor.org/rfc/rfc9110#section-15.3.3>: "The representation sent with this response ought to describe the request's current status and point to (or embed) a status monitor". |
 | R14 | Keycloak, *Admin REST API* (OpenAPI, `docs-api/latest`), <https://www.keycloak.org/docs-api/latest/rest-api/index.html>, accessed 2026-10-03: `POST /admin/realms/{realm}/users/{user-id}/logout` "Remove all user sessions associated with the user"; `DELETE /admin/realms/{realm}/users/{user-id}/credentials/{credentialId}` "Remove a credential for a user"; `PUT /admin/realms/{realm}/users/{user-id}` "Update the user". The pinned kernel, 26.7.5, is proved by identity-kernel's compat suite (§Kernel Compatibility). |
+| R15 | Keycloak, *Server Administration Guide*, Authentication flows, the built-in browser flow, <https://www.keycloak.org/docs/latest/server_admin/index.html>, accessed 2026-10-03: "The first execution is the Username Password Form, an authentication type that renders the username and password page. It is marked as required, so the user must enter a valid username and password." |
