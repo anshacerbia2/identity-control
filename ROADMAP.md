@@ -556,7 +556,14 @@ Built in the order TDD-005 §Build Order states, one PR per slice:
   - **Revocation.** It refuses the last first factor (`last_authenticator`). On this realm that is the password, so a compromised password is contained by suspension.
   - Inline within `IDENTITY_SECURITY_COMMAND_BUDGET`, a command answers `200` with the final operation. Otherwise it answers `202` with `Location`. The executor runs every `IDENTITY_SECURITY_EXECUTOR_INTERVAL`.
   - Not yet built: an operator re-drive for an `unresolved` operation (STD-GLB-011 §3.9 replay), and the OTLP counters STD-GLB-011 §3.15 lists. Until then the logs carry them.
-- **3 · Self-service.** `/v1/me` security reads and commands.
+- ✅ **3a · Self-service sessions and authenticators** (TDD-005 2.3.0 §Self-Service as Built). The self routes are `GET /v1/me/sessions`, `POST /v1/me/sessions/{security_ref}:terminate`, `POST /v1/me/sessions:terminate-all`, `GET /v1/me/authenticators`, `POST /v1/me/authenticators/{security_ref}:remove`, and `GET /v1/me/security-operations/{id}`.
+  - **Route class `self`** (`selfOnly`). The subject is the token's `principal_id`, and the route test requires the wrapper.
+  - **Reads.** They are not evidenced. Each object carries a reference sealed for a self purpose, which opens on no administrative route. A session is marked `current` by the token's `sid`; identity-kernel compat run 37137921752 proves that `sid` is the listed session identifier.
+  - **Commands.**
+    - Each carries an Idempotency-Key and no reason or version. It records and advances the subject's `security_version`, and shares one sequence with administrative commands.
+    - Only an `active` Principal may command. `:remove` needs step-up and keeps the last first factor.
+    - Each final state is evidenced with the actor equal to the subject.
+- **3b · Consents.** `GET /v1/me/consents` and `:withdraw` wait for identity-kernel's compat proof of the consent listing and revocation, and for a registered client that asks for consent.
 - **4 · Enrollment and the assurance floor.** Needs the kernel's LoA mapping first.
 
 ## Waiting on the Keycloak proof-of-concept

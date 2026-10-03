@@ -419,3 +419,134 @@ func TestAnAttemptWhoseLeaseWasTakenFinishesNothing(t *testing.T) {
 		t.Errorf("the overtaken attempt was evidenced: %+v", records)
 	}
 }
+
+// selfCommand is a person's command on their own Principal: no reason, no version.
+func (h *harness) selfCommand(opType string, person id.UUID, ref string) Command {
+	h.keys++
+	return Command{Self: true, Type: opType, Subject: person, Ref: ref,
+		IdempotencyKey: "self-" + person.String() + "-" + string(rune('a'+h.keys)),
+		Actor: Actor{Principal: person, Correlation: "corr-self",
+			Assurance: "acr=1;auth_time=2026-10-03T12:00:00Z"}}
+}
+
+func (h *harness) selfEvidence(subject id.UUID) []record {
+	h.t.Helper()
+	var out []record
+	if err := h.pool.InTx(context.Background(), func(ctx context.Context, tx db.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT action, outcome, coalesce(reason, '<null>'), route
+		  FROM identity.privileged_access WHERE subject_principal_id = $1 AND actor_principal_id = $1 AND NOT emergency
+		  ORDER BY recorded_at, access_id`, subject.String())
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var r record
+			if err := rows.Scan(&r.action, &r.outcome, &r.reason, &r.correlation); err != nil {
+				return err
+			}
+			out = append(out, r)
+		}
+		return rows.Err()
+	}); err != nil {
+		h.t.Fatal(err)
+	}
+	return out
+}
+
+// A person lists their sessions, the current one marked by sid, and ends one of them; the other is
+// kept, and the command is evidenced with the person as actor and subject and no reason.
+func TestAPersonEndsOneOfTheirSessions(t *testing.T) {
+	h := newHarness(t)
+	person, user := h.principal("human", "active")
+	h.kernel.SetSecurity(user, keycloakfake.Security{Sessions: []keycloak.Session{{ID: "s-here"}, {ID: "s-there"}}})
+	ctx := context.Background()
+
+	sessions, err := h.service.MySessions(ctx, person, "s-here")
+	if err != nil || len(sessions) != 2 {
+		t.Fatalf("MySessions: %+v, %v", sessions, err)
+	}
+	there := sessions[1].SecurityRef
+	if !sessions[0].Current || sessions[1].Current {
+		t.Errorf("current marks %t %t; want the sid's session alone", sessions[0].Current, sessions[1].Current)
+	}
+
+	op, err := h.service.Submit(ctx, h.selfCommand(TypeSessionTerminate, person, there))
+	if err != nil || op.State != StateApplied {
+		t.Fatalf("ending one session: %+v, %v", op, err)
+	}
+	left, _ := h.kernel.UserSessions(ctx, testRealm, user)
+	if len(left) != 1 || left[0].ID != "s-here" {
+		t.Errorf("sessions left %+v; want the current one", left)
+	}
+	if records := h.selfEvidence(person); len(records) != 1 ||
+		records[0] != (record{TypeSessionTerminate, "applied", "<null>", "POST /v1/me/sessions/{security_ref}:terminate"}) {
+		t.Errorf("evidence %+v", records)
+	}
+	if version, _ := h.service.SecurityVersion(ctx, person); version != 2 {
+		t.Errorf("security_version %d; a self command advances it too", version)
+	}
+	if _, err := h.service.Submit(ctx, h.command(TypeSuspend, person, 1)); !errors.Is(err, ErrVersion) {
+		t.Errorf("an administrator's command on the version before: %v, want ErrVersion", err)
+	}
+}
+
+// A person's handle opens on the self routes only, and an administrator's on the administrative
+// ones only.
+func TestSelfAndAdministrativeReferencesDoNotCross(t *testing.T) {
+	h := newHarness(t)
+	person, user := h.principal("human", "active")
+	h.kernel.SetSecurity(user, keycloakfake.Security{Credentials: []keycloak.Credential{
+		{ID: "kc-password", Type: "password"}, {ID: "kc-otp", Type: "otp"}}})
+	ctx := context.Background()
+	mine, err := h.service.MyAuthenticators(ctx, person)
+	if err != nil || len(mine) != 2 {
+		t.Fatalf("MyAuthenticators: %+v, %v", mine, err)
+	}
+	admin, _ := h.refs.Seal(securityref.KindCredential, person, securityref.PurposeAdminRevoke, string(testRealm), "kc-otp")
+
+	if _, err := h.service.Submit(ctx, h.selfCommand(TypeAuthenticatorRemove, person, admin)); !errors.Is(err, ErrNotFound) {
+		t.Errorf("an administrator's handle on the self route: %v, want ErrNotFound", err)
+	}
+	revoke := h.command(TypeRevoke, person, 1)
+	revoke.Ref = mine[1].SecurityRef
+	if _, err := h.service.Submit(ctx, revoke); !errors.Is(err, ErrNotFound) {
+		t.Errorf("a person's handle on the administrative route: %v, want ErrNotFound", err)
+	}
+
+	var otp, password string
+	for _, a := range mine {
+		if a.Type == "otp" {
+			otp = a.SecurityRef
+		} else {
+			password = a.SecurityRef
+		}
+	}
+	if op, err := h.service.Submit(ctx, h.selfCommand(TypeAuthenticatorRemove, person, otp)); err != nil || op.State != StateApplied {
+		t.Errorf("removing one's OTP: %+v, %v", op, err)
+	}
+	if op, err := h.service.Submit(ctx, h.selfCommand(TypeAuthenticatorRemove, person, password)); err != nil ||
+		op.State != StateRefused || op.ResultCode != ResultLastAuthenticator {
+		t.Errorf("removing one's last password: %+v, %v", op, err)
+	}
+}
+
+func TestASuspendedPersonCommandsNothingAndReadsOnlyTheirOwnOperations(t *testing.T) {
+	h := newHarness(t)
+	person, _ := h.principal("human", "suspended")
+	other, _ := h.principal("human", "active")
+	ctx := context.Background()
+	if _, err := h.service.Submit(ctx, h.selfCommand(TypeTerminateAll, person, "")); !errors.Is(err, ErrState) {
+		t.Errorf("a suspended person's command: %v, want ErrState", err)
+	}
+	op, err := h.service.Submit(ctx, h.selfCommand(TypeTerminateAll, other, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.service.MyOperation(ctx, other, op.OperationID); err != nil {
+		t.Errorf("one's own operation: %v", err)
+	}
+	if _, err := h.service.MyOperation(ctx, person, op.OperationID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("another person's operation: %v, want ErrNotFound", err)
+	}
+}

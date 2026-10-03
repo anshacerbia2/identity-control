@@ -97,10 +97,17 @@ func TestContainmentCallsTheDocumentedEndpoints(t *testing.T) {
 	if err := admin.DeleteCredential(ctx, testRealm, "u1", "gone"); !errors.Is(err, keycloak.ErrNotFound) {
 		t.Errorf("an absent credential: %v, want ErrNotFound", err)
 	}
+	if err := admin.DeleteSession(ctx, testRealm, "s1"); err != nil {
+		t.Fatal(err)
+	}
+	if k.lastMethod != http.MethodDelete || !strings.HasSuffix(k.lastPath, "/realms/scnehaux/sessions/s1") {
+		t.Errorf("session delete sent %s %s", k.lastMethod, k.lastPath)
+	}
 	for name, call := range map[string]func() error{
-		"enable": func() error { return admin.EnableUser(ctx, testRealm, "") },
-		"logout": func() error { return admin.LogoutUser(ctx, testRealm, "") },
-		"delete": func() error { return admin.DeleteCredential(ctx, testRealm, "u1", "") },
+		"session": func() error { return admin.DeleteSession(ctx, testRealm, "") },
+		"enable":  func() error { return admin.EnableUser(ctx, testRealm, "") },
+		"logout":  func() error { return admin.LogoutUser(ctx, testRealm, "") },
+		"delete":  func() error { return admin.DeleteCredential(ctx, testRealm, "u1", "") },
 	} {
 		if err := call(); err == nil {
 			t.Errorf("%s with no identifier was sent", name)

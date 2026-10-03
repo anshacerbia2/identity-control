@@ -15,7 +15,6 @@ import (
 	"github.com/anshacerbia2/foundation-platform/id"
 
 	"github.com/anshacerbia2/identity-control/internal/keycloak"
-	"github.com/anshacerbia2/identity-control/internal/securityref"
 )
 
 // claimStatement selects due operations whose earlier sequences on the same Principal are all final
@@ -181,9 +180,15 @@ func (s *Service) attempt(ctx context.Context, c claimed) outcome {
 		err = s.restore(ctx, c.kernelUser)
 	case TypeTerminateAll:
 		err = s.terminateAll(ctx, c.kernelUser)
-	case TypeRevoke:
+	case TypeRevoke, TypeAuthenticatorRemove:
 		var refused string
 		refused, err = s.revoke(ctx, c)
+		if err == nil && refused != "" {
+			return outcome{state: StateRefused, resultCode: refused}
+		}
+	case TypeSessionTerminate:
+		var refused string
+		refused, err = s.terminateOne(ctx, c)
 		if err == nil && refused != "" {
 			return outcome{state: StateRefused, resultCode: refused}
 		}
@@ -306,7 +311,8 @@ var firstFactors = map[string]bool{"password": true, "webauthn-passwordless": tr
 func (s *Service) revoke(ctx context.Context, c claimed) (string, error) {
 	// The handle was checked with its expiry when the command was accepted. Its TTL bounds a
 	// browser's use, not an accepted operation's.
-	ref, err := s.refs.OpenAccepted(c.ref, securityref.KindCredential, c.subject, securityref.PurposeAdminRevoke)
+	kind, purpose := refBinding(c.opType)
+	ref, err := s.refs.OpenAccepted(c.ref, kind, c.subject, purpose)
 	if err != nil {
 		return "reference", nil
 	}
@@ -355,6 +361,34 @@ func (s *Service) revoke(ctx context.Context, c claimed) (string, error) {
 	return "", nil
 }
 
+// terminateOne ends one of the person's sessions, named by its sealed reference. A session already
+// gone counts as ended once the list agrees.
+func (s *Service) terminateOne(ctx context.Context, c claimed) (string, error) {
+	kind, purpose := refBinding(c.opType)
+	ref, err := s.refs.OpenAccepted(c.ref, kind, c.subject, purpose)
+	if err != nil {
+		return "reference", nil
+	}
+	err = s.call(ctx, func(ctx context.Context) error { return s.kernel.DeleteSession(ctx, s.cfg.Realm, ref.KernelID) })
+	if err != nil && !errors.Is(err, keycloak.ErrNotFound) {
+		return "", err
+	}
+	var sessions []keycloak.Session
+	if err := s.call(ctx, func(ctx context.Context) error {
+		var err error
+		sessions, err = s.kernel.UserSessions(ctx, s.cfg.Realm, c.kernelUser)
+		return err
+	}); err != nil {
+		return "", err
+	}
+	for _, session := range sessions {
+		if session.ID == ref.KernelID {
+			return "", fmt.Errorf("%w: the session is still listed", errReadBack)
+		}
+	}
+	return "", nil
+}
+
 const finishStatement = `UPDATE identity.security_operation
 SET state = $3, result_code = nullif($4, ''), last_error_class = nullif($5, ''),
     applied_at = CASE WHEN $3 = 'applied' THEN now() ELSE applied_at END,
@@ -367,7 +401,7 @@ WHERE operation_id = $1 AND attempt = $2`
 
 const evidenceStatement = `INSERT INTO identity.privileged_access
     (access_id, actor_principal_id, subject_principal_id, action, route, reason, outcome, correlation_id, emergency)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`
+VALUES ($1, $2, $3, $4, $5, nullif($6, ''), $7, $8, $9)`
 
 // finish records an attempt's outcome, and, for a final one, its evidence in the same transaction.
 // An attempt whose lease another worker took over finishes nothing.
@@ -401,7 +435,7 @@ func (s *Service) finish(ctx context.Context, c claimed, o outcome) error {
 			return err
 		}
 		if _, err := tx.Exec(ctx, evidenceStatement, accessID.String(), c.actor.String(), c.subject.String(), c.opType,
-			Route(c.opType), c.reason, o.state, c.correlation, c.emergency); err != nil {
+			Route(c.opType, c.actor == c.subject), c.reason, o.state, c.correlation, c.emergency); err != nil {
 			return fmt.Errorf("securitystate: record the evidence: %w", err)
 		}
 		return nil

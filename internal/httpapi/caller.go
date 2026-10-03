@@ -105,3 +105,16 @@ func Assurance(ctx context.Context) (string, time.Time, bool) {
 	a, ok := ctx.Value(assuranceKey{}).(assurance)
 	return a.acr, a.authTime, ok
 }
+
+type sessionKey struct{}
+
+// WithSessionID records the Keycloak session the caller's token belongs to: its sid claim.
+func WithSessionID(ctx context.Context, sid string) context.Context {
+	return context.WithValue(ctx, sessionKey{}, sid)
+}
+
+// SessionID returns the caller's sid, or "" when the token carried none.
+func SessionID(ctx context.Context) string {
+	sid, _ := ctx.Value(sessionKey{}).(string)
+	return sid
+}

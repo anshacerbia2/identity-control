@@ -178,6 +178,11 @@ func Authenticate(verifier TokenVerifier, providers ProviderDecider, logger *slo
 			acr, _ := claims.String(AuthContextClassClaim)
 			authTime, _ := claims.Int64(AuthTimeClaim)
 			ctx = WithAssurance(ctx, acr, time.Unix(authTime, 0).UTC())
+			// The Keycloak session the token belongs to, which a person's own session list marks as
+			// current (STD-IAM-002 §3.2 admits sid; TDD-identity-control-005 §Self-Service as Built).
+			if sid, ok := claims.String("sid"); ok {
+				ctx = WithSessionID(ctx, sid)
+			}
 
 			// A provider is a Principal this service's records say is one, for this request. Any
 			// other caller is a registration owner, whose authority is read per route from the

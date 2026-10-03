@@ -21,6 +21,7 @@ type Containment interface {
 	EnableUser(ctx context.Context, realm Realm, userID UserID) error
 	LogoutUser(ctx context.Context, realm Realm, userID UserID) error
 	DeleteCredential(ctx context.Context, realm Realm, userID UserID, credentialID string) error
+	DeleteSession(ctx context.Context, realm Realm, sessionID string) error
 }
 
 // EnableUser sets the user enabled, with a partial update that keeps its attributes (compat suite).
@@ -57,6 +58,22 @@ func (a *Admin) DeleteCredential(ctx context.Context, realm Realm, userID UserID
 	}
 	response, err := a.do(ctx, http.MethodDelete,
 		a.userPath(realm, userID)+"/credentials/"+url.PathEscape(credentialID), nil, nil, false)
+	if err != nil {
+		return err
+	}
+	response.Close()
+	return nil
+}
+
+// DeleteSession ends one session: "Remove a specific user session". The identifier is the one the
+// user's session list names, which is the access token's sid (identity-kernel compat run
+// 37137921752). A session already gone is ErrNotFound.
+func (a *Admin) DeleteSession(ctx context.Context, realm Realm, sessionID string) error {
+	if sessionID == "" {
+		return errors.New("keycloak: a session identifier is required")
+	}
+	response, err := a.do(ctx, http.MethodDelete,
+		"/admin/realms/"+url.PathEscape(string(realm))+"/sessions/"+url.PathEscape(sessionID), nil, nil, false)
 	if err != nil {
 		return err
 	}

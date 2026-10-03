@@ -97,6 +97,7 @@ type Calls struct {
 	EnableUser        int
 	Logout            int
 	DeleteCredential  int
+	DeleteSession     int
 }
 
 type stored struct {

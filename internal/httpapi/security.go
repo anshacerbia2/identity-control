@@ -158,11 +158,15 @@ func (h *Security) command(w http.ResponseWriter, r *http.Request, opType, rawSu
 // allowable elapsed time since the last authentication. acr_values is not sent: the realm maps no
 // level of authentication to ask for (TDD-identity-control-005 §Step-Up).
 func (h *Security) stepUp(w http.ResponseWriter, r *http.Request) {
+	stepUpChallenge(w, r, h.stepUpMaxAge)
+}
+
+func stepUpChallenge(w http.ResponseWriter, r *http.Request, maxAge time.Duration) {
 	w.Header().Set("WWW-Authenticate", fmt.Sprintf(
 		`Bearer error="insufficient_user_authentication", error_description="A more recent authentication is required", max_age=%d`,
-		int(h.stepUpMaxAge.Seconds())))
+		int(maxAge.Seconds())))
 	httpapi.Problem(w, r, httpapi.AuthenticationRequired,
-		fmt.Sprintf("This command requires an authentication within the last %s; sign in again", h.stepUpMaxAge))
+		fmt.Sprintf("This command requires an authentication within the last %s; sign in again", maxAge))
 }
 
 func writeSecurityError(w http.ResponseWriter, r *http.Request, err error) {

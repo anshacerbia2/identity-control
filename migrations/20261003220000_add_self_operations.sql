@@ -1,0 +1,2 @@
+-- Modify "security_operation" table
+ALTER TABLE "security_operation" DROP CONSTRAINT "security_operation_type_check", ADD CONSTRAINT "security_operation_type_check" CHECK (operation_type = ANY (ARRAY['suspend'::text, 'restore'::text, 'sessions.terminate-all'::text, 'authenticator.revoke'::text, 'session.terminate'::text, 'authenticator.remove'::text])); -- atlas:destructive-approved: widening a CHECK, reviewed 2026-10-03

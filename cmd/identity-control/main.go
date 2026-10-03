@@ -239,6 +239,10 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("security command handler: %w", err)
 	}
+	meHandler, err := httpapi.NewMe(securityCommands, cfg.StepUpMaxAge)
+	if err != nil {
+		return fmt.Errorf("self-service handler: %w", err)
+	}
 
 	// The key source performs no fetch here. A cold replica loads the key set on its first
 	// verification, and NewJWKS deliberately touches no network so the composition root decides
@@ -257,6 +261,7 @@ func run() error {
 		Workloads:     workloadHandler,
 		Investigation: investigationHandler,
 		Security:      securityHandler,
+		Me:            meHandler,
 		Database:      pool,
 		Telemetry:     telemetry,
 	}

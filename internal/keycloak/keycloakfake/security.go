@@ -131,6 +131,32 @@ func (c *Client) DeleteCredential(ctx context.Context, realm keycloak.Realm, use
 	return nil
 }
 
+// DeleteSession ends one session, whichever user of the realm holds it.
+func (c *Client) DeleteSession(ctx context.Context, realm keycloak.Realm, sessionID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.FailContainment != nil {
+		return c.FailContainment
+	}
+	for userID, s := range c.security {
+		if entry, ok := c.users[userID]; !ok || entry.realm != realm {
+			continue
+		}
+		for i, session := range s.Sessions {
+			if session.ID == sessionID {
+				s.Sessions = append(append([]keycloak.Session{}, s.Sessions[:i]...), s.Sessions[i+1:]...)
+				c.security[userID] = s
+				c.Calls.DeleteSession++
+				return nil
+			}
+		}
+	}
+	return keycloak.ErrNotFound
+}
+
 func (c *Client) setSecurityLocked(userID keycloak.UserID, s Security) {
 	if c.security == nil {
 		c.security = map[keycloak.UserID]Security{}

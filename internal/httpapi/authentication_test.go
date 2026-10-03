@@ -575,3 +575,16 @@ func TestProviderAuthorityComesFromTheRecordsDecision(t *testing.T) {
 		})
 	}
 }
+
+// The token's sid reaches the handler, which marks the caller's current session by it
+// (TDD-identity-control-005 §Self-Service as Built).
+func TestTheTokenSidTravelsWithTheRequest(t *testing.T) {
+	var seen string
+	handler := authenticateLogging(t, realVerifier(t), decider{asked: new(id.UUID)}, slog.New(slog.DiscardHandler))(
+		http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) { seen = httpapi.SessionID(r.Context()) }))
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, bearerRequest("Bearer "+token(t, withClaims(map[string]any{"sid": "kc-session-1"}))))
+	if w.Code != http.StatusOK || seen != "kc-session-1" {
+		t.Errorf("status %d, sid %q", w.Code, seen)
+	}
+}
