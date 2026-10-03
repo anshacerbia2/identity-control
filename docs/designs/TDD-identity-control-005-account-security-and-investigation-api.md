@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-005
   title: Account Security and Investigation API Mediation
   owner: Core Platform Team
-  version: 2.3.1
+  version: 2.4.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -151,7 +151,7 @@ GET   /v1/me/security-operations/{operation_id}
     were accepted.
 - **State.** The Principal must be `active`. A suspended person's token can outlive the suspension by
   at most its lifetime, and a command from it is refused with `409`.
-- **Step-up.** `:remove` requires `auth_time` within `IDENTITY_STEP_UP_MAX_AGE`, as §Step-Up says for
+- **Step-up.** `:remove` requires `acr` `aal2` and `auth_time` within `IDENTITY_STEP_UP_MAX_AGE`, as §Step-Up says for
   authenticator changes. Ending a session never does: it removes access, it does not gain any.
 - **Evidence.** The final state writes its `privileged_access` row, as every command's does (§Evidence),
   with the actor and the subject the same Principal and `emergency` false.
@@ -555,17 +555,31 @@ then the confirmation states that the count was not read.
 
 ### Step-Up
 
-A command that needs fresh authentication answers as RFC 9470 defines: `401` with
-`WWW-Authenticate: Bearer error="insufficient_user_authentication"` and `max_age`, the "allowable
-elapsed time in seconds since the last active authentication event" [R4], beside the problem
-document. Every administrative mutation, and authenticator enrollment and removal, requires
-`auth_time` within `IDENTITY_STEP_UP_MAX_AGE`.
+A request that needs more than its token shows is answered as RFC 9470 defines: `401` with
+`WWW-Authenticate: Bearer error="insufficient_user_authentication"`, beside the problem document
+[R4]. The challenge names what is missing:
+- `acr_values`, "the authentication context class reference values in order of preference";
+- `max_age`, the "allowable elapsed time in seconds since the last active authentication event".
 
-The challenge's `acr_values`, "the authentication context class reference values in order of
-preference" [R4], are not sent yet. The realm maps no level of authentication, so every login is
-`acr` `1` and there is no stronger class to ask for. Requiring MFA for these commands waits for
-identity-kernel to define levels and a step-up flow. Until then freshness is the whole requirement,
-and that is the gap the last slice closes.
+**Levels (2.4.0).** `ADR-IAM-004` names the levels `aal1` and `aal2`, and `STD-IAM-002 §3.2` orders
+them. A token's `acr` meets a level when it is that level or a higher one. Any other value, including
+the kernel's unmapped `0` and `1`, is below `aal1`.
+
+| Route | Level | Freshness |
+| :-- | :-- | :-- |
+| Every `providerOnly` route, reads included | `aal2` (NIST SP 800-53 IA-2(1), `STD-IAM-001 §3.1`) | Administrative commands: `auth_time` within `IDENTITY_STEP_UP_MAX_AGE` |
+| `POST /v1/me/authenticators/{security_ref}:remove` | `aal2` | Within `IDENTITY_STEP_UP_MAX_AGE` |
+| Every other `self` route, and the owner routes | Any level | None |
+
+- **What the challenge carries.** A read below `aal2` is challenged with `acr_values="aal2"` alone. A
+  command is challenged with `acr_values="aal2"` and `max_age`, because it needs both.
+- **What the kernel does with it.** identity-kernel's browser flow authenticates to the level asked,
+  enrolling a person's first TOTP if they have none (TDD-identity-kernel-001 §Authentication Levels).
+  It reuses a second factor for 300 seconds, the same as `IDENTITY_STEP_UP_MAX_AGE`.
+- **Rollout.** `IDENTITY_ASSURANCE` is `enforce` by default, and refuses as above. `report` serves the
+  request and logs that it fell short. `report` exists for a server whose kernel is not yet updated:
+  until the kernel maps the levels, no token can show `aal2`, and every provider would be locked out.
+  Deploy the kernel first.
 
 ### Evidence
 
@@ -611,6 +625,7 @@ transaction, and the table stays the local record.
 | `IDENTITY_SECURITY_REF_KEY_FILE` | required | The key ring that seals references: one or two 32-byte keys, each with a `kid`, the first used to seal |
 | `IDENTITY_SECURITY_REF_TTL` | `10m` | Opaque object-reference lifetime |
 | `IDENTITY_STEP_UP_MAX_AGE` | `5m` | Freshness every administrative mutation and authenticator change requires |
+| `IDENTITY_ASSURANCE` | `enforce` | `enforce` refuses a token below the level a route requires (§Step-Up); `report` serves it and logs the shortfall, for a server whose kernel does not yet map the levels |
 | `IDENTITY_SECURITY_COMMAND_BUDGET` | `2s` | Inline execution wait before returning 202 |
 | `IDENTITY_SECURITY_ATTEMPT_TIMEOUT` | `500ms` | One supported Admin API attempt |
 | `IDENTITY_SECURITY_MAX_ATTEMPTS` | `3` | Attempts before unresolved state |
