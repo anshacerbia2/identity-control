@@ -1,4 +1,4 @@
-h1:0B9xKx5+jurgqqoyjGxg5yJu6sVp71t2eiIJatc7ecg=
+h1:dxYZuO/BvNaDh4VVWpzQMOJEEL94mis9tcu+NMigit4=
 20260817151332_baseline_identity_schema.sql h1:GysIRGAJncY8eQTmFIhc3g8FTeFq8dGu9wmdY4kefVQ=
 20260817201931_add_creation_payload.sql h1:ejgDHTQ30FK0/adjz26CYPnLsAJyodOxBHvTI/GOd8M=
 20260820185807_add_bootstrap_ceremony.sql h1:0tiQsqClxrSDiz1Jl+vd6VDStnO/nObLoeKIHBWsX3M=
@@ -19,3 +19,4 @@ h1:0B9xKx5+jurgqqoyjGxg5yJu6sVp71t2eiIJatc7ecg=
 20261003120000_add_ceremony_grant.sql h1:dO5ZiUsMEr93Gk/FYyH5JgUs9aKIakzalTF3VSe1O0A=
 20261003140000_add_audience_changes.sql h1:d2+K/NjFkhnmjOAo8imRvegeQKu8qoImfZGSXhM++d8=
 20261003160000_add_privileged_access.sql h1:qaBdcyVnf9KEJD7BczqpbdG3DB6qh8t4z/LULTeSZyA=
+20261003200000_add_security_operation.sql h1:yBRBFOoaW6cRXzdFJvoDWpiBjLA+N3NgglUneTznoD4=

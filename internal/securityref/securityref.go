@@ -36,6 +36,10 @@ const (
 	KindFederatedLink Kind = "federation-link"
 )
 
+// PurposeAdminRevoke is the purpose an authenticator's handle is sealed for in a provider's read:
+// the administrative revocation (TDD-identity-control-005 §API).
+const PurposeAdminRevoke = "admin.authenticator.revoke"
+
 // ErrInvalid is any handle that does not open: tampered, expired, sealed for another kind, subject
 // or purpose, or under a key no longer held. One error for all of them, so a caller probing handles
 // learns nothing about which check failed.
@@ -163,6 +167,25 @@ func (c *Codec) Seal(kind Kind, principal id.UUID, purpose, realm, kernelID stri
 // Open returns what a handle stands for, when it was sealed for this kind, Principal and purpose
 // and has not expired.
 func (c *Codec) Open(handle string, kind Kind, principal id.UUID, purpose string) (Ref, error) {
+	ref, err := c.open(handle, kind, principal, purpose)
+	if err != nil {
+		return Ref{}, err
+	}
+	if !c.now().Before(ref.Expires) {
+		return Ref{}, ErrInvalid
+	}
+	return ref, nil
+}
+
+// OpenAccepted opens a handle a command was accepted with, without the expiry check. The TTL bounds
+// how long a browser may use a handle; an accepted command was checked against it when it was
+// accepted, and its kind, Principal and purpose binding still hold. The key that sealed it must
+// still be in the ring.
+func (c *Codec) OpenAccepted(handle string, kind Kind, principal id.UUID, purpose string) (Ref, error) {
+	return c.open(handle, kind, principal, purpose)
+}
+
+func (c *Codec) open(handle string, kind Kind, principal id.UUID, purpose string) (Ref, error) {
 	kid, body, found := strings.Cut(handle, ".")
 	gcm, known := c.aead[kid]
 	if !found || !known {
@@ -182,8 +205,5 @@ func (c *Codec) Open(handle string, kind Kind, principal id.UUID, purpose string
 		return Ref{}, ErrInvalid
 	}
 	expires := time.Unix(p.Expires, 0).UTC()
-	if !c.now().Before(expires) {
-		return Ref{}, ErrInvalid
-	}
 	return Ref{Kind: kind, Principal: principal, Purpose: purpose, Realm: p.Realm, KernelID: p.KernelID, Expires: expires}, nil
 }

@@ -552,3 +552,38 @@ func TestThePrivilegedAccessRecordIsInsertOnly(t *testing.T) {
 		}
 	}
 }
+
+// A security command's request is never rewritten and nothing deletes one; only its execution state
+// moves. An attempt is written once and finished once (TDD-identity-control-005 §Containment as Built).
+func TestASecurityCommandIsNeverRewritten(t *testing.T) {
+	pool, ctx := openPool(t)
+	for table, writable := range map[string][]string{
+		"identity.security_operation": {"state", "attempts", "next_attempt_at", "result_code", "last_error_class",
+			"applied_at"},
+		"identity.security_operation_attempt": {"finished_at", "outcome", "error_class"},
+	} {
+		for _, column := range writable {
+			if !queryBool(t, pool, ctx, `SELECT has_column_privilege($1, $2, $3, 'UPDATE')`, runtimeRole, table, column) {
+				t.Errorf("%s cannot update %s.%s; execution needs it", runtimeRole, table, column)
+			}
+		}
+		for _, privilege := range []string{"DELETE", "TRUNCATE"} {
+			if queryBool(t, pool, ctx, `SELECT has_table_privilege($1, $2, $3)`, runtimeRole, table, privilege) {
+				t.Errorf("%s holds %s on %s; a command's record could be removed", runtimeRole, privilege, table)
+			}
+		}
+	}
+	for _, column := range []string{"operation_id", "principal_id", "subject_sequence", "actor_principal_id",
+		"idempotency_key", "request_digest", "operation_type", "sealed_object_ref", "expected_version", "reason",
+		"correlation_id", "assurance", "emergency", "created_at"} {
+		if queryBool(t, pool, ctx, `SELECT has_column_privilege($1, 'identity.security_operation', $2, 'UPDATE')`,
+			runtimeRole, column) {
+			t.Errorf("%s can update security_operation.%s; an accepted command must never be rewritten", runtimeRole, column)
+		}
+	}
+	for _, privilege := range []string{"DELETE", "TRUNCATE"} {
+		if queryBool(t, pool, ctx, `SELECT has_table_privilege($1, 'identity.security_subject_state', $2)`, runtimeRole, privilege) {
+			t.Errorf("%s holds %s on security_subject_state", runtimeRole, privilege)
+		}
+	}
+}

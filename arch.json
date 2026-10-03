@@ -26,6 +26,7 @@
       "internal/reconcile",
       "internal/registration",
       "internal/securityref",
+      "internal/securitystate",
       "internal/workload"
     ],
     "cmd/identity-migrate": ["internal/controldb"],
@@ -105,6 +106,16 @@
       "internal/keycloak/keycloakfake",
       "internal/securityref"
     ],
+    "_comment_securitystate": [
+      "internal/securitystate accepts and executes a provider's security commands",
+      "(TDD-identity-control-005 §Containment as Built): the kernel through keycloak's Containment",
+      "port, and the accepted command's reference through internal/securityref."
+    ],
+    "internal/securitystate": [
+      "internal/keycloak",
+      "internal/keycloak/keycloakfake",
+      "internal/securityref"
+    ],
     "internal/httpapi": [
       "internal/identity/provisioning",
       "internal/investigation",
@@ -112,6 +123,7 @@
       "internal/providerauthority",
       "internal/reconcile",
       "internal/registration",
+      "internal/securitystate",
       "internal/workload"
     ]
   },

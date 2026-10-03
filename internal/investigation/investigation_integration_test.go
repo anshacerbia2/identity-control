@@ -206,7 +206,8 @@ func TestAPrincipalAndItsKernelStateAreReadAndEachReadIsRecorded(t *testing.T) {
 	ctx := context.Background()
 
 	principal, err := h.service.Principal(ctx, h.actor, alice)
-	if err != nil || principal.Username != "alice" || principal.State != "active" || principal.Realm != string(testRealm) {
+	if err != nil || principal.Username != "alice" || principal.State != "active" || principal.Realm != string(testRealm) ||
+		principal.SecurityVersion != 1 {
 		t.Fatalf("Principal: %+v, %v", principal, err)
 	}
 	sessions, err := h.service.Sessions(ctx, h.actor, alice)

@@ -56,3 +56,86 @@ func (c *Client) UserFederatedIdentities(ctx context.Context, realm keycloak.Rea
 }
 
 var _ keycloak.SecurityReader = (*Client)(nil)
+
+// EnableUser sets a user enabled.
+func (c *Client) EnableUser(ctx context.Context, realm keycloak.Realm, userID keycloak.UserID) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.FailContainment != nil {
+		return c.FailContainment
+	}
+	entry, ok := c.users[userID]
+	if !ok || entry.realm != realm {
+		return keycloak.ErrNotFound
+	}
+	entry.user.Enabled = true
+	c.users[userID] = entry
+	c.Calls.EnableUser++
+	return nil
+}
+
+// LogoutUser ends every session of a user.
+func (c *Client) LogoutUser(ctx context.Context, realm keycloak.Realm, userID keycloak.UserID) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.FailContainment != nil {
+		return c.FailContainment
+	}
+	entry, ok := c.users[userID]
+	if !ok || entry.realm != realm {
+		return keycloak.ErrNotFound
+	}
+	s := c.security[userID]
+	s.Sessions = nil
+	c.setSecurityLocked(userID, s)
+	c.Calls.Logout++
+	return nil
+}
+
+// DeleteCredential removes one credential of a user.
+func (c *Client) DeleteCredential(ctx context.Context, realm keycloak.Realm, userID keycloak.UserID, credentialID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.FailContainment != nil {
+		return c.FailContainment
+	}
+	entry, ok := c.users[userID]
+	if !ok || entry.realm != realm {
+		return keycloak.ErrNotFound
+	}
+	s := c.security[userID]
+	kept := s.Credentials[:0:0]
+	found := false
+	for _, credential := range s.Credentials {
+		if credential.ID == credentialID {
+			found = true
+			continue
+		}
+		kept = append(kept, credential)
+	}
+	if !found {
+		return keycloak.ErrNotFound
+	}
+	s.Credentials = kept
+	c.setSecurityLocked(userID, s)
+	c.Calls.DeleteCredential++
+	return nil
+}
+
+func (c *Client) setSecurityLocked(userID keycloak.UserID, s Security) {
+	if c.security == nil {
+		c.security = map[keycloak.UserID]Security{}
+	}
+	c.security[userID] = s
+}
+
+var _ keycloak.Containment = (*Client)(nil)

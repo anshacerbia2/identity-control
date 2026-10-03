@@ -134,7 +134,7 @@ table "principal_mapping" {
   }
 
   check "principal_mapping_state_check" {
-    expr = "state IN ('pending', 'active', 'quarantined', 'retired')"
+    expr = "state IN ('pending', 'active', 'suspended', 'quarantined', 'retired')"
   }
 
   check "principal_mapping_subject_check" {
@@ -1942,3 +1942,216 @@ table "privileged_access" {
   }
 }
 
+// The serialization point of one Principal's security commands (TDD-identity-control-005 §Data
+// Model). A command locks the row, compares expected_version, takes next_sequence and increments
+// both, so two commands on one Principal are ordered and an outdated one is refused.
+table "security_subject_state" {
+  schema  = schema.identity
+  comment = "Version and sequence of one Principal's security commands. TDD-identity-control-005."
+
+  column "principal_id" {
+    null = false
+    type = uuid
+  }
+  column "version" {
+    null    = false
+    type    = bigint
+    default = 1
+  }
+  column "next_sequence" {
+    null    = false
+    type    = bigint
+    default = 1
+  }
+  column "updated_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+
+  primary_key {
+    columns = [column.principal_id]
+  }
+
+  foreign_key "security_subject_state_principal_id_fkey" {
+    columns     = [column.principal_id]
+    ref_columns = [table.principal_mapping.column.principal_id]
+    on_update   = NO_ACTION
+    on_delete   = NO_ACTION
+  }
+}
+
+// An accepted security command, durable before any kernel call (STD-GLB-011 §3.3). It holds the
+// sealed reference, never a kernel identifier.
+table "security_operation" {
+  schema  = schema.identity
+  comment = "Accepted security commands and their execution state. TDD-identity-control-005 §Containment as Built."
+
+  column "operation_id" {
+    null = false
+    type = uuid
+  }
+  column "principal_id" {
+    null = false
+    type = uuid
+  }
+  column "subject_sequence" {
+    null = false
+    type = bigint
+  }
+  column "actor_principal_id" {
+    null = false
+    type = uuid
+  }
+  column "idempotency_key" {
+    null = false
+    type = text
+  }
+  column "request_digest" {
+    null = false
+    type = text
+  }
+  column "operation_type" {
+    null = false
+    type = text
+  }
+  column "sealed_object_ref" {
+    null = true
+    type = text
+  }
+  column "expected_version" {
+    null = false
+    type = bigint
+  }
+  column "reason" {
+    null = true
+    type = text
+  }
+  column "correlation_id" {
+    null = false
+    type = text
+  }
+  column "assurance" {
+    null = false
+    type = text
+  }
+  column "emergency" {
+    null = false
+    type = boolean
+  }
+  column "state" {
+    null    = false
+    type    = text
+    default = "pending"
+  }
+  column "attempts" {
+    null    = false
+    type    = integer
+    default = 0
+  }
+  column "next_attempt_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+  column "result_code" {
+    null = true
+    type = text
+  }
+  column "last_error_class" {
+    null = true
+    type = text
+  }
+  column "created_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+  column "applied_at" {
+    null = true
+    type = timestamptz
+  }
+
+  primary_key {
+    columns = [column.operation_id]
+  }
+
+  foreign_key "security_operation_principal_id_fkey" {
+    columns     = [column.principal_id]
+    ref_columns = [table.security_subject_state.column.principal_id]
+    on_update   = NO_ACTION
+    on_delete   = NO_ACTION
+  }
+
+  index "security_operation_principal_id_subject_sequence_key" {
+    unique  = true
+    columns = [column.principal_id, column.subject_sequence]
+  }
+  index "security_operation_actor_principal_id_idempotency_key_key" {
+    unique  = true
+    columns = [column.actor_principal_id, column.idempotency_key]
+  }
+  index "security_operation_claim" {
+    columns = [column.next_attempt_at, column.created_at]
+    where   = "state IN ('pending', 'retrying')"
+  }
+
+  check "security_operation_state_check" {
+    expr = "state IN ('pending', 'retrying', 'applied', 'refused', 'unresolved')"
+  }
+  check "security_operation_type_check" {
+    expr = "operation_type IN ('suspend', 'restore', 'sessions.terminate-all', 'authenticator.revoke')"
+  }
+}
+
+// One row per claim of an operation: the operation is the job and the row its attempt
+// (STD-GLB-011 §3.4). Insert-only but for the attempt's own finish.
+table "security_operation_attempt" {
+  schema  = schema.identity
+  comment = "Each claim of a security operation. STD-GLB-011 §3.4."
+
+  column "operation_id" {
+    null = false
+    type = uuid
+  }
+  column "attempt" {
+    null = false
+    type = integer
+  }
+  column "claimed_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+  column "lease_until" {
+    null = false
+    type = timestamptz
+  }
+  column "finished_at" {
+    null = true
+    type = timestamptz
+  }
+  column "outcome" {
+    null = true
+    type = text
+  }
+  column "error_class" {
+    null = true
+    type = text
+  }
+
+  primary_key {
+    columns = [column.operation_id, column.attempt]
+  }
+
+  foreign_key "security_operation_attempt_operation_id_fkey" {
+    columns     = [column.operation_id]
+    ref_columns = [table.security_operation.column.operation_id]
+    on_update   = NO_ACTION
+    on_delete   = NO_ACTION
+  }
+
+  check "security_operation_attempt_outcome_check" {
+    expr = "outcome IS NULL OR outcome IN ('applied', 'refused', 'retry', 'unresolved')"
+  }
+}

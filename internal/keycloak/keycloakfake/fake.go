@@ -78,6 +78,9 @@ type Client struct {
 	// FailSecurity, when set, is returned by every security-state read.
 	FailSecurity error
 
+	// FailContainment, when set, is returned by EnableUser, LogoutUser and DeleteCredential.
+	FailContainment error
+
 	users    map[keycloak.UserID]stored
 	security map[keycloak.UserID]Security
 	nextID   int
@@ -91,6 +94,9 @@ type Calls struct {
 	DisableUser       int
 	WriteWorkload     int
 	SecurityReads     int
+	EnableUser        int
+	Logout            int
+	DeleteCredential  int
 }
 
 type stored struct {

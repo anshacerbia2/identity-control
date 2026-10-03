@@ -37,6 +37,7 @@ import (
 	"github.com/anshacerbia2/identity-control/internal/reconcile"
 	"github.com/anshacerbia2/identity-control/internal/registration"
 	"github.com/anshacerbia2/identity-control/internal/securityref"
+	"github.com/anshacerbia2/identity-control/internal/securitystate"
 	"github.com/anshacerbia2/identity-control/internal/workload"
 )
 
@@ -221,6 +222,23 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("investigation handler: %w", err)
 	}
+	// The security commands contain a Principal through the same credential (TDD-identity-control-005
+	// §Containment as Built). The executor runs in this process beside the API, as the sweeps do.
+	securityCommands, err := securitystate.New(pool, kernel, refs, securitystate.Config{
+		Realm:          keycloak.Realm(cfg.KeycloakRealm),
+		Budget:         cfg.CommandBudget,
+		AttemptTimeout: cfg.AttemptTimeout,
+		MaxAttempts:    cfg.MaxAttempts,
+		Lease:          cfg.OperationLease,
+		Interval:       cfg.ExecutorInterval,
+	}, logger)
+	if err != nil {
+		return fmt.Errorf("security command service: %w", err)
+	}
+	securityHandler, err := httpapi.NewSecurity(securityCommands, cfg.StepUpMaxAge)
+	if err != nil {
+		return fmt.Errorf("security command handler: %w", err)
+	}
 
 	// The key source performs no fetch here. A cold replica loads the key set on its first
 	// verification, and NewJWKS deliberately touches no network so the composition root decides
@@ -238,6 +256,7 @@ func run() error {
 		Registrations: registrations,
 		Workloads:     workloadHandler,
 		Investigation: investigationHandler,
+		Security:      securityHandler,
 		Database:      pool,
 		Telemetry:     telemetry,
 	}
@@ -365,6 +384,7 @@ func run() error {
 	// The registration sweep runs on a schedule from here, the one package allowed to start a
 	// goroutine. Every replica schedules it; the reconciler's run claim lets one sweep at a time
 	// through, so the others' ticks are skipped rather than duplicated.
+	go securityCommands.Run(ctx)
 	go scheduleSweeps(ctx, provisioner, registrar, workloads, reconciler, cfg.RegistrationReconcileInterval, logger)
 	if freshness != nil {
 		go freshness.Poll(ctx, projection, frontier, providerauthority.PollInterval, logger)

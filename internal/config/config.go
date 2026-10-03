@@ -120,6 +120,17 @@ type Config struct {
 	SecurityRefKeyFile string
 	SecurityRefTTL     time.Duration
 
+	// The security commands (TDD-identity-control-005 §Configuration). StepUpMaxAge is how recent the
+	// caller's authentication must be. A command executes inline for CommandBudget, each Admin API
+	// call within AttemptTimeout, at most MaxAttempts times. OperationLease hides a claimed
+	// operation from other workers, and ExecutorInterval is how often due operations are claimed.
+	StepUpMaxAge     time.Duration
+	CommandBudget    time.Duration
+	AttemptTimeout   time.Duration
+	MaxAttempts      int
+	OperationLease   time.Duration
+	ExecutorInterval time.Duration
+
 	// AdminSearchMinLength and AdminSearchPageSize bound a provider's Principal search: a query
 	// shorter than the floor is refused, and a page holds at most the size (TDD-identity-control-005
 	// §Read Authorization and Disclosure).
@@ -237,6 +248,21 @@ func Load() (Config, error) {
 		problems = append(problems, errors.New("IDENTITY_SECURITY_REF_KEY_FILE is required"))
 	}
 	cfg.SecurityRefTTL = durationOr("IDENTITY_SECURITY_REF_TTL", 10*time.Minute, &problems)
+	cfg.StepUpMaxAge = durationOr("IDENTITY_STEP_UP_MAX_AGE", 5*time.Minute, &problems)
+	cfg.CommandBudget = durationOr("IDENTITY_SECURITY_COMMAND_BUDGET", 2*time.Second, &problems)
+	cfg.AttemptTimeout = durationOr("IDENTITY_SECURITY_ATTEMPT_TIMEOUT", 500*time.Millisecond, &problems)
+	cfg.MaxAttempts = intOr("IDENTITY_SECURITY_MAX_ATTEMPTS", 3, &problems)
+	cfg.OperationLease = durationOr("IDENTITY_SECURITY_OPERATION_LEASE", 10*time.Second, &problems)
+	cfg.ExecutorInterval = durationOr("IDENTITY_SECURITY_EXECUTOR_INTERVAL", time.Second, &problems)
+	switch {
+	case cfg.StepUpMaxAge <= 0 || cfg.CommandBudget <= 0 || cfg.AttemptTimeout <= 0 || cfg.MaxAttempts <= 0 ||
+		cfg.ExecutorInterval <= 0:
+		problems = append(problems, errors.New("the IDENTITY_STEP_UP_MAX_AGE and IDENTITY_SECURITY_* settings must be positive"))
+	case cfg.OperationLease <= 4*cfg.AttemptTimeout:
+		// A suspension makes four calls in one attempt. A lease shorter than they can take lets a
+		// second worker claim an operation the first is still executing.
+		problems = append(problems, errors.New("IDENTITY_SECURITY_OPERATION_LEASE must exceed four IDENTITY_SECURITY_ATTEMPT_TIMEOUTs, the calls of one suspension"))
+	}
 	cfg.AdminSearchMinLength = intOr("IDENTITY_ADMIN_SEARCH_MIN_LENGTH", 3, &problems)
 	cfg.AdminSearchPageSize = intOr("IDENTITY_ADMIN_SEARCH_PAGE_SIZE", 25, &problems)
 	if cfg.SecurityRefTTL <= 0 || cfg.AdminSearchMinLength <= 0 || cfg.AdminSearchPageSize <= 0 {

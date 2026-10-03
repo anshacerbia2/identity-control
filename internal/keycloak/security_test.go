@@ -5,10 +5,13 @@ package keycloak_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/anshacerbia2/identity-control/internal/keycloak"
 )
 
 func TestSecurityStateIsReadFromTheUserSubresources(t *testing.T) {
@@ -57,5 +60,50 @@ func TestSecurityStateIsReadFromTheUserSubresources(t *testing.T) {
 	}
 	if _, err := admin.UserSessions(ctx, testRealm, "gone"); err == nil {
 		t.Error("an absent user's sessions answered no error")
+	}
+}
+
+// Each containment call is the documented endpoint, with nothing but enabled in a user update, so
+// the partial update keeps the user's attributes (identity-kernel compat/user_containment_test.go).
+func TestContainmentCallsTheDocumentedEndpoints(t *testing.T) {
+	k := &kernel{}
+	k.route = func(method, path string) (int, string) {
+		if strings.HasSuffix(path, "/credentials/gone") {
+			return http.StatusNotFound, ""
+		}
+		return http.StatusNoContent, ""
+	}
+	admin, _ := newAdmin(t, k)
+	ctx := context.Background()
+
+	if err := admin.EnableUser(ctx, testRealm, "u1"); err != nil {
+		t.Fatal(err)
+	}
+	if k.lastMethod != http.MethodPut || !strings.HasSuffix(k.lastPath, "/users/u1") || string(k.lastBody) != `{"enabled":true}` {
+		t.Errorf("enable sent %s %s %s", k.lastMethod, k.lastPath, k.lastBody)
+	}
+	if err := admin.LogoutUser(ctx, testRealm, "u1"); err != nil {
+		t.Fatal(err)
+	}
+	if k.lastMethod != http.MethodPost || !strings.HasSuffix(k.lastPath, "/users/u1/logout") {
+		t.Errorf("logout sent %s %s", k.lastMethod, k.lastPath)
+	}
+	if err := admin.DeleteCredential(ctx, testRealm, "u1", "k1"); err != nil {
+		t.Fatal(err)
+	}
+	if k.lastMethod != http.MethodDelete || !strings.HasSuffix(k.lastPath, "/users/u1/credentials/k1") {
+		t.Errorf("delete sent %s %s", k.lastMethod, k.lastPath)
+	}
+	if err := admin.DeleteCredential(ctx, testRealm, "u1", "gone"); !errors.Is(err, keycloak.ErrNotFound) {
+		t.Errorf("an absent credential: %v, want ErrNotFound", err)
+	}
+	for name, call := range map[string]func() error{
+		"enable": func() error { return admin.EnableUser(ctx, testRealm, "") },
+		"logout": func() error { return admin.LogoutUser(ctx, testRealm, "") },
+		"delete": func() error { return admin.DeleteCredential(ctx, testRealm, "u1", "") },
+	} {
+		if err := call(); err == nil {
+			t.Errorf("%s with no identifier was sent", name)
+		}
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	fhttp "github.com/anshacerbia2/foundation-platform/httpapi"
 	"github.com/anshacerbia2/foundation-platform/id"
@@ -172,6 +173,11 @@ func Authenticate(verifier TokenVerifier, providers ProviderDecider, logger *slo
 				return
 			}
 			ctx := WithCallerScope(r.Context(), "principal:"+principal)
+			// The Requirement refused a token without them, so both are present: how and when the
+			// caller last authenticated, which a command's step-up reads (RFC 9470).
+			acr, _ := claims.String(AuthContextClassClaim)
+			authTime, _ := claims.Int64(AuthTimeClaim)
+			ctx = WithAssurance(ctx, acr, time.Unix(authTime, 0).UTC())
 
 			// A provider is a Principal this service's records say is one, for this request. Any
 			// other caller is a registration owner, whose authority is read per route from the
