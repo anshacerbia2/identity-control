@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-005
   title: Account Security and Investigation API Mediation
   owner: Core Platform Team
-  version: 2.2.0
+  version: 2.3.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -99,6 +99,63 @@ cannot suspend, restore, or revoke an authenticator of, the Principal in its own
 3. Self-service: `/v1/me/sessions`, `/v1/me/authenticators` and `/v1/me/consents`.
 4. Enrollment, and the last-authenticator guard's assurance floor, once the kernel defines levels of
    authentication (§Step-Up).
+
+## Self-Service as Built (2.3.0)
+
+Slice 3 is built in two parts. **3a**, built here, is a person's own sessions and authenticators.
+**3b** is consents. It waits for two things: identity-kernel's compat suite has to prove the consent
+listing and revocation, which needs a client that asks for consent, and a registered client has to
+require consent at all. Until then, `GET /v1/me/consents` is not served.
+
+**Route class `self`.**
+- The subject is the `principal_id` in the token, and no path segment names it.
+- Any person's token is accepted, provider or not. A workload's token is already refused by the
+  claim rule.
+- Self reads write no `privileged_access` row: a person reading their own security state discloses
+  nothing to anyone (`TDD-identity-experience-003` §Testing Strategy, Privileged Reads).
+
+```text
+GET   /v1/me/sessions
+POST  /v1/me/sessions/{security_ref}:terminate
+POST  /v1/me/sessions:terminate-all
+GET   /v1/me/authenticators
+POST  /v1/me/authenticators/{security_ref}:remove
+```
+
+**Reads.**
+- Each session and authenticator carries a `security_ref` sealed for the caller.
+  - A session's is sealed for `self.session.terminate`.
+  - An authenticator's is sealed for `self.authenticator.remove`.
+  - Neither opens on the administrative routes, which use other purposes.
+- A session also carries `current: true` when its identifier equals the token's `sid`. STD-IAM-002
+  §3.2 admits `sid` in the access token as "the session identifier OpenID Connect logout defines"
+  [R16]. identity-kernel's compat suite proves that `sid` is the identifier the Admin API lists the
+  session under.
+
+**Commands.**
+
+| Operation | Calls, each read back |
+| :-- | :-- |
+| `session.terminate` | `DELETE /admin/realms/{realm}/sessions/{session}`, Keycloak's "Remove a specific user session" [R14]. It is applied once the session is absent from the user's list, including when it was already absent |
+| `sessions.terminate-all` | As the administrative one. It ends the caller's current session as well |
+| `authenticator.remove` | As `authenticator.revoke`, with the same last-first-factor guard |
+
+- **What a self command carries.** It carries an `Idempotency-Key` and nothing else: no reason and
+  no `expected_version`. §Data Model already makes the reason "absent for ordinary self-service
+  operations". The operation records the subject's version at acceptance as `expected_version`, and
+  advances it as every command does.
+  - An administrator's next command therefore names a newer `security_version`. That is the point:
+    the record changed.
+  - Self and administrative commands share one sequence per Principal, so they run in the order they
+    were accepted.
+- **State.** The Principal must be `active`. A suspended person's token can outlive the suspension by
+  at most its lifetime, and a command from it is refused with `409`.
+- **Step-up.** `:remove` requires `auth_time` within `IDENTITY_STEP_UP_MAX_AGE`, as §Step-Up says for
+  authenticator changes. Ending a session never does: it removes access, it does not gain any.
+- **Evidence.** The final state writes its `privileged_access` row, as every command's does (§Evidence),
+  with the actor and the subject the same Principal and `emergency` false.
+- **After `terminate-all`.** The BFF ends its own session as well (`TDD-identity-experience-001`), because
+  the Keycloak session behind it is gone.
 
 ## Containment as Built (2.2.0)
 
@@ -309,7 +366,8 @@ CREATE TABLE identity.security_operation (
     CONSTRAINT security_operation_state_check
         CHECK (state IN ('pending', 'retrying', 'applied', 'refused', 'unresolved')),
     CONSTRAINT security_operation_type_check
-        CHECK (operation_type IN ('suspend', 'restore', 'sessions.terminate-all', 'authenticator.revoke')),
+        CHECK (operation_type IN ('suspend', 'restore', 'sessions.terminate-all', 'authenticator.revoke',
+                                  'session.terminate', 'authenticator.remove')),
     UNIQUE (principal_id, subject_sequence),
     UNIQUE (actor_principal_id, idempotency_key)
 );
@@ -661,3 +719,4 @@ degradation.
 | R13 | IETF RFC 9110, *HTTP Semantics*, §15.3.3, <https://www.rfc-editor.org/rfc/rfc9110#section-15.3.3>: "The representation sent with this response ought to describe the request's current status and point to (or embed) a status monitor". |
 | R14 | Keycloak, *Admin REST API* (OpenAPI, `docs-api/latest`), <https://www.keycloak.org/docs-api/latest/rest-api/index.html>, accessed 2026-10-03: `POST /admin/realms/{realm}/users/{user-id}/logout` "Remove all user sessions associated with the user"; `DELETE /admin/realms/{realm}/users/{user-id}/credentials/{credentialId}` "Remove a credential for a user"; `PUT /admin/realms/{realm}/users/{user-id}` "Update the user". The pinned kernel, 26.7.5, is proved by identity-kernel's compat suite (§Kernel Compatibility). |
 | R15 | Keycloak, *Server Administration Guide*, Authentication flows, the built-in browser flow, <https://www.keycloak.org/docs/latest/server_admin/index.html>, accessed 2026-10-03: "The first execution is the Username Password Form, an authentication type that renders the username and password page. It is marked as required, so the user must enter a valid username and password." |
+| R16 | STD-IAM-002 1.4.0, *Token and Verification Profile*, §3.2: the kernel writes `sid` into its access tokens, "the session identifier OpenID Connect logout defines". |
