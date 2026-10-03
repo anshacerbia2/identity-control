@@ -2071,6 +2071,13 @@ table "security_operation" {
     null = true
     type = timestamptz
   }
+  // The attempt count at the last re-drive: the executor parks the operation again after
+  // IDENTITY_SECURITY_MAX_ATTEMPTS attempts past it (TDD-identity-control-005 §Operating the Executor).
+  column "redriven_at" {
+    null    = false
+    type    = integer
+    default = 0
+  }
 
   primary_key {
     columns = [column.operation_id]

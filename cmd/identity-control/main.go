@@ -22,6 +22,8 @@ import (
 	"syscall"
 	"time"
 
+	"go.opentelemetry.io/otel/metric"
+
 	"github.com/anshacerbia2/foundation-platform/db"
 	fhttp "github.com/anshacerbia2/foundation-platform/httpapi"
 	"github.com/anshacerbia2/foundation-platform/observability"
@@ -63,11 +65,32 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	telemetry, err := observability.New(observability.Config{
-		Deployable: cfg.Deployable,
-		System:     cfg.System,
-		Logger:     logger,
-	})
+	// The Collector, when one is configured, as organization-control exports to it. Without it every
+	// metric and span goes to the no-op providers, which is said once here rather than discovered as
+	// an empty dashboard.
+	var exported *observability.Exported
+	if cfg.OTLPEndpoint != "" {
+		exported, err = observability.Export(ctx, observability.ExportConfig{
+			Endpoint: cfg.OTLPEndpoint, Deployable: cfg.Deployable, System: cfg.System,
+		})
+		if err != nil {
+			return fmt.Errorf("telemetry export: %w", err)
+		}
+		defer func() {
+			flush, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := exported.Shutdown(flush); err != nil {
+				logger.Warn("telemetry flush on shutdown", slog.String("error", err.Error()))
+			}
+		}()
+	} else {
+		logger.Warn("OTEL_EXPORTER_OTLP_ENDPOINT is unset: no metric or trace leaves this process")
+	}
+	telemetryConfig := observability.Config{Deployable: cfg.Deployable, System: cfg.System, Logger: logger}
+	if exported != nil {
+		telemetryConfig.MeterProvider, telemetryConfig.TracerProvider = exported.MeterProvider, exported.TracerProvider
+	}
+	telemetry, err := observability.New(telemetryConfig)
 	if err != nil {
 		return fmt.Errorf("telemetry: %w", err)
 	}
@@ -198,6 +221,12 @@ func run() error {
 		return fmt.Errorf("principal handler: %w", err)
 	}
 
+	// The executor's metrics go to the exported meter provider, or nowhere.
+	var meter metric.Meter
+	if exported != nil {
+		meter = exported.MeterProvider.Meter("github.com/anshacerbia2/identity-control/internal/securitystate")
+	}
+
 	// A provider's reads of another Principal (TDD-identity-control-005). The kernel's security
 	// state is read with the Principal credential, which holds view-users; the handles that name a
 	// session or authenticator are sealed with the service's own key ring.
@@ -231,6 +260,7 @@ func run() error {
 		MaxAttempts:    cfg.MaxAttempts,
 		Lease:          cfg.OperationLease,
 		Interval:       cfg.ExecutorInterval,
+		Meter:          meter,
 	}, logger)
 	if err != nil {
 		return fmt.Errorf("security command service: %w", err)

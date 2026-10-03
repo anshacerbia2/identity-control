@@ -559,7 +559,7 @@ func TestASecurityCommandIsNeverRewritten(t *testing.T) {
 	pool, ctx := openPool(t)
 	for table, writable := range map[string][]string{
 		"identity.security_operation": {"state", "attempts", "next_attempt_at", "result_code", "last_error_class",
-			"applied_at"},
+			"applied_at", "redriven_at"},
 		"identity.security_operation_attempt": {"finished_at", "outcome", "error_class"},
 	} {
 		for _, column := range writable {

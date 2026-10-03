@@ -141,6 +141,11 @@ type Config struct {
 	AdminSearchMinLength int
 	AdminSearchPageSize  int
 
+	// OTLPEndpoint is OTEL_EXPORTER_OTLP_ENDPOINT, the OpenTelemetry Collector's OTLP/HTTP base URL.
+	// Unset, no metric or trace leaves the process (TDD-identity-control-005 §Operating the
+	// Executor).
+	OTLPEndpoint string
+
 	LogLevel string
 }
 
@@ -280,6 +285,7 @@ func Load() (Config, error) {
 		problems = append(problems, errors.New("IDENTITY_SECURITY_REF_TTL, IDENTITY_ADMIN_SEARCH_MIN_LENGTH and IDENTITY_ADMIN_SEARCH_PAGE_SIZE must be positive"))
 	}
 
+	cfg.OTLPEndpoint = strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
 	cfg.Organization = loadOrganization(&problems)
 	cfg.ProviderFreshness = durationOr("IDENTITY_PROVIDER_FRESHNESS", 60*time.Second, &problems)
 
