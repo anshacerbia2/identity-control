@@ -84,7 +84,11 @@ func (h *harness) principal(username, email string, linked bool) (id.UUID, keycl
 		kcArg any
 	)
 	if linked {
-		user = h.kernel.Seed(testRealm, username, principalID, keycloak.SubjectHuman)
+		// keycloak_user_id is unique across realms, and other packages' tests write the same
+		// table concurrently, so the user identifier is derived from the fresh principal_id rather
+		// than the fake's per-process counter.
+		user = keycloak.UserID("kc-investigation-" + principalID.String())
+		h.kernel.AddServiceAccount(testRealm, keycloak.User{ID: user, Username: username})
 		state, kcArg = "active", string(user)
 	}
 	var emailArg any
