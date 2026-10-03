@@ -26,6 +26,7 @@ import (
 
 	"github.com/anshacerbia2/foundation-platform/db"
 	fhttp "github.com/anshacerbia2/foundation-platform/httpapi"
+	"github.com/anshacerbia2/foundation-platform/id"
 	"github.com/anshacerbia2/foundation-platform/observability"
 	"github.com/anshacerbia2/foundation-platform/verify"
 
@@ -371,6 +372,8 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("provider decision: %w", err)
 	}
+	// The assurance floor reads the same provider decision: a provider keeps a second factor.
+	securityCommands.UseProviders(providerHolder{providers})
 	authentication, err := httpapi.Authenticate(tokens, providers, logger)
 	if err != nil {
 		return fmt.Errorf("authentication middleware: %w", err)
@@ -569,4 +572,13 @@ func organizationWorkload(cfg config.Organization) organization.Workload {
 		BaseURL: cfg.BaseURL, ClientID: cfg.WorkloadClientID, KeyFile: cfg.WorkloadKeyFile,
 		TokenURL: cfg.WorkloadTokenURL, Audience: cfg.WorkloadAudience,
 	}
+}
+
+// providerHolder adapts the provider decision to the assurance floor's question: does the Principal
+// hold provider authority, or an activation the projection's freshness held back?
+type providerHolder struct{ decider *providerauthority.Decider }
+
+func (p providerHolder) Holds(ctx context.Context, principal id.UUID) (bool, bool, error) {
+	decision, err := p.decider.Decide(ctx, principal)
+	return decision.Provider, decision.Stale, err
 }

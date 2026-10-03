@@ -638,3 +638,84 @@ func TestTheExecutorIsMeasured(t *testing.T) {
 		}
 	}
 }
+
+type providers map[id.UUID]bool
+
+func (p providers) Holds(_ context.Context, principal id.UUID) (bool, bool, error) {
+	return p[principal], false, nil
+}
+
+// A provider keeps a second factor: their last one is not removed, by themselves or by another
+// provider; a person who is no provider may remove theirs.
+func TestAProviderKeepsTheirLastSecondFactor(t *testing.T) {
+	h := newHarness(t)
+	provider, providerUser := h.principal("human", "active")
+	person, personUser := h.principal("human", "active")
+	h.service.UseProviders(providers{provider: true})
+	for _, user := range []keycloak.UserID{providerUser, personUser} {
+		h.kernel.SetSecurity(user, keycloakfake.Security{Credentials: []keycloak.Credential{
+			{ID: "kc-password-" + string(user), Type: "password"}, {ID: "kc-otp-" + string(user), Type: "otp"}}})
+	}
+	ctx := context.Background()
+	seal := func(subject id.UUID, purpose, kernelID string) string {
+		handle, err := h.refs.Seal(securityref.KindCredential, subject, purpose, string(testRealm), kernelID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return handle
+	}
+
+	own := h.selfCommand(TypeAuthenticatorRemove, provider, seal(provider, securityref.PurposeSelfAuthenticatorRemove,
+		"kc-otp-"+string(providerUser)))
+	if op, err := h.service.Submit(ctx, own); err != nil || op.State != StateRefused || op.ResultCode != ResultAssuranceFloor {
+		t.Errorf("a provider removing their last second factor: %+v, %v", op, err)
+	}
+	revoke := h.command(TypeRevoke, provider, 2)
+	revoke.Ref = seal(provider, securityref.PurposeAdminRevoke, "kc-otp-"+string(providerUser))
+	if op, err := h.service.Submit(ctx, revoke); err != nil || op.State != StateRefused || op.ResultCode != ResultAssuranceFloor {
+		t.Errorf("another provider revoking it: %+v, %v", op, err)
+	}
+
+	theirs := h.selfCommand(TypeAuthenticatorRemove, person, seal(person, securityref.PurposeSelfAuthenticatorRemove,
+		"kc-otp-"+string(personUser)))
+	if op, err := h.service.Submit(ctx, theirs); err != nil || op.State != StateApplied {
+		t.Errorf("a person who is no provider removing theirs: %+v, %v", op, err)
+	}
+}
+
+// Binding takes the account's highest level (NIST SP 800-63B-4 4.1.2.1), and the authorization is
+// recorded; only the types the API enrolls are authorized.
+func TestEnrollingTakesTheAccountsLevel(t *testing.T) {
+	h := newHarness(t)
+	fresh, freshUser := h.principal("human", "active")
+	enrolled, enrolledUser := h.principal("human", "active")
+	h.kernel.SetSecurity(freshUser, keycloakfake.Security{Credentials: []keycloak.Credential{{ID: "p1", Type: "password"}}})
+	h.kernel.SetSecurity(enrolledUser, keycloakfake.Security{Credentials: []keycloak.Credential{
+		{ID: "p2", Type: "password"}, {ID: "o2", Type: "otp"}}})
+	ctx := context.Background()
+	actor := func(p id.UUID) Actor { return Actor{Principal: p, Correlation: "corr-enroll", Assurance: "acr=aal1"} }
+
+	if level, err := h.service.EnrollmentLevel(ctx, fresh); err != nil || level != "aal1" {
+		t.Errorf("a person with no second factor: %q, %v", level, err)
+	}
+	if level, err := h.service.EnrollmentLevel(ctx, enrolled); err != nil || level != "aal2" {
+		t.Errorf("a person with one: %q, %v", level, err)
+	}
+	onlyAAL1 := func(level string) bool { return level == "aal1" }
+	if action, err := h.service.Enroll(ctx, actor(fresh), "totp", onlyAAL1); err != nil || action != "CONFIGURE_TOTP" {
+		t.Errorf("enrolling a first: %q, %v", action, err)
+	}
+	if _, err := h.service.Enroll(ctx, actor(enrolled), "totp", onlyAAL1); func() bool {
+		level, ok := IsStepUp(err)
+		return !ok || level != "aal2"
+	}() {
+		t.Errorf("enrolling a second at aal1: %v, want a step-up to aal2", err)
+	}
+	if _, err := h.service.Enroll(ctx, actor(fresh), "sms", onlyAAL1); !errors.Is(err, ErrInvalid) {
+		t.Errorf("an unknown type: %v, want ErrInvalid", err)
+	}
+	if n := h.count(`SELECT count(*) FROM identity.privileged_access WHERE actor_principal_id = $1
+	    AND action = 'authenticator.enroll' AND outcome = 'served'`, fresh.String()); n != 1 {
+		t.Errorf("%d enrollment records", n)
+	}
+}

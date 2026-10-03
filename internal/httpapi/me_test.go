@@ -21,6 +21,25 @@ type stubSelf struct {
 	caller    id.UUID
 	sid       string
 	submitted *securitystate.Command
+	// level is the level the account's enrollment requires; enrolled is the type authorized.
+	level    string
+	enrolled string
+}
+
+func (s *stubSelf) Enroll(_ context.Context, actor securitystate.Actor, authenticatorType string, meets func(level string) bool) (string, error) {
+	s.caller = actor.Principal
+	if s.err != nil {
+		return "", s.err
+	}
+	level := s.level
+	if level == "" {
+		level = "aal1"
+	}
+	if !meets(level) {
+		return "", securitystate.ErrStepUp{Level: level}
+	}
+	s.enrolled = authenticatorType
+	return "CONFIGURE_TOTP", nil
 }
 
 func (s *stubSelf) MySessions(_ context.Context, principal id.UUID, sid string) ([]securitystate.MySession, error) {
@@ -193,5 +212,42 @@ func TestTheSelfHandlerNeedsItsDependencies(t *testing.T) {
 	}
 	if _, err := httpapi.NewMe(&stubSelf{}, 0); err == nil {
 		t.Error("a handler without a step-up age was built")
+	}
+}
+
+// Enrolling needs the level binding requires, recently: aal1 for a first second factor, aal2 once
+// the person holds one (NIST SP 800-63B-4 4.1.2.1).
+func TestEnrollingNeedsTheLevelBindingRequires(t *testing.T) {
+	for name, c := range map[string]struct {
+		level, acr string
+		age        time.Duration
+		status     int
+	}{
+		"a first factor at aal1":         {"aal1", "aal1", time.Minute, http.StatusOK},
+		"a second at aal1":               {"aal2", "aal1", time.Minute, http.StatusUnauthorized},
+		"a second at aal2":               {"aal2", httpapi.AcrAAL2, time.Minute, http.StatusOK},
+		"a second at aal2, but long ago": {"aal2", httpapi.AcrAAL2, time.Hour, http.StatusUnauthorized},
+	} {
+		t.Run(name, func(t *testing.T) {
+			stub := &stubSelf{level: c.level}
+			r, person := asPerson(t, httptest.NewRequest(http.MethodPost, "/v1/me/authenticators:enroll",
+				strings.NewReader(`{"type":"totp"}`)), c.age)
+			r = r.WithContext(httpapi.WithAssurance(r.Context(), c.acr, time.Now().Add(-c.age)))
+			w := serve(meHandler(t, stub), r)
+			if w.Code != c.status {
+				t.Fatalf("%d, want %d: %s", w.Code, c.status, w.Body)
+			}
+			if c.status == http.StatusOK && (!strings.Contains(w.Body.String(), `"action":"CONFIGURE_TOTP"`) || stub.caller != person) {
+				t.Errorf("body %s, caller %s", w.Body, stub.caller)
+			}
+			if c.status == http.StatusUnauthorized &&
+				!strings.Contains(w.Header().Get("WWW-Authenticate"), `acr_values="`+c.level+`"`) {
+				t.Errorf("challenge %q; want the level %s", w.Header().Get("WWW-Authenticate"), c.level)
+			}
+		})
+	}
+	r, _ := asPerson(t, httptest.NewRequest(http.MethodPost, "/v1/me/authenticators:enroll", strings.NewReader(`{}`)), time.Minute)
+	if w := serve(meHandler(t, &stubSelf{}), r); w.Code != http.StatusBadRequest {
+		t.Errorf("no type: %d", w.Code)
 	}
 }

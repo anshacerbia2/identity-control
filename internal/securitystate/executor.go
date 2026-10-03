@@ -310,6 +310,23 @@ func (s *Service) terminateAll(ctx context.Context, user keycloak.UserID) error 
 	return nil
 }
 
+// secondFactors are the credential types that take a sign-in from aal1 to aal2 (ADR-IAM-004).
+var secondFactors = map[string]bool{"otp": true, "webauthn": true}
+
+// holdsAssuranceFloor reports whether the Principal must keep a second factor: a provider, or one
+// whose provider activation is in force but not honored while the projection is stale
+// (TDD-identity-control-005 §Enrollment and the Assurance Floor). Without a decider, nobody does.
+func (s *Service) holdsAssuranceFloor(ctx context.Context, principal id.UUID) (bool, error) {
+	if s.cfg.Providers == nil {
+		return false, nil
+	}
+	provider, stale, err := s.cfg.Providers.Holds(ctx, principal)
+	if err != nil {
+		return false, err
+	}
+	return provider || stale, nil
+}
+
 // firstFactors are the credential types that begin a sign-in: the built-in browser flow's password,
 // and a passkey once a flow admits one (TDD-identity-control-005 §Containment as Built).
 var firstFactors = map[string]bool{"password": true, "webauthn-passwordless": true}
@@ -333,13 +350,15 @@ func (s *Service) revoke(ctx context.Context, c claimed) (string, error) {
 		return "", err
 	}
 	var target *keycloak.Credential
-	others := 0
+	others, otherSecond := 0, 0
 	for i := range credentials {
 		switch {
 		case credentials[i].ID == ref.KernelID:
 			target = &credentials[i]
 		case firstFactors[credentials[i].Type]:
 			others++
+		case secondFactors[credentials[i].Type]:
+			otherSecond++
 		}
 	}
 	if target == nil {
@@ -347,6 +366,15 @@ func (s *Service) revoke(ctx context.Context, c claimed) (string, error) {
 	}
 	if firstFactors[target.Type] && others == 0 {
 		return ResultLastAuthenticator, nil
+	}
+	if secondFactors[target.Type] && otherSecond == 0 {
+		floor, err := s.holdsAssuranceFloor(ctx, c.subject)
+		if err != nil {
+			return "", err
+		}
+		if floor {
+			return ResultAssuranceFloor, nil
+		}
 	}
 	err = s.call(ctx, func(ctx context.Context) error {
 		return s.kernel.DeleteCredential(ctx, s.cfg.Realm, c.kernelUser, ref.KernelID)

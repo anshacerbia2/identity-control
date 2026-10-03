@@ -574,7 +574,10 @@ Built in the order TDD-005 §Build Order states, one PR per slice:
   - `scripts/dev-token.ps1` takes `-AcrValues aal2 -Otp`.
   - On a development server, `-EnrollTotpFile` binds a second TOTP for the bootstrap operator at `aal2`, using one code from the owner, and `-TotpSecretFile` computes codes from it (ADR-IAM-004 §5.5; identity-kernel compat proves `kc_action=CONFIGURE_TOTP`).
   - The CI stack enforces it. The smoke and Proof B enroll the bootstrap operator's TOTP on their first sign-in (`-OperatorTotpFile`), then sign in at `aal2` with codes computed from it. Each code is used once, as the realm's OTP policy requires.
-- **4 · Enrollment and the assurance floor.** The kernel's levels exist (identity-kernel TDD-001 §Authentication Levels); enrollment through this API and WebAuthn are next.
+- ✅ **4a · TOTP enrollment and the assurance floor** (TDD-005 2.6.0).
+  - `POST /v1/me/authenticators:enroll` `{"type":"totp"}` authorizes an enrollment at the level binding requires (NIST SP 800-63B-4 §4.1.2.1): `aal2` once the person holds a second factor, `aal1` before, and recent. It returns `CONFIGURE_TOTP` for the BFF to drive as `kc_action`, and is evidenced as `authenticator.enroll`.
+  - A provider's last second factor is never removed or revoked (`assurance_floor`). It reads the same provider decision as authentication.
+- **4b · WebAuthn.** It needs a kernel flow in which either factor reaches `aal2` while a person with neither still enrolls one, and a compat suite that can register a WebAuthn credential.
 
 ## Waiting on the Keycloak proof-of-concept
 
