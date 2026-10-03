@@ -85,6 +85,9 @@ func TestLoadAppliesDefaults(t *testing.T) {
 	if cfg.HTTPRequestTimeout != 5*time.Second {
 		t.Errorf("HTTPRequestTimeout = %s, want 5s", cfg.HTTPRequestTimeout)
 	}
+	if cfg.ReportAssurance {
+		t.Error("IDENTITY_ASSURANCE defaults to report; it enforces unless told otherwise")
+	}
 	if cfg.StepUpMaxAge != 5*time.Minute || cfg.CommandBudget != 2*time.Second || cfg.AttemptTimeout != 500*time.Millisecond ||
 		cfg.MaxAttempts != 3 || cfg.OperationLease != 10*time.Second || cfg.ExecutorInterval != time.Second {
 		t.Errorf("security command defaults = %s, %s, %s, %d, %s, %s (TDD-identity-control-005 §Configuration)",
@@ -179,6 +182,7 @@ func TestLoadRejectsMalformedValues(t *testing.T) {
 		"zero integer":      {"DB_MAX_CONNS", "0"},
 		"duration":          {"HTTP_READ_TIMEOUT", "10 seconds"},
 		"negative duration": {"DB_ACQUIRE_TIMEOUT", "-3s"},
+		"assurance mode":    {"IDENTITY_ASSURANCE", "lenient"},
 	}
 
 	for name, tc := range cases {

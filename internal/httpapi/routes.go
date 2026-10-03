@@ -32,6 +32,9 @@ type RoutesConfig struct {
 	// §Containment as Built). Nil, its routes are not mounted and :suspend and :restore are unknown.
 	Security *Security
 
+	// Assurance is IDENTITY_ASSURANCE: the zero value enforces the levels routes require.
+	Assurance AssurancePolicy
+
 	// Me serves a person's own sessions and authenticators (TDD-identity-control-005 §Self-Service as
 	// Built). Nil, its routes are not mounted.
 	Me *Me
@@ -126,7 +129,7 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	// Every route is a provider's unless it is an owner route (ADR-IAM-003, TDD-identity-control-003
 	// §Registration Ownership). providerOnly refuses an owner before a handler reads anything, and
 	// owned admits an owner only to a registration it owns.
-	p, owned, creator := providerOnly, cfg.Registrations.owned, cfg.Registrations.creator
+	p, owned, creator := providerOnly(cfg.Assurance), cfg.Registrations.owned, cfg.Registrations.creator
 	api := http.NewServeMux()
 	api.HandleFunc("POST /v1/principals", p(cfg.Principals.CreatePrincipal))
 	api.HandleFunc("POST /v1/principals/{target}", p(principalAction(cfg)))
@@ -142,6 +145,7 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	// Route class self: any person, acting on the Principal in its token.
 	s := selfOnly
 	if cfg.Me != nil {
+		cfg.Me.assurance = cfg.Assurance
 		api.HandleFunc("GET /v1/me/sessions", s(cfg.Me.Sessions))
 		api.HandleFunc("POST /v1/me/sessions/{session_action}", s(cfg.Me.SessionAction))
 		api.HandleFunc("POST /v1/me/sessions:terminate-all", s(cfg.Me.TerminateAll))

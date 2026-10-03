@@ -154,19 +154,24 @@ func (h *Security) command(w http.ResponseWriter, r *http.Request, opType, rawSu
 	writeJSON(w, http.StatusOK, op)
 }
 
-// stepUp answers as RFC 9470 §3 defines: 401 with insufficient_user_authentication and the
-// allowable elapsed time since the last authentication. acr_values is not sent: the realm maps no
-// level of authentication to ask for (TDD-identity-control-005 §Step-Up).
+// stepUp asks for aal2 within the step-up age: a command needs both (TDD-identity-control-005
+// §Step-Up). The route's own wrapper has already required aal2.
 func (h *Security) stepUp(w http.ResponseWriter, r *http.Request) {
-	stepUpChallenge(w, r, h.stepUpMaxAge)
+	stepUpChallenge(w, r, AcrAAL2, h.stepUpMaxAge)
 }
 
-func stepUpChallenge(w http.ResponseWriter, r *http.Request, maxAge time.Duration) {
-	w.Header().Set("WWW-Authenticate", fmt.Sprintf(
-		`Bearer error="insufficient_user_authentication", error_description="A more recent authentication is required", max_age=%d`,
-		int(maxAge.Seconds())))
-	httpapi.Problem(w, r, httpapi.AuthenticationRequired,
-		fmt.Sprintf("This command requires an authentication within the last %s; sign in again", maxAge))
+// stepUpChallenge answers as RFC 9470 §3 defines, naming the level a request needs in acr_values
+// and, when it needs a recent authentication too, the allowed age in max_age.
+func stepUpChallenge(w http.ResponseWriter, r *http.Request, acr string, maxAge time.Duration) {
+	challenge := fmt.Sprintf(`Bearer error="insufficient_user_authentication", error_description="%s", acr_values="%s"`,
+		"A stronger or more recent authentication is required", acr)
+	detail := fmt.Sprintf("This request requires an authentication at %s; sign in again", acr)
+	if maxAge > 0 {
+		challenge += fmt.Sprintf(", max_age=%d", int(maxAge.Seconds()))
+		detail = fmt.Sprintf("This command requires an authentication at %s within the last %s; sign in again", acr, maxAge)
+	}
+	w.Header().Set("WWW-Authenticate", challenge)
+	httpapi.Problem(w, r, httpapi.AuthenticationRequired, detail)
 }
 
 func writeSecurityError(w http.ResponseWriter, r *http.Request, err error) {

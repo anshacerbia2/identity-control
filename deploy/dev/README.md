@@ -332,6 +332,21 @@ still accepts, and the audience change needs the new binary while the old audien
 5. **Verify the new audience.** Remove `IDENTITY_TOKEN_AUDIENCE` from `.env` and
    `docker compose up -d identity-control`. A fresh token now works.
 
+## Two factors for providers, on a server that ran before them
+
+Every provider route now requires `acr` `aal2`, a password and a TOTP code (ADR-IAM-004,
+TDD-identity-control-005 §Step-Up). The kernel must map the levels first.
+
+1. **Update identity-kernel** (`git pull && docker compose up -d` there). realm-apply builds
+   `scnehaux-browser-v1` and binds it. A plain sign-in is unchanged.
+2. **Update this service** as usual. `IDENTITY_ASSURANCE` stays `enforce`. Set it to `report` in `.env`
+   only if step 1 cannot run first.
+3. **Enroll the operator's TOTP once, in a browser.** Sign in to the Admin Portal. It asks for `aal2`,
+   and the kernel shows its enrollment page with a QR code for an authenticator app. After that, every
+   provider sign-in asks for the app's code.
+4. **For a token from the scripts**, ask for the level and pass the current code:
+   `Get-ScnehauxToken … -AcrValues aal2 -Otp 123456`.
+
 ## The investigation reads, on a server that ran before them
 
 The service needs the key ring that seals `security_ref` handles (TDD-identity-control-005

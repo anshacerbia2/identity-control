@@ -18,19 +18,27 @@ import (
 	"github.com/anshacerbia2/identity-control/internal/registration"
 )
 
-// providerOnly serves a route only to a provider. Every route is wrapped in it unless it is one of
-// the owner routes, so a route added later is a provider's by default.
-func providerOnly(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := CallerScope(r.Context()); !ok {
-			httpapi.Problem(w, r, httpapi.AuthenticationRequired, "The request carries no authenticated caller")
-			return
+// providerOnly serves a route only to a provider whose token shows acr aal2: a provider holds a
+// privileged account, which NIST SP 800-53 IA-2(1) puts behind multi-factor authentication
+// (ADR-IAM-004, TDD-identity-control-005 §Step-Up). Every route is wrapped in it unless it is one of
+// the owner or self routes, so a route added later is a provider's by default.
+func providerOnly(policy AssurancePolicy) func(http.HandlerFunc) http.HandlerFunc {
+	return func(next http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if _, ok := CallerScope(r.Context()); !ok {
+				httpapi.Problem(w, r, httpapi.AuthenticationRequired, "The request carries no authenticated caller")
+				return
+			}
+			if !IsProvider(r.Context()) {
+				httpapi.Problem(w, r, httpapi.Forbidden, "This route requires provider authority")
+				return
+			}
+			if !policy.meets(r, levelAAL2) {
+				stepUpChallenge(w, r, AcrAAL2, 0)
+				return
+			}
+			next(w, r)
 		}
-		if !IsProvider(r.Context()) {
-			httpapi.Problem(w, r, httpapi.Forbidden, "This route requires provider authority")
-			return
-		}
-		next(w, r)
 	}
 }
 

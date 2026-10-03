@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/anshacerbia2/identity-control/internal/httpapi"
 	"github.com/anshacerbia2/identity-control/internal/identity/provisioning"
@@ -119,7 +120,8 @@ func TestMutationSucceedsOnceACallerIsAuthenticated(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/v1/principals",
 		strings.NewReader(`{"username":"operator","subject_type":"human"}`))
 	request.Header.Set(httpapi.IdempotencyHeader, "key-0001")
-	request = request.WithContext(httpapi.WithProvider(httpapi.WithCallerScope(request.Context(), "svc:admin-api")))
+	request = request.WithContext(httpapi.WithAssurance(
+		httpapi.WithProvider(httpapi.WithCallerScope(request.Context(), "svc:admin-api")), httpapi.AcrAAL2, time.Now()))
 
 	routes(t, &stubProber{}).ServeHTTP(w, request)
 

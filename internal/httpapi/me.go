@@ -32,6 +32,8 @@ type Me struct {
 	service      SelfService
 	stepUpMaxAge time.Duration
 	now          func() time.Time
+	// assurance is the routes' policy, which Routes hands it.
+	assurance AssurancePolicy
 }
 
 // NewMe constructs the handler. stepUpMaxAge is IDENTITY_STEP_UP_MAX_AGE.
@@ -145,8 +147,10 @@ func (h *Me) command(w http.ResponseWriter, r *http.Request, opType, ref string,
 		return
 	}
 	acr, authTime, ok := Assurance(r.Context())
-	if !ok || (stepUp && h.now().Sub(authTime) > h.stepUpMaxAge) {
-		stepUpChallenge(w, r, h.stepUpMaxAge)
+	// Removing an authenticator changes how the account is protected: aal2, recently
+	// (ADR-IAM-004 §5.2). Ending a session asks for neither.
+	if !ok || (stepUp && (!h.assurance.meets(r, levelAAL2) || h.now().Sub(authTime) > h.stepUpMaxAge)) {
+		stepUpChallenge(w, r, AcrAAL2, h.stepUpMaxAge)
 		return
 	}
 	correlation := ""

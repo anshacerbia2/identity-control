@@ -73,7 +73,7 @@ func asPerson(t *testing.T, r *http.Request, authAge time.Duration) (*http.Reque
 	t.Helper()
 	person := mustUUID(t)
 	ctx := httpapi.WithSessionID(httpapi.WithCallerScope(r.Context(), "principal:"+person.String()), "sid-1")
-	ctx = httpapi.WithAssurance(ctx, "1", time.Now().Add(-authAge))
+	ctx = httpapi.WithAssurance(ctx, httpapi.AcrAAL2, time.Now().Add(-authAge))
 	r = r.WithContext(ctx)
 	if r.Method == http.MethodPost {
 		r.Header.Set("Idempotency-Key", "k-1")
@@ -115,6 +115,23 @@ func TestEachSelfCommandActsOnTheCaller(t *testing.T) {
 			c.ExpectedVersion != 0 || c.IdempotencyKey != "k-1" {
 			t.Errorf("%s: submitted %+v", path, c)
 		}
+	}
+}
+
+// Removing an authenticator needs two factors, recently; ending a session needs neither.
+func TestARemovalNeedsTwoFactors(t *testing.T) {
+	stub := &stubSelf{}
+	r, _ := asPerson(t, httptest.NewRequest(http.MethodPost, "/v1/me/authenticators/k1.a:remove", nil), time.Minute)
+	r = r.WithContext(httpapi.WithAssurance(r.Context(), "aal1", time.Now()))
+	w := serve(meHandler(t, stub), r)
+	if w.Code != http.StatusUnauthorized || !strings.Contains(w.Header().Get("WWW-Authenticate"), `acr_values="aal2"`) ||
+		stub.submitted != nil {
+		t.Errorf("a removal at aal1: %d %q", w.Code, w.Header().Get("WWW-Authenticate"))
+	}
+	r, _ = asPerson(t, httptest.NewRequest(http.MethodGet, "/v1/me/sessions", nil), time.Minute)
+	r = r.WithContext(httpapi.WithAssurance(r.Context(), "aal1", time.Now()))
+	if w := serve(meHandler(t, stub), r); w.Code != http.StatusOK {
+		t.Errorf("reading one's sessions at aal1: %d", w.Code)
 	}
 }
 

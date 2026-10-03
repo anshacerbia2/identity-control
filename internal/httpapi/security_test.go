@@ -64,7 +64,7 @@ func command(t *testing.T, path string, authAge time.Duration) (*http.Request, i
 	r, caller := asPrincipal(t, httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"expected_version":3}`)))
 	r.Header.Set("Idempotency-Key", "k-1")
 	r.Header.Set(httpapi.AdministrativeReasonHeader, "incident 42: credential stuffing")
-	return r.WithContext(httpapi.WithAssurance(r.Context(), "1", time.Now().Add(-authAge))), caller
+	return r.WithContext(httpapi.WithAssurance(r.Context(), httpapi.AcrAAL2, time.Now().Add(-authAge))), caller
 }
 
 func TestEachSecurityCommandReachesTheServiceAsItsType(t *testing.T) {
@@ -84,7 +84,7 @@ func TestEachSecurityCommandReachesTheServiceAsItsType(t *testing.T) {
 		c := stub.submitted
 		if c.Type != opType || c.Subject.String() != subject || c.Actor.Principal != caller || c.ExpectedVersion != 3 ||
 			c.Reason != "incident 42: credential stuffing" || c.IdempotencyKey != "k-1" ||
-			!strings.HasPrefix(c.Actor.Assurance, "acr=1;auth_time=") || c.Actor.Correlation == "" {
+			!strings.HasPrefix(c.Actor.Assurance, "acr=aal2;auth_time=") || c.Actor.Correlation == "" {
 			t.Errorf("%s: submitted %+v", path, c)
 		}
 		if (opType == securitystate.TypeRevoke) != (c.Ref == "k1.sealed") {
@@ -142,13 +142,51 @@ func TestASecurityCommandIsRefusedBeforeTheService(t *testing.T) {
 }
 
 // RFC 9470 §3: an authentication older than the step-up age is a 401 naming the allowed age.
+// ADR-IAM-004: a provider route needs two factors, reads included. A token at one is challenged
+// with acr_values, and in report mode served.
+func TestAProviderRouteNeedsTwoFactors(t *testing.T) {
+	path := "/v1/security-operations/" + mustUUID(t).String()
+	for acr, want := range map[string]int{"aal1": http.StatusUnauthorized, "1": http.StatusUnauthorized,
+		"": http.StatusUnauthorized, "aal2": http.StatusOK, "phr": http.StatusOK} {
+		r, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, path, nil))
+		r = r.WithContext(httpapi.WithAssurance(r.Context(), acr, time.Now()))
+		w := serve(securityHandler(t, &stubCommander{}), r)
+		if w.Code != want {
+			t.Errorf("acr %q: %d, want %d", acr, w.Code, want)
+		}
+		challenge := w.Header().Get("WWW-Authenticate")
+		if want == http.StatusUnauthorized && (!strings.Contains(challenge, `acr_values="aal2"`) ||
+			strings.Contains(challenge, "max_age")) {
+			t.Errorf("acr %q: challenge %q; a read names the level and no age", acr, challenge)
+		}
+	}
+}
+
+func TestReportModeServesATokenBelowTheLevel(t *testing.T) {
+	security, _ := httpapi.NewSecurity(&stubCommander{}, 5*time.Minute)
+	registrations, _ := httpapi.NewRegistrations(&stubRegistrar{}, &stubReconciler{})
+	principals, _ := httpapi.NewPrincipals(&stubProvisioner{}, realm)
+	built, err := httpapi.Routes(httpapi.RoutesConfig{Principals: principals, Registrations: registrations,
+		Workloads: stubWorkloads(t), Security: security, Database: &stubProber{},
+		Assurance: httpapi.AssurancePolicy{Report: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := func(next http.Handler) http.Handler { return next }
+	r, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, "/v1/security-operations/"+mustUUID(t).String(), nil))
+	r = r.WithContext(httpapi.WithAssurance(r.Context(), "1", time.Now()))
+	if w := serve(built.Mount(identity, identity), r); w.Code != http.StatusOK {
+		t.Errorf("report mode: %d", w.Code)
+	}
+}
+
 func TestAStaleAuthenticationIsAskedToStepUp(t *testing.T) {
 	stub := &stubCommander{}
 	r, _ := command(t, "/v1/principals/"+mustUUID(t).String()+":suspend", 6*time.Minute)
 	w := serve(securityHandler(t, stub), r)
 	challenge := w.Header().Get("WWW-Authenticate")
 	if w.Code != http.StatusUnauthorized || !strings.Contains(challenge, `error="insufficient_user_authentication"`) ||
-		!strings.Contains(challenge, "max_age=300") {
+		!strings.Contains(challenge, "max_age=300") || !strings.Contains(challenge, `acr_values="aal2"`) {
 		t.Errorf("status %d, challenge %q", w.Code, challenge)
 	}
 	if stub.submitted != nil {
