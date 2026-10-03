@@ -569,6 +569,7 @@ Built in the order TDD-005 §Build Order states, one PR per slice:
   - A shortfall is answered with RFC 9470's challenge carrying `acr_values="aal2"`, plus `max_age` for a command.
   - `IDENTITY_ASSURANCE=report` serves a lower token and logs it, only while a server's kernel lacks identity-kernel's level mapping.
   - `scripts/dev-token.ps1` takes `-AcrValues aal2 -Otp`.
+  - Not yet built: the CI stack's smoke enrolling a TOTP and signing in at `aal2`. It runs with `IDENTITY_ASSURANCE=report` until it does.
 - **4 · Enrollment and the assurance floor.** The kernel's levels exist (identity-kernel TDD-001 §Authentication Levels); enrollment through this API and WebAuthn are next.
 
 ## Waiting on the Keycloak proof-of-concept
