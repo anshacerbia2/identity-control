@@ -214,17 +214,22 @@ function Get-ScnehauxToken {
     # raises MaximumRedirectExceeded, an InvalidOperationException whose Response is not reachable,
     # so the 302 that means success is indistinguishable from a transport failure. AllowAutoRedirect
     # = $false returns the response itself.
-    function Send-LoginForm([string] $Action, [string] $Form) {
+    # Send-LoginForm posts a form, or, with no form, follows a redirect within the kernel's pages.
+    function Send-LoginForm([string] $Action, [string] $Form = $null) {
         $request = [System.Net.HttpWebRequest]::Create($Action)
-        $request.Method = "POST"
         $request.AllowAutoRedirect = $false
         $request.CookieContainer = $session.Cookies
-        $request.ContentType = "application/x-www-form-urlencoded"
-        $body = [System.Text.Encoding]::ASCII.GetBytes($Form)
-        $request.ContentLength = $body.Length
-        $stream = $request.GetRequestStream()
-        $stream.Write($body, 0, $body.Length)
-        $stream.Close()
+        if ($null -eq $Form) {
+            $request.Method = "GET"
+        } else {
+            $request.Method = "POST"
+            $request.ContentType = "application/x-www-form-urlencoded"
+            $body = [System.Text.Encoding]::ASCII.GetBytes($Form)
+            $request.ContentLength = $body.Length
+            $stream = $request.GetRequestStream()
+            $stream.Write($body, 0, $body.Length)
+            $stream.Close()
+        }
         try {
             $response = $request.GetResponse()
         } catch [System.Net.WebException] {
@@ -249,7 +254,16 @@ function Get-ScnehauxToken {
     # Further pages of the same sign-in: the code a level of two factors asks for, and, when
     # enrolling, the kernel's page that sets up another TOTP.
     $enrolledSecret = $null
-    for ($step = 0; $step -lt 4 -and $answer.Status -eq 200; $step++) {
+    for ($step = 0; $step -lt 8; $step++) {
+        # A redirect to another of the kernel's pages, such as a required action, is followed; one to
+        # the redirect URI ends the sign-in.
+        if ($answer.Status -ge 300 -and $answer.Status -lt 400) {
+            $location = $answer.Location
+            if (-not $location -or $location.StartsWith($RedirectUri)) { break }
+            $answer = Send-LoginForm ([string]([uri]::new([uri]$action, $location)))
+            continue
+        }
+        if ($answer.Status -ne 200) { break }
         $content = $answer.Content
         if ($content -notmatch '(?s)<form[^>]*\saction="([^"]+)"') { throw "the kernel answered a page with no form" }
         $next = [System.Web.HttpUtility]::HtmlDecode($Matches[1])
