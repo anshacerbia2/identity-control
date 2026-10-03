@@ -570,7 +570,7 @@ Built in the order TDD-005 §Build Order states, one PR per slice:
   - `IDENTITY_ASSURANCE=report` serves a lower token and logs it, only while a server's kernel lacks identity-kernel's level mapping.
   - `scripts/dev-token.ps1` takes `-AcrValues aal2 -Otp`.
   - On a development server, `-EnrollTotpFile` binds a second TOTP for the bootstrap operator at `aal2`, using one code from the owner, and `-TotpSecretFile` computes codes from it (ADR-IAM-004 §5.5; identity-kernel compat proves `kc_action=CONFIGURE_TOTP`).
-  - Not yet built: the CI stack's smoke enrolling a TOTP and signing in at `aal2`. It runs with `IDENTITY_ASSURANCE=report` until it does.
+  - The CI stack enforces it. The smoke and Proof B enroll the bootstrap operator's TOTP on their first sign-in (`-OperatorTotpFile`), then sign in at `aal2` with codes computed from it. Each code is used once, as the realm's OTP policy requires.
 - **4 · Enrollment and the assurance floor.** The kernel's levels exist (identity-kernel TDD-001 §Authentication Levels); enrollment through this API and WebAuthn are next.
 
 ## Waiting on the Keycloak proof-of-concept

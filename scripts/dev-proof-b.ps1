@@ -86,8 +86,9 @@ $script:apiToken = $null
 $script:apiTokenAt = [datetime]::MinValue
 function Api($method, $path, $body, $headers) {
     if (((Get-Date) - $script:apiTokenAt).TotalSeconds -gt 150) {
+        $operatorTotp = if ($env:IDENTITY_OPERATOR_TOTP_FILE) { @{ OperatorTotpFile = $env:IDENTITY_OPERATOR_TOTP_FILE } } else { @{} }
         $script:apiToken = Get-ScnehauxToken -Username "bootstrap-operator" `
-            -Password $env:IDENTITY_CALLER_PASSWORD -KeyFile $env:IDENTITY_CALLER_KEY_FILE
+            -Password $env:IDENTITY_CALLER_PASSWORD -KeyFile $env:IDENTITY_CALLER_KEY_FILE @operatorTotp
         $script:apiTokenAt = Get-Date
     }
     return Send $method "$api$path" $body $script:apiToken $headers

@@ -64,9 +64,12 @@ function Add-LoopbackCookies {
 # Get-TotpCode is RFC 6238 with the realm's policy: HmacSHA1, 30-second steps, six digits. Keycloak
 # keys the HMAC with the secret's bytes as its enrollment page carries them (identity-kernel's
 # compat/levels_test.go computes it the same way).
-function Get-TotpCode([string] $Secret) {
-    $counter = [long][Math]::Floor([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() / 30)
-    $message = [BitConverter]::GetBytes($counter)
+function Get-TotpStep {
+    return [long][Math]::Floor([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() / 30)
+}
+
+function Get-TotpCode([string] $Secret, [long] $Step) {
+    $message = [BitConverter]::GetBytes($Step)
     if ([BitConverter]::IsLittleEndian) { [Array]::Reverse($message) }
     $hmac = New-Object System.Security.Cryptography.HMACSHA1 -ArgumentList (, [System.Text.Encoding]::UTF8.GetBytes($Secret))
     $hash = $hmac.ComputeHash($message)
@@ -127,12 +130,23 @@ function Get-ScnehauxToken {
         # authenticator, then asks the kernel to set up another TOTP (kc_action=CONFIGURE_TOTP), and
         # writes its secret here, mode 0600. Refuses when the file exists.
         [string] $EnrollTotpFile = "",
-        [string] $TotpLabel = "dev-server"
+        [string] $TotpLabel = "dev-server",
+        # Both of the above for automation that owns its account: enrolls into the file when it is
+        # absent, then signs in at aal2 with it. For an account with no TOTP yet, such as a CI stack's
+        # bootstrap operator, enrolling needs no -Otp: binding a first second factor takes the
+        # account's highest level, which is aal1 (NIST SP 800-63B-4 4.1.2.1).
+        [string] $OperatorTotpFile = ""
     )
 
+    if ($OperatorTotpFile) {
+        $AcrValues = "aal2"
+        if (Test-Path $OperatorTotpFile) { $TotpSecretFile = $OperatorTotpFile } else { $EnrollTotpFile = $OperatorTotpFile }
+    }
     if ($EnrollTotpFile) {
         if (Test-Path $EnrollTotpFile) { throw "$EnrollTotpFile exists; a server holds one TOTP for this account" }
-        if (-not $Otp) { throw "enrolling binds at aal2 (NIST SP 800-63B-4 4.1.2.1): pass the current code from the person's own authenticator in -Otp" }
+        # With -Otp the account already holds a TOTP: the sign-in reaches aal2 with the person's code,
+        # and the kernel's application-initiated action sets up another one. Without it, the account
+        # has none, and the aal2 sign-in itself enrolls the first.
         $AcrValues = "aal2"
     }
 
@@ -167,7 +181,7 @@ function Get-ScnehauxToken {
         "&code_challenge=$challenge" +
         "&code_challenge_method=S256" +
         $(if ($AcrValues) { "&acr_values=$([uri]::EscapeDataString($AcrValues))" } else { "" }) +
-        $(if ($EnrollTotpFile) { "&max_age=0&kc_action=CONFIGURE_TOTP" } else { "" })
+        $(if ($EnrollTotpFile -and $Otp) { "&max_age=0&kc_action=CONFIGURE_TOTP" } else { "" })
 
     # One cookie jar across both requests. The kernel's login form is bound to a session cookie,
     # and posting the form without it produces "Restart login cookie not found" rather than a
@@ -200,17 +214,22 @@ function Get-ScnehauxToken {
     # raises MaximumRedirectExceeded, an InvalidOperationException whose Response is not reachable,
     # so the 302 that means success is indistinguishable from a transport failure. AllowAutoRedirect
     # = $false returns the response itself.
-    function Send-LoginForm([string] $Action, [string] $Form) {
+    # Send-LoginForm posts a form, or, with no form, follows a redirect within the kernel's pages.
+    function Send-LoginForm([string] $Action, [string] $Form = $null) {
         $request = [System.Net.HttpWebRequest]::Create($Action)
-        $request.Method = "POST"
         $request.AllowAutoRedirect = $false
         $request.CookieContainer = $session.Cookies
-        $request.ContentType = "application/x-www-form-urlencoded"
-        $body = [System.Text.Encoding]::ASCII.GetBytes($Form)
-        $request.ContentLength = $body.Length
-        $stream = $request.GetRequestStream()
-        $stream.Write($body, 0, $body.Length)
-        $stream.Close()
+        if ($null -eq $Form) {
+            $request.Method = "GET"
+        } else {
+            $request.Method = "POST"
+            $request.ContentType = "application/x-www-form-urlencoded"
+            $body = [System.Text.Encoding]::ASCII.GetBytes($Form)
+            $request.ContentLength = $body.Length
+            $stream = $request.GetRequestStream()
+            $stream.Write($body, 0, $body.Length)
+            $stream.Close()
+        }
         try {
             $response = $request.GetResponse()
         } catch [System.Net.WebException] {
@@ -235,7 +254,16 @@ function Get-ScnehauxToken {
     # Further pages of the same sign-in: the code a level of two factors asks for, and, when
     # enrolling, the kernel's page that sets up another TOTP.
     $enrolledSecret = $null
-    for ($step = 0; $step -lt 4 -and $answer.Status -eq 200; $step++) {
+    for ($step = 0; $step -lt 8; $step++) {
+        # A redirect to another of the kernel's pages, such as a required action, is followed; one to
+        # the redirect URI ends the sign-in.
+        if ($answer.Status -ge 300 -and $answer.Status -lt 400) {
+            $location = $answer.Location
+            if (-not $location -or $location.StartsWith($RedirectUri)) { break }
+            $answer = Send-LoginForm ([string]([uri]::new([uri]$action, $location)))
+            continue
+        }
+        if ($answer.Status -ne 200) { break }
         $content = $answer.Content
         if ($content -notmatch '(?s)<form[^>]*\saction="([^"]+)"') { throw "the kernel answered a page with no form" }
         $next = [System.Web.HttpUtility]::HtmlDecode($Matches[1])
@@ -245,7 +273,8 @@ function Get-ScnehauxToken {
                 throw "the kernel asks to enroll a TOTP authenticator first: sign in to the Admin Portal in a browser once, then pass the app's code in -Otp"
             }
             $enrolledSecret = $fields["totpSecret"]
-            $fields["totp"] = Get-TotpCode $enrolledSecret
+            $enrolledStep = Get-TotpStep
+            $fields["totp"] = Get-TotpCode $enrolledSecret $enrolledStep
             $fields["userLabel"] = $TotpLabel
         } elseif ($content -match 'name="otp"') {
             if ($Otp) {
@@ -255,7 +284,17 @@ function Get-ScnehauxToken {
                 $stored = Get-Content -Raw $TotpSecretFile | ConvertFrom-Json
                 $credential = Find-OtpCredential $content $stored.label
                 if ($credential) { $fields["selectedCredentialId"] = $credential }
-                $fields["otp"] = Get-TotpCode $stored.secret
+                # The kernel accepts a code once (the realm's OTP policy does not allow reuse), so a
+                # second sign-in in the same 30 seconds waits for the next step.
+                $step = Get-TotpStep
+                $last = if ($stored.PSObject.Properties.Name -contains 'last') { [long]$stored.last } else { -1 }
+                if ($step -le $last) {
+                    Start-Sleep -Seconds (30 - ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() % 30) + 1)
+                    $step = Get-TotpStep
+                }
+                $fields["otp"] = Get-TotpCode $stored.secret $step
+                @{ label = $stored.label; secret = $stored.secret; last = $step } | ConvertTo-Json -Compress |
+                    Set-Content -NoNewline $TotpSecretFile
             } else {
                 throw "the kernel asks for a one-time code: pass -Otp, or -TotpSecretFile on a development server"
             }
@@ -267,7 +306,8 @@ function Get-ScnehauxToken {
     }
     if ($enrolledSecret -and $answer.Status -ge 300 -and $answer.Status -lt 400) {
         # Written only once the kernel accepted the code it was set up with. Never printed.
-        @{ label = $TotpLabel; secret = $enrolledSecret } | ConvertTo-Json -Compress | Set-Content -NoNewline $EnrollTotpFile
+        @{ label = $TotpLabel; secret = $enrolledSecret; last = $enrolledStep } | ConvertTo-Json -Compress |
+            Set-Content -NoNewline $EnrollTotpFile
         if ($IsLinux -or $IsMacOS) { chmod 600 $EnrollTotpFile }
         Write-Host "enrolled the TOTP '$TotpLabel'; its secret is in $EnrollTotpFile"
     }
