@@ -151,6 +151,7 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 		api.HandleFunc("POST /v1/me/sessions:terminate-all", s(cfg.Me.TerminateAll))
 		api.HandleFunc("GET /v1/me/authenticators", s(cfg.Me.Authenticators))
 		api.HandleFunc("POST /v1/me/authenticators/{authenticator_action}", s(cfg.Me.AuthenticatorAction))
+		api.HandleFunc("POST /v1/me/authenticators:enroll", s(cfg.Me.Enroll))
 		api.HandleFunc("GET /v1/me/security-operations/{operation_id}", s(cfg.Me.Operation))
 	}
 	if cfg.Security != nil {

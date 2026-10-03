@@ -6,8 +6,10 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -25,6 +27,7 @@ type SelfService interface {
 	MyAuthenticators(ctx context.Context, principal id.UUID) ([]securitystate.MyAuthenticator, error)
 	MyOperation(ctx context.Context, principal, operationID id.UUID) (securitystate.Operation, error)
 	Submit(ctx context.Context, cmd securitystate.Command) (securitystate.Operation, error)
+	Enroll(ctx context.Context, actor securitystate.Actor, authenticatorType string, meets func(level string) bool) (string, error)
 }
 
 // Me is the handler.
@@ -124,6 +127,44 @@ func (h *Me) SessionAction(w http.ResponseWriter, r *http.Request) {
 // from as well.
 func (h *Me) TerminateAll(w http.ResponseWriter, r *http.Request) {
 	h.command(w, r, securitystate.TypeTerminateAll, "", false)
+}
+
+// Enroll handles POST /v1/me/authenticators:enroll: it authorizes enrolling an authenticator at the
+// level binding requires, and answers with the kernel action the BFF drives (TDD-identity-control-005
+// §Enrollment and the Assurance Floor).
+func (h *Me) Enroll(w http.ResponseWriter, r *http.Request) {
+	principal, ok := h.caller(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		Type string `json:"type"`
+	}
+	decoder := json.NewDecoder(io.LimitReader(r.Body, maxBodyBytes))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&body); err != nil || body.Type == "" {
+		httpapi.Problem(w, r, httpapi.ValidationFailed, "The body must name the authenticator type to enroll")
+		return
+	}
+	acr, authTime, known := Assurance(r.Context())
+	meets := func(level string) bool {
+		levelMet := known && acrLevel(acr) >= acrLevel(level)
+		if !levelMet && known && h.assurance.Report {
+			levelMet = h.assurance.meets(r, acrLevel(level))
+		}
+		return levelMet && h.now().Sub(authTime) <= h.stepUpMaxAge
+	}
+	action, err := h.service.Enroll(r.Context(), securitystate.Actor{Principal: principal, Correlation: correlationOf(r),
+		Assurance: fmt.Sprintf("acr=%s;auth_time=%s", acr, authTime.UTC().Format(time.RFC3339))}, body.Type, meets)
+	if level, stepUp := securitystate.IsStepUp(err); stepUp {
+		stepUpChallenge(w, r, level, h.stepUpMaxAge)
+		return
+	}
+	if err != nil {
+		writeMeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"action": action})
 }
 
 // AuthenticatorAction handles POST /v1/me/authenticators/{security_ref}:remove, under step-up.

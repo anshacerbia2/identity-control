@@ -56,6 +56,17 @@ const (
 // ResultLastAuthenticator is a revocation the guard refused: it would leave no first factor.
 const ResultLastAuthenticator = "last_authenticator"
 
+// ResultAssuranceFloor is a removal the floor refused: it would leave a provider without a second
+// factor, and so without aal2 (TDD-identity-control-005 §Enrollment and the Assurance Floor).
+const ResultAssuranceFloor = "assurance_floor"
+
+// ProviderHolder says whether a Principal holds provider authority: provider is a decision in its
+// favour, and stale an activation in force that the projection's freshness did not let through.
+// cmd/identity-control adapts *providerauthority.Decider to it.
+type ProviderHolder interface {
+	Holds(ctx context.Context, principal id.UUID) (provider, stale bool, err error)
+}
+
 var (
 	// ErrInvalid is a command missing what every administrative mutation carries.
 	ErrInvalid = errors.New("securitystate: the command is incomplete")
@@ -99,6 +110,8 @@ type Config struct {
 	BatchSize      int
 	// Meter receives the executor's metrics; nil sends them nowhere.
 	Meter metric.Meter
+	// Providers decides the assurance floor; nil holds nobody to it.
+	Providers ProviderHolder
 }
 
 // Actor is who commands, as the request established it.
@@ -191,6 +204,10 @@ func New(tx Transactor, kernel keycloak.Containment, refs *securityref.Codec, cf
 	return &Service{tx: tx, kernel: kernel, refs: refs, cfg: cfg, logger: logger, newID: id.NewV7, jitter: fullJitter,
 		metric: measured}, nil
 }
+
+// UseProviders sets the provider decision the assurance floor reads, once the composition root has
+// built it.
+func (s *Service) UseProviders(providers ProviderHolder) { s.cfg.Providers = providers }
 
 // Route is the route an operation is commanded on, as its evidence records it. A self command is
 // one whose actor is its subject.
