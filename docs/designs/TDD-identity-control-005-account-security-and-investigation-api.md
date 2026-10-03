@@ -120,6 +120,7 @@ POST  /v1/me/sessions/{security_ref}:terminate
 POST  /v1/me/sessions:terminate-all
 GET   /v1/me/authenticators
 POST  /v1/me/authenticators/{security_ref}:remove
+GET   /v1/me/security-operations/{operation_id}
 ```
 
 **Reads.**
@@ -154,6 +155,10 @@ POST  /v1/me/authenticators/{security_ref}:remove
   authenticator changes. Ending a session never does: it removes access, it does not gain any.
 - **Evidence.** The final state writes its `privileged_access` row, as every command's does (§Evidence),
   with the actor and the subject the same Principal and `emergency` false.
+- **Following a `202`.** `GET /v1/security-operations/{operation_id}` stays `providerOnly`. A person
+  follows their own command at `GET /v1/me/security-operations/{operation_id}`, which answers only
+  for an operation whose subject is the caller and is `404` for any other. This keeps every route in
+  one class.
 - **After `terminate-all`.** The BFF ends its own session as well (`TDD-identity-experience-001`), because
   the Keycloak session behind it is gone.
 
