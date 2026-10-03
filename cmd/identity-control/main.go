@@ -262,6 +262,7 @@ func run() error {
 		Investigation: investigationHandler,
 		Security:      securityHandler,
 		Me:            meHandler,
+		Assurance:     httpapi.AssurancePolicy{Report: cfg.ReportAssurance, Logger: logger},
 		Database:      pool,
 		Telemetry:     telemetry,
 	}
@@ -324,6 +325,9 @@ func run() error {
 	}
 
 	var tokens httpapi.TokenVerifier = verifier
+	if cfg.ReportAssurance {
+		logger.Warn("IDENTITY_ASSURANCE=report: provider routes serve tokens below aal2 and log them; enforce once the kernel maps the levels")
+	}
 	if !cfg.EnforceAccessTokenType {
 		tokens = httpapi.ReportTokenType(verifier, logger)
 	}

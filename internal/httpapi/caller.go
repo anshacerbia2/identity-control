@@ -9,6 +9,7 @@ package httpapi
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -117,4 +118,52 @@ func WithSessionID(ctx context.Context, sid string) context.Context {
 func SessionID(ctx context.Context) string {
 	sid, _ := ctx.Value(sessionKey{}).(string)
 	return sid
+}
+
+// The authentication levels ADR-IAM-004 names, in STD-IAM-002 §3.2's order. A token meets a level
+// when its acr is that level or a higher one; any other value, the kernel's unmapped 0 and 1
+// included, is below aal1.
+const (
+	levelAAL1 = 1
+	levelAAL2 = 2
+)
+
+// AcrAAL2 is the acr value of two distinct factors, which every provider route requires.
+const AcrAAL2 = "aal2"
+
+func acrLevel(acr string) int {
+	switch acr {
+	case "aal1":
+		return levelAAL1
+	case "aal2":
+		return levelAAL2
+	case "phr":
+		return 3
+	}
+	return 0
+}
+
+// AssurancePolicy is IDENTITY_ASSURANCE (TDD-identity-control-005 §Step-Up). Report serves a request
+// below the level its route requires and logs the shortfall, for a server whose kernel does not yet
+// map the levels; otherwise the request is challenged.
+type AssurancePolicy struct {
+	Report bool
+	Logger *slog.Logger
+}
+
+// meets reports whether the request's token meets level, or is let through by report mode.
+func (a AssurancePolicy) meets(r *http.Request, level int) bool {
+	acr, _, ok := Assurance(r.Context())
+	if ok && acrLevel(acr) >= level {
+		return true
+	}
+	if a.Report {
+		if a.Logger != nil {
+			a.Logger.WarnContext(r.Context(), "a request below its route's authentication level was served (IDENTITY_ASSURANCE=report)",
+				slog.String("acr", acr), slog.Int("required_level", level), slog.String("method", r.Method),
+				slog.String("path", r.URL.Path))
+		}
+		return true
+	}
+	return false
 }

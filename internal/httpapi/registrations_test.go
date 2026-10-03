@@ -87,7 +87,9 @@ func registrationsHandler(t *testing.T, stub *stubReconciler) http.Handler {
 // asPrincipal establishes a provider caller, as a token naming provider:identity-control does.
 func asPrincipal(t *testing.T, r *http.Request) (*http.Request, id.UUID) {
 	principal := mustUUID(t)
-	ctx := httpapi.WithProvider(httpapi.WithCallerScope(r.Context(), "principal:"+principal.String()))
+	// A provider's token shows two factors, as every provider route requires (ADR-IAM-004).
+	ctx := httpapi.WithAssurance(httpapi.WithProvider(httpapi.WithCallerScope(r.Context(), "principal:"+principal.String())),
+		httpapi.AcrAAL2, time.Now())
 	return r.WithContext(ctx), principal
 }
 

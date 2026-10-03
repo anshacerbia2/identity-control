@@ -77,6 +77,11 @@ jobs:
             echo "KEYS_OWNER=$(id -u):$(id -g)"
             # Short enough that Proof B sees the schedule run within the job.
             echo "IDENTITY_REGISTRATION_RECONCILE_INTERVAL=20s"
+            # The smoke signs the bootstrap operator in with a password; it enrolls no TOTP, so its
+            # token is below the aal2 every provider route requires (ADR-IAM-004). report serves it
+            # and logs the shortfall. The enforce path is asserted by internal/httpapi's tests, and
+            # the levels themselves by identity-kernel's compat/levels_test.go.
+            echo "IDENTITY_ASSURANCE=report"
           } > .env
 
       - name: register this service's clients in the kernel

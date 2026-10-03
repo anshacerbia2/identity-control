@@ -125,6 +125,9 @@ services:
       # so a setting missing from this list is a setting .env cannot reach.
       IDENTITY_UNMANAGED_CLIENTS: ${IDENTITY_UNMANAGED_CLIENTS:-report}
       IDENTITY_TOKEN_TYPE: ${IDENTITY_TOKEN_TYPE:-report}
+      # Provider routes require acr aal2 (ADR-IAM-004). report serves a lower token and logs it, for a
+      # server whose kernel does not yet map the levels; deploy identity-kernel first and keep enforce.
+      IDENTITY_ASSURANCE: ${IDENTITY_ASSURANCE:-enforce}
       # A development server: a registration may hold fewer than two owners (ADR-IAM-003 §5.1).
       IDENTITY_ENVIRONMENT: non-production
       # The issuer is the kernel's public one, whatever address Keycloak is reached on: Keycloak's

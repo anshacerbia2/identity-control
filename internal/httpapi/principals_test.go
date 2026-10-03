@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/anshacerbia2/foundation-platform/id"
 	"github.com/anshacerbia2/foundation-platform/idempotency"
@@ -83,7 +84,8 @@ func request(t *testing.T, body string, opts ...func(*http.Request)) *http.Reque
 	t.Helper()
 	r := httptest.NewRequest(http.MethodPost, "/v1/principals", strings.NewReader(body))
 	r.Header.Set(httpapi.IdempotencyHeader, "key-0001")
-	r = r.WithContext(httpapi.WithProvider(httpapi.WithCallerScope(r.Context(), "svc:admin-api")))
+	r = r.WithContext(httpapi.WithAssurance(httpapi.WithProvider(httpapi.WithCallerScope(r.Context(), "svc:admin-api")),
+		httpapi.AcrAAL2, time.Now()))
 	for _, opt := range opts {
 		opt(r)
 	}

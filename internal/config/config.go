@@ -124,6 +124,10 @@ type Config struct {
 	// caller's authentication must be. A command executes inline for CommandBudget, each Admin API
 	// call within AttemptTimeout, at most MaxAttempts times. OperationLease hides a claimed
 	// operation from other workers, and ExecutorInterval is how often due operations are claimed.
+	// ReportAssurance is IDENTITY_ASSURANCE=report: a request below the authentication level its
+	// route requires is served and logged rather than challenged, for a server whose kernel does
+	// not yet map the levels (TDD-identity-control-005 §Step-Up). The default is enforce.
+	ReportAssurance  bool
 	StepUpMaxAge     time.Duration
 	CommandBudget    time.Duration
 	AttemptTimeout   time.Duration
@@ -248,6 +252,13 @@ func Load() (Config, error) {
 		problems = append(problems, errors.New("IDENTITY_SECURITY_REF_KEY_FILE is required"))
 	}
 	cfg.SecurityRefTTL = durationOr("IDENTITY_SECURITY_REF_TTL", 10*time.Minute, &problems)
+	switch mode := stringOr("IDENTITY_ASSURANCE", "enforce"); mode {
+	case "enforce":
+	case "report":
+		cfg.ReportAssurance = true
+	default:
+		problems = append(problems, fmt.Errorf("IDENTITY_ASSURANCE is %q; it is enforce or report", mode))
+	}
 	cfg.StepUpMaxAge = durationOr("IDENTITY_STEP_UP_MAX_AGE", 5*time.Minute, &problems)
 	cfg.CommandBudget = durationOr("IDENTITY_SECURITY_COMMAND_BUDGET", 2*time.Second, &problems)
 	cfg.AttemptTimeout = durationOr("IDENTITY_SECURITY_ATTEMPT_TIMEOUT", 500*time.Millisecond, &problems)

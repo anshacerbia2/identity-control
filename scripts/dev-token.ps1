@@ -71,7 +71,13 @@ function Get-ScnehauxToken {
         # The caller's private key. The code is exchanged with an assertion signed by it; the
         # client holds no secret (ADR-IAM-001 §5.12).
         [Parameter(Mandatory = $true)] [string] $KeyFile,
-        [string] $RedirectUri = "http://127.0.0.1:8099/callback"
+        [string] $RedirectUri = "http://127.0.0.1:8099/callback",
+        # The authentication level to ask for (ADR-IAM-004). Every provider route requires aal2, so
+        # a token for one is asked with -AcrValues aal2 and the current code from the person's
+        # authenticator app in -Otp. The first TOTP is enrolled in a browser: sign in to the Admin
+        # Portal, which asks for aal2 and shows the kernel's enrollment page.
+        [string] $AcrValues = "",
+        [string] $Otp = ""
     )
 
     $ErrorActionPreference = "Stop"
@@ -103,7 +109,8 @@ function Get-ScnehauxToken {
         "&redirect_uri=$([uri]::EscapeDataString($RedirectUri))" +
         "&state=$state" +
         "&code_challenge=$challenge" +
-        "&code_challenge_method=S256"
+        "&code_challenge_method=S256" +
+        $(if ($AcrValues) { "&acr_values=$([uri]::EscapeDataString($AcrValues))" } else { "" })
 
     # One cookie jar across both requests. The kernel's login form is bound to a session cookie,
     # and posting the form without it produces "Restart login cookie not found" rather than a
@@ -136,38 +143,54 @@ function Get-ScnehauxToken {
     # raises MaximumRedirectExceeded, an InvalidOperationException whose Response is not reachable,
     # so the 302 that means success is indistinguishable from a transport failure. AllowAutoRedirect
     # = $false returns the response itself.
-    $request = [System.Net.HttpWebRequest]::Create($action)
-    $request.Method = "POST"
-    $request.AllowAutoRedirect = $false
-    $request.CookieContainer = $session.Cookies
-    $request.ContentType = "application/x-www-form-urlencoded"
-
-    $form = "username=$([uri]::EscapeDataString($Username))&password=$([uri]::EscapeDataString($Password))"
-    $body = [System.Text.Encoding]::ASCII.GetBytes($form)
-    $request.ContentLength = $body.Length
-    $stream = $request.GetRequestStream()
-    $stream.Write($body, 0, $body.Length)
-    $stream.Close()
-
-    $codeUri = $null
-    try {
-        $response = $request.GetResponse()
+    function Send-LoginForm([string] $Action, [string] $Form) {
+        $request = [System.Net.HttpWebRequest]::Create($Action)
+        $request.Method = "POST"
+        $request.AllowAutoRedirect = $false
+        $request.CookieContainer = $session.Cookies
+        $request.ContentType = "application/x-www-form-urlencoded"
+        $body = [System.Text.Encoding]::ASCII.GetBytes($Form)
+        $request.ContentLength = $body.Length
+        $stream = $request.GetRequestStream()
+        $stream.Write($body, 0, $body.Length)
+        $stream.Close()
         try {
-            $status = [int]$response.StatusCode
-            if ($status -ge 300 -and $status -lt 400) {
-                $codeUri = $response.Headers["Location"]
-            } else {
-                # 200 means the form was redisplayed: the credential was refused, or the account
-                # has a pending required action.
-                throw "the kernel answered $status rather than redirecting; the credential was refused, or a required action is pending"
+            $response = $request.GetResponse()
+        } catch [System.Net.WebException] {
+            $response = $_.Exception.Response
+            if (-not $response) { throw }
+        }
+        try {
+            # The same loopback exemption as for the first page: the code page's cookies must reach
+            # the code's POST.
+            Add-LoopbackCookies -Response @{ Headers = @{ "Set-Cookie" = $response.Headers["Set-Cookie"] } } `
+                -Session $session -Origin $KcBase
+            $reader = New-Object System.IO.StreamReader($response.GetResponseStream())
+            return @{
+                Status   = [int]$response.StatusCode
+                Location = $response.Headers["Location"]
+                Content  = $reader.ReadToEnd()
             }
         } finally { $response.Close() }
-    } catch [System.Net.WebException] {
-        $errorResponse = $_.Exception.Response
-        if (-not $errorResponse) { throw }
-        $codeUri = $errorResponse.Headers["Location"]
-        $errorResponse.Close()
-        if (-not $codeUri) { throw }
+    }
+
+    $answer = Send-LoginForm $action "username=$([uri]::EscapeDataString($Username))&password=$([uri]::EscapeDataString($Password))"
+    # A level of two factors asks for the code on a second page of the same sign-in.
+    if ($answer.Status -eq 200 -and $answer.Content -match 'name="totpSecret"') {
+        throw "the kernel asks to enroll a TOTP authenticator first: sign in to the Admin Portal in a browser once, then pass the app's code in -Otp"
+    }
+    if ($answer.Status -eq 200 -and $answer.Content -match 'name="otp"') {
+        if (-not $Otp) { throw "the kernel asks for a one-time code: pass the current code from the authenticator app in -Otp" }
+        if ($answer.Content -notmatch '(?s)<form[^>]*\saction="([^"]+)"') { throw "the code page carries no form" }
+        $answer = Send-LoginForm ([System.Web.HttpUtility]::HtmlDecode($Matches[1])) "otp=$([uri]::EscapeDataString($Otp))"
+    }
+    $codeUri = $null
+    if ($answer.Status -ge 300 -and $answer.Status -lt 400) {
+        $codeUri = $answer.Location
+    } else {
+        # 200 means a form was redisplayed: the credential or the code was refused, or the account
+        # has a pending required action.
+        throw "the kernel answered $($answer.Status) rather than redirecting; the credential or code was refused, or a required action is pending"
     }
     if (-not $codeUri) { throw "the authentication POST returned no redirect carrying an authorization code" }
 
