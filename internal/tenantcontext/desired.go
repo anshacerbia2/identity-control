@@ -39,7 +39,7 @@ const (
 
 // EventTypes are what this projection applies, and what this service adds to its registration.
 var EventTypes = []event.Type{MembershipGranted, MembershipRestored, MembershipSuspended, MembershipRevoked,
-	TenantActivated, TenantRetired, TenantSuspended, TenantRestored}
+	TenantActivated, TenantRetired, TenantSuspended, TenantRestored, RepairReconciled}
 
 var membershipTypes = map[event.Type]bool{MembershipGranted: true, MembershipRestored: true,
 	MembershipSuspended: true, MembershipRevoked: true}
@@ -171,6 +171,9 @@ SET priority        = identity.tenant_convergence.priority OR excluded.priority,
 
 // Apply applies one delivered event, in one transaction with its inbox guard.
 func (d *Desired) Apply(ctx context.Context, envelope event.Envelope) (delivery.Outcome, error) {
+	if envelope.Type == RepairReconciled {
+		return d.applyRepair(ctx, envelope)
+	}
 	var (
 		membership *Membership
 		tenant     *Tenant

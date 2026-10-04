@@ -43,6 +43,10 @@ type RoutesConfig struct {
 	// its routes are not mounted.
 	Investigation *Investigation
 
+	// TenantContext serves the Tenant context report (TDD-identity-control-002 2.2.0). Nil, its route
+	// is not mounted.
+	TenantContext TenantReporter
+
 	// Deliveries applies Organization's provider grant events, and DeliveryVerifier admits the
 	// delivering workload alone (TDD-identity-control-006). Either nil, the intake answers 503.
 	Deliveries       Applier
@@ -141,6 +145,9 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 		api.HandleFunc("GET /v1/principals/{principal_id}/authenticators", p(cfg.Investigation.Authenticators))
 		api.HandleFunc("GET /v1/principals/{principal_id}/federation-links", p(cfg.Investigation.FederationLinks))
 		api.HandleFunc("GET /v1/principals/{principal_id}/findings", p(cfg.Investigation.Findings))
+	}
+	if cfg.TenantContext != nil {
+		api.HandleFunc("GET /v1/projections/tenant-context/report", p(tenantReport(cfg.TenantContext)))
 	}
 	// Route class self: any person, acting on the Principal in its token.
 	s := selfOnly

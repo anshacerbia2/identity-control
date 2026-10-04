@@ -307,6 +307,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("tenant context intake: %w", err)
 	}
+	routesConfig.TenantContext = desired
 	if !cfg.DeliveryPrincipal.IsNil() {
 		deliveryVerifier, err := verify.New(verify.Config{
 			Issuer: cfg.TokenIssuer, Audience: cfg.TokenAudience, Keys: keys,

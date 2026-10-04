@@ -605,11 +605,15 @@ slice:
      client predates them runs `deploy/dev/add-organization-roles.sh`, and `dev-credential-split.ps1`
      asserts the split.
 3. **Bootstrap and reconciliation** (TDD-002 2.1.0).
-   - **3a:** the snapshot's version-guarded upserts, the kernel sweep (unknown Organizations
-     disabled and emptied), and findings for a sweep's changes. It needs organization-control's
-     snapshot row to carry `tenant_version` (TDD-organization-control-002 1.8.0).
-   - **3b:** applying Organization's `projection.repair.reconciled`, and the report an operator posts
-     to its reconcile route.
+   - ✅ **3a:** the snapshot's version-guarded upserts, and the kernel sweep, in which unknown
+     Organizations are disabled and emptied. Findings record a sweep's changes. The converger trusts
+     a recorded Organization identifier only for this Tenant's name. organization-control's snapshot
+     row carries `tenant_version` (TDD-organization-control-002 1.8.0).
+   - ✅ **3b** (TDD-002 2.2.0):
+     - Organization's `projection.repair.reconciled` is applied by version. An `extra` with no state
+       makes the Membership `absent`.
+     - `GET /v1/projections/tenant-context/report` serves the report an operator posts to
+       organization-control's reconcile route.
 4. **The scope.** The registration authority attaches `organization`, optional, to internal and
    workload clients (`TDD-identity-control-003`).
 5. **On the development server.** The registration's event types, and a stack check that a revoked

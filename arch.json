@@ -133,6 +133,7 @@
       "internal/reconcile",
       "internal/registration",
       "internal/securitystate",
+      "internal/tenantcontext",
       "internal/workload"
     ]
   },

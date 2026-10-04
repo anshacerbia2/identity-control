@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-002
   title: Tenant Context Projection into the Kernel, and Its Reconciliation
   owner: Core Platform Team
-  version: 2.1.0
+  version: 2.2.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -242,6 +242,7 @@ com.scnehaux.organization.tenant.lifecycle.activated       standard
 com.scnehaux.organization.tenant.lifecycle.retired         standard
 com.scnehaux.organization.tenant.security.suspended        priority
 com.scnehaux.organization.tenant.security.restored         priority
+com.scnehaux.organization.projection.repair.reconciled     standard   (2.2.0)
 ```
 
 - **Registration.** These are the Membership and Tenant types Organization Control offers a
@@ -289,6 +290,38 @@ com.scnehaux.organization.tenant.security.restored         priority
 Principal credential already holds. The registration credential gains nothing. In Keycloak 26.7.5
 these two roles, or `manage-realm`, are what organization management checks [R2]. The narrower
 roles are the ones held.
+
+### The Report an Operator Posts (2.2.0)
+
+```text
+GET /v1/projections/tenant-context/report      provider route, aal2
+→ {"consumer_id": "identity-control", "mark": <applied position>,
+   "rows": [{"membership_id": "...", "membership_version": 7}, ...]}
+```
+
+- **What it holds.** The active Memberships of the desired state, in the shape Organization
+  Control's reconcile route takes, at the position this consumer has applied.
+- **Why the position is needed.** That route refuses a report with no position, because comparing an
+  unpositioned report with authority read now "would classify every change made since the report as
+  a divergence" [R3].
+- **What it does not hold.** No principal, no Tenant, no name: an identifier and a version per
+  Membership.
+- **Its route class.** It is a provider route, as every operational read here is.
+
+### Applying a Repair (2.2.0)
+
+`projection.repair.reconciled` carries `consumer_id`, `mark`, and findings. Each finding carries a
+classification, a `membership_id`, and a `state`.
+- **A sweep for another consumer** is acknowledged and applies nothing. Its findings describe that
+  consumer's report.
+- **A finding with a state** is applied by the rule every Membership event is applied by: a greater
+  `membership_version` replaces the held state. It then marks the Tenant.
+- **A finding with no state** means the authority never granted that Membership, which only an
+  `extra` finding can say. The desired Membership becomes `absent`, and its Tenant is marked.
+  - A `missing` or `mismatch` finding with no state comes from a producer that sent versions alone.
+    Reading its null as a removal would withdraw a Membership the authority holds. So the whole sweep
+    is refused as poison, as foundation-reference refuses it.
+- **One sweep, one transaction,** with its inbox guard, as an event.
 
 ### Authority Read for Reconciliation
 
@@ -412,6 +445,12 @@ events order. Without it, a snapshot could not safely say whether a Tenant was s
   - `409` and `404` count as done;
   - a mark during a convergence leaves the Tenant pending;
   - two convergers never hold the same Tenant.
+- **Repair and report (2.2.0):**
+  - a repair carrying a revoked state removes the member;
+  - an `extra` finding with no state makes the Membership `absent`;
+  - a `missing` finding with no state refuses the sweep;
+  - a repair for another consumer applies nothing;
+  - the report lists the active Memberships at the applied position.
 - **Reconciliation:**
   - a member added by hand is removed, with an `extra_member` finding kept;
   - a dropped event is repaired from the snapshot, with a `missing_member` finding;
