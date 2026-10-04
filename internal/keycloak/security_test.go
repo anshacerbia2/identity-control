@@ -25,7 +25,9 @@ func TestSecurityStateIsReadFromTheUserSubresources(t *testing.T) {
 		case strings.HasSuffix(path, "/users/u1/credentials"):
 			return http.StatusOK, `[
 			  {"id":"k2","type":"webauthn","userLabel":"laptop","createdDate":5000,"secretData":"SECRET","credentialData":"{}"},
-			  {"id":"k1","type":"password","createdDate":1000,"secretData":"SECRET"}]`
+			  {"id":"k1","type":"password","createdDate":1000,"secretData":"SECRET"},
+			  {"id":"k3","type":"recovery-authn-codes","createdDate":6000,"secretData":"SECRET",
+			   "credentialData":"{\"hashIterations\":null,\"algorithm\":\"RS512\",\"remaining\":11,\"total\":12}"}]`
 		case strings.HasSuffix(path, "/users/u1/federated-identity"):
 			return http.StatusOK, `[{"identityProvider":"github","userId":"77","userName":"ansha"}]`
 		}
@@ -41,8 +43,11 @@ func TestSecurityStateIsReadFromTheUserSubresources(t *testing.T) {
 	}
 
 	credentials, err := admin.UserCredentials(ctx, testRealm, "u1")
-	if err != nil || len(credentials) != 2 || credentials[0].ID != "k1" || credentials[1].Label != "laptop" {
-		t.Errorf("credentials: %+v, %v", credentials, err)
+	if err != nil || len(credentials) != 3 || credentials[0].ID != "k1" || credentials[1].Label != "laptop" {
+		t.Fatalf("credentials: %+v, %v", credentials, err)
+	}
+	if r := credentials[2].Remaining; r == nil || *r != 11 || credentials[1].Remaining != nil {
+		t.Errorf("remaining recovery codes: %v; a key's: %v", r, credentials[1].Remaining)
 	}
 	for _, c := range credentials {
 		if strings.Contains(c.ID+c.Type+c.Label, "SECRET") {

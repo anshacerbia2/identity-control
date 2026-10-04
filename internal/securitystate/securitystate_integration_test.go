@@ -676,6 +676,17 @@ func TestAProviderKeepsTheirLastSecondFactor(t *testing.T) {
 		t.Errorf("another provider revoking it: %+v, %v", op, err)
 	}
 
+	// Assisted recovery (ADR-IAM-005 §5.5): once the provider is suspended, they cannot sign in, and
+	// their lost factor is revoked.
+	if op, err := h.service.Submit(ctx, h.command(TypeSuspend, provider, 3)); err != nil || op.State != StateApplied {
+		t.Fatalf("suspending the provider: %+v, %v", op, err)
+	}
+	revoke = h.command(TypeRevoke, provider, 4)
+	revoke.Ref = seal(provider, securityref.PurposeAdminRevoke, "kc-otp-"+string(providerUser))
+	if op, err := h.service.Submit(ctx, revoke); err != nil || op.State != StateApplied {
+		t.Errorf("revoking a suspended provider's last second factor: %+v, %v", op, err)
+	}
+
 	theirs := h.selfCommand(TypeAuthenticatorRemove, person, seal(person, securityref.PurposeSelfAuthenticatorRemove,
 		"kc-otp-"+string(personUser)))
 	if op, err := h.service.Submit(ctx, theirs); err != nil || op.State != StateApplied {
@@ -719,6 +730,10 @@ func TestEnrollingTakesTheAccountsLevel(t *testing.T) {
 		return !ok || level != "aal2"
 	}() {
 		t.Errorf("enrolling a security key at aal1 beside a TOTP: %v, want a step-up to aal2", err)
+	}
+	if action, err := h.service.Enroll(ctx, actor(enrolled), "recovery-codes", func(string) bool { return true }); err != nil ||
+		action != "CONFIGURE_RECOVERY_AUTHN_CODES" {
+		t.Errorf("a new set of recovery codes: %q, %v", action, err)
 	}
 	for _, refused := range []string{"sms", "webauthn-passwordless", "WEBAUTHN"} {
 		if _, err := h.service.Enroll(ctx, actor(fresh), refused, onlyAAL1); !errors.Is(err, ErrInvalid) {

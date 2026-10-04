@@ -32,6 +32,8 @@ type MyAuthenticator struct {
 	Type        string    `json:"type"`
 	Label       string    `json:"label,omitempty"`
 	Created     time.Time `json:"created"`
+	// RemainingCodes is how many codes of a recovery-code set are unused (ADR-IAM-005 §5.4).
+	RemainingCodes *int `json:"remaining_codes,omitempty"`
 }
 
 const ownUserStatement = `SELECT coalesce(keycloak_user_id, '') FROM identity.principal_mapping
@@ -112,7 +114,7 @@ func (s *Service) MyAuthenticators(ctx context.Context, principal id.UUID) ([]My
 			return nil, err
 		}
 		authenticators = append(authenticators, MyAuthenticator{SecurityRef: ref, Type: r.Type, Label: r.Label,
-			Created: r.Created})
+			Created: r.Created, RemainingCodes: r.Remaining})
 	}
 	return authenticators, nil
 }

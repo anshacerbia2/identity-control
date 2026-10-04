@@ -124,6 +124,8 @@ type Authenticator struct {
 	Type        string    `json:"type"`
 	Label       string    `json:"label,omitempty"`
 	Created     time.Time `json:"created"`
+	// RemainingCodes is how many codes of a recovery-code set are unused.
+	RemainingCodes *int `json:"remaining_codes,omitempty"`
 }
 
 // FederationLink is a link to an identity provider's account.
@@ -345,7 +347,7 @@ func (s *Service) Authenticators(ctx context.Context, actor Actor, principalID i
 	}
 	authenticators := make([]Authenticator, 0, len(raw))
 	for _, r := range raw {
-		a := Authenticator{Type: r.Type, Label: r.Label, Created: r.Created}
+		a := Authenticator{Type: r.Type, Label: r.Label, Created: r.Created, RemainingCodes: r.Remaining}
 		if s.refs != nil {
 			if a.SecurityRef, err = s.refs.Seal(securityref.KindCredential, principalID, PurposeRevoke,
 				string(s.cfg.Realm), r.ID); err != nil {

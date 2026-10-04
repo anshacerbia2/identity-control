@@ -40,6 +40,8 @@ type Credential struct {
 	Type    string
 	Label   string
 	Created time.Time
+	// Remaining is how many recovery codes of a set are unused; nil for every other type.
+	Remaining *int
 }
 
 // FederatedIdentity is a link from the user to an identity provider's account.
@@ -102,6 +104,23 @@ type credentialRepresentation struct {
 	Type        string `json:"type"`
 	UserLabel   string `json:"userLabel"`
 	CreatedDate int64  `json:"createdDate"`
+	// CredentialData is the credential's metadata as a JSON string. The secret is never listed.
+	CredentialData string `json:"credentialData"`
+}
+
+// RecoveryCodes is the kernel's credential type for a set of recovery codes (ADR-IAM-005 §5.1).
+const RecoveryCodes = "recovery-authn-codes"
+
+// remainingCodes reads how many codes of a set are unused, from the metadata the kernel keeps beside
+// the hashes ({"remaining":11,"total":12}). Nil when the metadata does not say.
+func remainingCodes(credentialData string) *int {
+	var data struct {
+		Remaining *int `json:"remaining"`
+	}
+	if json.Unmarshal([]byte(credentialData), &data) != nil {
+		return nil
+	}
+	return data.Remaining
 }
 
 // UserCredentials lists the user's authenticators' metadata, oldest first.
@@ -112,8 +131,11 @@ func (a *Admin) UserCredentials(ctx context.Context, realm Realm, userID UserID)
 	}
 	credentials := make([]Credential, 0, len(raw))
 	for _, r := range raw {
-		credentials = append(credentials, Credential{ID: r.ID, Type: r.Type, Label: r.UserLabel,
-			Created: time.UnixMilli(r.CreatedDate).UTC()})
+		credential := Credential{ID: r.ID, Type: r.Type, Label: r.UserLabel, Created: time.UnixMilli(r.CreatedDate).UTC()}
+		if r.Type == RecoveryCodes {
+			credential.Remaining = remainingCodes(r.CredentialData)
+		}
+		credentials = append(credentials, credential)
 	}
 	sort.SliceStable(credentials, func(i, j int) bool { return credentials[i].Created.Before(credentials[j].Created) })
 	return credentials, nil
