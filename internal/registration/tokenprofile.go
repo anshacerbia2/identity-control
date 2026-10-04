@@ -28,7 +28,16 @@ const (
 	// kernel attaches it again on every update of such a client, so a workload holds it; identity-kernel
 	// declares it with its client_id mapper alone, so it writes no network address.
 	ScopeServiceAccount = "service_account"
+	// ScopeOrganization is the kernel's scope through which a client asks for one Tenant with
+	// organization:<tenant_id>, and through which tenant_id reaches a token (ADR-IAM-006 §5.3). A
+	// client of an audience class that may carry tenant_id holds it as an optional scope.
+	ScopeOrganization = "organization"
 )
+
+// tenantClasses are the audience classes that may carry tenant_id (STD-IAM-002 §3.2): internal, and
+// a workload, which is tenant-scoped once its service-account user is a member. privileged is the
+// provider form here, which carries no Tenant, and external carries no enterprise claim.
+var tenantClasses = map[string]bool{"internal": true, "workload": true}
 
 // ScopeSets are a client's default and optional client scopes, by name.
 type ScopeSets struct {
@@ -51,7 +60,11 @@ func DesiredScopes(profile, audienceClass string) (ScopeSets, bool) {
 	if profile == ProfileConfidential {
 		desired.Optional = append(desired.Optional, ScopeProfile)
 	}
+	if tenantClasses[audienceClass] {
+		desired.Optional = append(desired.Optional, ScopeOrganization)
+	}
 	slices.Sort(desired.Default)
+	slices.Sort(desired.Optional)
 	return desired, true
 }
 

@@ -13,7 +13,7 @@ func adoptable(converge ...string) AdoptRequest {
 
 // bffScopes are the sets a confidential internal client holds (tokenprofile.go).
 func bffScopes() ScopeSets {
-	return ScopeSets{Default: []string{"acr", "basic", "scnehaux-internal"}, Optional: []string{"scnehaux-profile"}}
+	return ScopeSets{Default: []string{"acr", "basic", "scnehaux-internal"}, Optional: []string{"organization", "scnehaux-profile"}}
 }
 
 var bffKey = keycloak.JWK{KID: "k1", N: "bg", E: "AQAB"}

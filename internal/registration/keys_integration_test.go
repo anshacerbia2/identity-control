@@ -79,7 +79,7 @@ func TestAConfidentialClientIsCreatedHoldingItsKey(t *testing.T) {
 	spec, scopes, ok := h.kernel.Spec(client)
 	if !ok || !spec.Confidential || !slices.Equal(spec.RedirectURIs, []string{"https://bff.example.com/callback"}) ||
 		!sameIDs(scopes, "scope-acr", "scope-basic", "scope-internal") ||
-		!sameIDs(h.kernel.OptionalScopes(client), "scope-sign-in") {
+		!sameIDs(h.kernel.OptionalScopes(client), "scope-organization", "scope-sign-in") {
 		t.Errorf("client spec = %+v, scopes %v and optional %v", spec, scopes, h.kernel.OptionalScopes(client))
 	}
 	if kids := h.kernelKIDs(client); !slices.Equal(kids, []string{key.kid}) {

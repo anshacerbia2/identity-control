@@ -256,7 +256,7 @@ func TestABootstrapClientMadeBeforeTheTokenProfileConvergesWhenNamed(t *testing.
 	defaults, _ := h.kernel.DefaultClientScopes(context.Background(), testRealm, client)
 	optional, _ := h.kernel.OptionalClientScopes(context.Background(), testRealm, client)
 	if !live.RFC9068 || live.ClientIDClaim != "legacy-bff" ||
-		!sameIDs(defaults, "acr", "basic", "scnehaux-internal") || !sameIDs(optional, "scnehaux-profile") {
+		!sameIDs(defaults, "acr", "basic", "scnehaux-internal") || !sameIDs(optional, "organization", "scnehaux-profile") {
 		t.Errorf("after the adoption: %+v, default %v, optional %v", live, defaults, optional)
 	}
 	if _, _, converged := h.adoptions(adopted.Registration.ID); !slices.Equal(converged,

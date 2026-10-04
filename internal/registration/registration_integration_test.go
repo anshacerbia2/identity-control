@@ -206,8 +206,9 @@ func TestAPublicClientIsCreatedFromDesiredState(t *testing.T) {
 		!slices.Equal(spec.RedirectURIs, req.RedirectURIs) {
 		t.Errorf("client spec = %+v", spec)
 	}
-	if !sameIDs(scopes, "scope-acr", "scope-basic", "scope-internal") || len(h.kernel.OptionalScopes(keycloak.ClientUUID(client))) != 0 {
-		t.Errorf("default scopes = %v, optional %v; want basic, acr and the internal managed scope, and no optional one",
+	if !sameIDs(scopes, "scope-acr", "scope-basic", "scope-internal") ||
+		!sameIDs(h.kernel.OptionalScopes(keycloak.ClientUUID(client)), "scope-organization") {
+		t.Errorf("default scopes = %v, optional %v; want basic, acr and the internal managed scope, and organization optional",
 			scopes, h.kernel.OptionalScopes(keycloak.ClientUUID(client)))
 	}
 
