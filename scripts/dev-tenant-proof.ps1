@@ -154,9 +154,22 @@ function Deliver([string] $type, $data) {
     return Send-Json "POST" "/v1/deliveries" $envelope (Get-DeliveryToken) $null
 }
 
+# Sign-InFor signs the operator in through the internal client, asking for one Tenant. The kernel
+# refuses organization:<alias> for an Organization it does not hold yet, by redirecting with an error,
+# which the sign-in reports as an exception: that is a refusal, returned as $null, not a failure here.
 function Sign-InFor([string] $tenant) {
-    return Get-ScnehauxToken -Username "bootstrap-operator" -Password $env:IDENTITY_CALLER_PASSWORD `
-        -KeyFile $s.app_key -ClientId $s.app_client -Scope "openid organization:$tenant" -FullResponse @operatorTotp
+    try {
+        return Get-ScnehauxToken -Username "bootstrap-operator" -Password $env:IDENTITY_CALLER_PASSWORD `
+            -KeyFile $s.app_key -ClientId $s.app_client -Scope "openid organization:$tenant" -FullResponse @operatorTotp
+    } catch {
+        $script:lastRefusal = $_.Exception.Message
+        return $null
+    }
+}
+
+function Tenant-Of($response) {
+    if ($null -eq $response) { return $null }
+    return (Decode-Claims $response.access_token).tenant_id
 }
 
 $tenant = New-UuidV7
@@ -177,8 +190,12 @@ Write-Host "3. a token for the Tenant carries it"
 $granted = $null
 for ($i = 0; $i -lt 30; $i++) {
     $granted = Sign-InFor $tenant
-    if ((Decode-Claims $granted.access_token).tenant_id -eq $tenant) { break }
+    if ((Tenant-Of $granted) -eq $tenant) { break }
     Start-Sleep -Seconds 1
+}
+if ($null -eq $granted) {
+    Write-Host "  FAIL  no token for the Tenant within 30 s: $script:lastRefusal"
+    exit 1
 }
 $claims = Decode-Claims $granted.access_token
 Expect "tenant_id" $claims.tenant_id $tenant
@@ -193,10 +210,13 @@ Expect "membership revocation accepted" $r.code 202
 $after = $null
 for ($i = 0; $i -lt 30; $i++) {
     $after = Sign-InFor $tenant
-    if ($null -eq (Decode-Claims $after.access_token).tenant_id) { break }
+    if ($null -eq (Tenant-Of $after)) { break }
     Start-Sleep -Seconds 1
 }
-Expect "a new token for the Tenant carries no tenant_id" ($null -eq (Decode-Claims $after.access_token).tenant_id) $true
+# Either outcome withholds the Tenant: a sign-in refused, or a token without tenant_id.
+$outcome = if ($null -eq $after) { "refused: $script:lastRefusal" } else { "a token without tenant_id" }
+Write-Host "        a new sign-in for the Tenant: $outcome"
+Expect "a new sign-in for the Tenant carries no tenant_id" ($null -eq (Tenant-Of $after)) $true
 
 $assertion = New-ClientAssertion -KeyFile $s.app_key -ClientId $s.app_client -Audience $issuer
 $form = "grant_type=refresh_token&client_id=$([uri]::EscapeDataString($s.app_client))" +
