@@ -96,7 +96,7 @@
       "projection and NOT httpapi or keycloak: it builds the projection and holds no other",
       "authority."
     ],
-    "internal/organization": ["internal/providerauthority"],
+    "internal/organization": ["internal/providerauthority", "internal/tenantcontext"],
     "cmd/identity-provider-bootstrap": [
       "internal/config",
       "internal/organization",

@@ -303,6 +303,10 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("provider authority projection: %w", err)
 	}
+	desired, err := tenantcontext.NewDesired(pool)
+	if err != nil {
+		return fmt.Errorf("tenant context intake: %w", err)
+	}
 	if !cfg.DeliveryPrincipal.IsNil() {
 		deliveryVerifier, err := verify.New(verify.Config{
 			Issuer: cfg.TokenIssuer, Audience: cfg.TokenAudience, Keys: keys,
@@ -312,10 +316,6 @@ func run() error {
 		})
 		if err != nil {
 			return fmt.Errorf("delivery verifier: %w", err)
-		}
-		desired, err := tenantcontext.NewDesired(pool)
-		if err != nil {
-			return fmt.Errorf("tenant context intake: %w", err)
 		}
 		router, err := delivery.NewRouter(
 			delivery.Route{Types: providerauthority.EventTypes, Applier: projection},
@@ -452,6 +452,18 @@ func run() error {
 		return fmt.Errorf("tenant context converger: %w", err)
 	}
 	go converger.Run(ctx)
+	// The reconciliation sweep reads Organization's snapshot as this service's workload, when one is
+	// configured, and sweeps the kernel either way (TDD-identity-control-002 2.1.0).
+	var snapshotSource tenantcontext.SnapshotSource
+	if frontier != nil {
+		snapshotSource = frontier
+	}
+	tenantSweep, err := tenantcontext.NewReconciler(desired, pool, kernel, keycloak.Realm(cfg.KeycloakRealm),
+		snapshotSource, logger)
+	if err != nil {
+		return fmt.Errorf("tenant context reconciler: %w", err)
+	}
+	go scheduleTenantSweeps(ctx, tenantSweep, cfg.ProjectionReconcileInterval, logger)
 	go scheduleSweeps(ctx, provisioner, registrar, workloads, reconciler, cfg.RegistrationReconcileInterval, logger)
 	if freshness != nil {
 		go freshness.Poll(ctx, projection, frontier, providerauthority.PollInterval, logger)
@@ -606,4 +618,21 @@ type providerHolder struct{ decider *providerauthority.Decider }
 func (p providerHolder) Holds(ctx context.Context, principal id.UUID) (bool, bool, error) {
 	decision, err := p.decider.Decide(ctx, principal)
 	return decision.Provider, decision.Stale, err
+}
+
+// scheduleTenantSweeps runs the Tenant context reconciliation every interval, the first at once.
+func scheduleTenantSweeps(ctx context.Context, sweep *tenantcontext.Reconciler, interval time.Duration,
+	logger *slog.Logger) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		if _, err := sweep.Sweep(ctx); err != nil && ctx.Err() == nil {
+			logger.Error("tenant context sweep failed", slog.String("error", err.Error()))
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }

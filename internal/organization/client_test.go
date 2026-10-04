@@ -238,3 +238,29 @@ func TestASnapshotThatNeverEndsIsRefused(t *testing.T) {
 		t.Fatal("an endless snapshot was accepted")
 	}
 }
+
+// The Organization snapshot is read the same way: every page under the first page's mark, the rows
+// joined, each carrying its Tenant's version.
+func TestTheOrganizationSnapshotIsReadUnderOneMark(t *testing.T) {
+	c, s, _ := client(t, func(w http.ResponseWriter, r request) {
+		row := map[string]any{"membership_id": "019235f4-0000-7000-8000-000000000001",
+			"principal_id": "019235f1-0000-7000-8000-000000000001", "tenant_id": "019235f2-0000-7000-8000-000000000001",
+			"membership_status": "active", "membership_version": 3, "tenant_status": "suspended", "tenant_version": 7,
+			"tenant_security_version": 2}
+		if r.body["cursor"] == nil {
+			respond(w, map[string]any{"high_water_mark": 41, "rows": []any{row}, "cursor": "next"})
+			return
+		}
+		respond(w, map[string]any{"high_water_mark": 99, "rows": []any{row}})
+	})
+	mark, rows, err := c.OrganizationSnapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mark != 41 || len(rows) != 2 || rows[0].TenantVersion != 7 || rows[0].TenantStatus != "suspended" {
+		t.Errorf("mark %d, rows %+v", mark, rows)
+	}
+	if len(s.received) != 2 || s.received[1].body["mark"] != float64(41) {
+		t.Errorf("the second page was not read under the first page's mark: %+v", s.received)
+	}
+}

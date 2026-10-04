@@ -7,6 +7,7 @@ package tenantcontext
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -100,7 +101,7 @@ WHERE tenant_id = (
     ORDER BY priority DESC, next_attempt_at
     LIMIT 1
     FOR UPDATE SKIP LOCKED)
-RETURNING tenant_id::text, marked_at, attempts, coalesce(kernel_org_id, ''), priority`
+RETURNING tenant_id::text, marked_at, attempts, coalesce(kernel_org_id, ''), priority, sweep`
 
 // tenantStatement reads the Tenant's status in one row that always exists: empty when there is no
 // Tenant row. No-rows would otherwise have to be recognised as a driver error, and arch.json keeps the
@@ -119,6 +120,7 @@ WHERE m.tenant_id = $1 AND m.membership_status = 'active' AND pm.keycloak_user_i
 const convergedStatement = `UPDATE identity.tenant_convergence
 SET state            = CASE WHEN marked_at = $2 THEN 'converged' ELSE 'pending' END,
     priority         = CASE WHEN marked_at = $2 THEN false ELSE priority END,
+    sweep            = CASE WHEN marked_at = $2 THEN false ELSE sweep END,
     next_attempt_at  = now(),
     lease_until      = NULL,
     attempts         = 0,
@@ -141,6 +143,14 @@ type claim struct {
 	attempts int
 	orgID    string
 	priority bool
+	sweep    bool
+}
+
+// change is one thing a convergence did to the kernel, which a sweep records as a finding.
+type change struct {
+	class  string
+	user   keycloak.UserID
+	detail map[string]any
 }
 
 // RunOnce converges one due Tenant, and reports whether there was one.
@@ -180,12 +190,12 @@ func (c *Converger) RunOnce(ctx context.Context) (bool, error) {
 	}
 
 	start := time.Now()
-	orgID, err := c.converge(ctx, cl, status, want)
+	orgID, changes, err := c.converge(ctx, cl, status, want)
 	c.metric.duration.Record(ctx, time.Since(start).Seconds())
 	attrs := []any{slog.String("tenant_id", cl.tenant.String()), slog.Int("attempt", cl.attempts),
 		slog.Bool("priority", cl.priority)}
 	if err == nil {
-		if finishErr := c.finish(ctx, convergedStatement, cl.tenant.String(), cl.marked, orgID); finishErr != nil {
+		if finishErr := c.converged(ctx, cl, orgID, changes); finishErr != nil {
 			return true, finishErr
 		}
 		c.metric.attempts.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", "converged")))
@@ -214,6 +224,45 @@ func (c *Converger) RunOnce(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
+// converged finishes a convergence, and for a sweep's records each change it had to make: in one
+// transaction, so a finding exists exactly when the convergence it describes is recorded.
+func (c *Converger) converged(ctx context.Context, cl claim, orgID string, changes []change) error {
+	return c.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		if _, err := tx.Exec(ctx, convergedStatement, cl.tenant.String(), cl.marked, orgID); err != nil {
+			return fmt.Errorf("tenantcontext: recording the convergence: %w", err)
+		}
+		if !cl.sweep {
+			return nil
+		}
+		for _, ch := range changes {
+			findingID, err := id.NewV7()
+			if err != nil {
+				return err
+			}
+			detail := map[string]any{"organization_id": orgID}
+			for k, v := range ch.detail {
+				detail[k] = v
+			}
+			if ch.user != "" {
+				detail["kernel_user_id"] = string(ch.user)
+			}
+			encoded, err := json.Marshal(detail)
+			if err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, findingStatement, findingID.String(), ch.class, cl.tenant.String(),
+				string(ch.user), string(c.cfg.Realm), string(encoded)); err != nil {
+				return fmt.Errorf("tenantcontext: recording a finding: %w", err)
+			}
+		}
+		if len(changes) > 0 {
+			c.logger.WarnContext(ctx, "a sweep found the kernel apart from the desired state",
+				slog.String("tenant_id", cl.tenant.String()), slog.Int("findings", len(changes)))
+		}
+		return nil
+	})
+}
+
 func (c *Converger) finish(ctx context.Context, statement string, args ...any) error {
 	return c.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
 		if _, err := tx.Exec(ctx, statement, args...); err != nil {
@@ -225,24 +274,30 @@ func (c *Converger) finish(ctx context.Context, statement string, args ...any) e
 
 // converge makes the kernel match one Tenant's desired state, and returns the Organization's
 // identifier, which it returns also on a failure once it knows it.
-func (c *Converger) converge(ctx context.Context, cl claim, status string, want map[keycloak.UserID]bool) (string, error) {
+func (c *Converger) converge(ctx context.Context, cl claim, status string,
+	want map[keycloak.UserID]bool) (string, []change, error) {
 	if status == "" {
 		// No Tenant row: nothing is projected until the Tenant is known.
-		return cl.orgID, nil
+		return cl.orgID, nil, nil
 	}
 	name := cl.tenant.String()
 	enabled := status == "active"
 
-	org, err := c.organization(ctx, cl.orgID, name, enabled)
+	var changes []change
+	org, created, err := c.organization(ctx, cl.orgID, name, enabled)
 	if err != nil {
-		return org.ID, err
+		return org.ID, nil, err
+	}
+	if created {
+		changes = append(changes, change{class: "organization_state", detail: map[string]any{"created": true}})
 	}
 	if org.Enabled && !enabled {
 		if err := c.call(ctx, func(ctx context.Context) error {
 			return c.kernel.SetOrganizationEnabled(ctx, c.cfg.Realm, org.ID, false)
 		}); err != nil {
-			return org.ID, fmt.Errorf("disabling the Organization: %w", err)
+			return org.ID, nil, fmt.Errorf("disabling the Organization: %w", err)
 		}
+		changes = append(changes, change{class: "organization_state", detail: map[string]any{"enabled": false}})
 	}
 	var have []keycloak.UserID
 	if err := c.call(ctx, func(ctx context.Context) error {
@@ -250,7 +305,7 @@ func (c *Converger) converge(ctx context.Context, cl claim, status string, want 
 		have, err = c.kernel.OrganizationMembers(ctx, c.cfg.Realm, org.ID)
 		return err
 	}); err != nil {
-		return org.ID, fmt.Errorf("listing the members: %w", err)
+		return org.ID, nil, fmt.Errorf("listing the members: %w", err)
 	}
 	held := map[keycloak.UserID]bool{}
 	for _, user := range have {
@@ -261,8 +316,9 @@ func (c *Converger) converge(ctx context.Context, cl claim, status string, want 
 		if err := c.call(ctx, func(ctx context.Context) error {
 			return c.kernel.RemoveOrganizationMember(ctx, c.cfg.Realm, org.ID, user)
 		}); err != nil {
-			return org.ID, fmt.Errorf("removing a member: %w", err)
+			return org.ID, nil, fmt.Errorf("removing a member: %w", err)
 		}
+		changes = append(changes, change{class: "extra_member", user: user})
 	}
 	for user := range want {
 		if held[user] {
@@ -271,23 +327,26 @@ func (c *Converger) converge(ctx context.Context, cl claim, status string, want 
 		if err := c.call(ctx, func(ctx context.Context) error {
 			return c.kernel.AddOrganizationMember(ctx, c.cfg.Realm, org.ID, user)
 		}); err != nil {
-			return org.ID, fmt.Errorf("adding a member: %w", err)
+			return org.ID, nil, fmt.Errorf("adding a member: %w", err)
 		}
+		changes = append(changes, change{class: "missing_member", user: user})
 	}
 	if !org.Enabled && enabled {
 		if err := c.call(ctx, func(ctx context.Context) error {
 			return c.kernel.SetOrganizationEnabled(ctx, c.cfg.Realm, org.ID, true)
 		}); err != nil {
-			return org.ID, fmt.Errorf("enabling the Organization: %w", err)
+			return org.ID, nil, fmt.Errorf("enabling the Organization: %w", err)
 		}
+		changes = append(changes, change{class: "organization_state", detail: map[string]any{"enabled": true}})
 	}
-	return org.ID, c.readBack(ctx, org.ID, enabled, want)
+	return org.ID, changes, c.readBack(ctx, org.ID, enabled, want)
 }
 
 // organization finds the Tenant's Organization by its recorded identifier, then by its exact name,
 // and creates it only when neither finds one. A create whose response was lost is found by name on
 // the next attempt rather than made twice.
-func (c *Converger) organization(ctx context.Context, orgID, name string, enabled bool) (keycloak.Organization, error) {
+func (c *Converger) organization(ctx context.Context, orgID, name string, enabled bool) (keycloak.Organization, bool,
+	error) {
 	if orgID != "" {
 		var org keycloak.Organization
 		err := c.call(ctx, func(ctx context.Context) error {
@@ -296,10 +355,10 @@ func (c *Converger) organization(ctx context.Context, orgID, name string, enable
 			return err
 		})
 		if err == nil {
-			return org, nil
+			return org, false, nil
 		}
 		if !errors.Is(err, keycloak.ErrNotFound) {
-			return keycloak.Organization{ID: orgID}, fmt.Errorf("reading the Organization: %w", err)
+			return keycloak.Organization{ID: orgID}, false, fmt.Errorf("reading the Organization: %w", err)
 		}
 	}
 	var (
@@ -311,10 +370,10 @@ func (c *Converger) organization(ctx context.Context, orgID, name string, enable
 		org, found, err = c.kernel.FindOrganization(ctx, c.cfg.Realm, name)
 		return err
 	}); err != nil {
-		return keycloak.Organization{}, fmt.Errorf("finding the Organization: %w", err)
+		return keycloak.Organization{}, false, fmt.Errorf("finding the Organization: %w", err)
 	}
 	if found {
-		return org, nil
+		return org, false, nil
 	}
 	var created string
 	if err := c.call(ctx, func(ctx context.Context) error {
@@ -322,9 +381,9 @@ func (c *Converger) organization(ctx context.Context, orgID, name string, enable
 		created, err = c.kernel.CreateOrganization(ctx, c.cfg.Realm, name, enabled)
 		return err
 	}); err != nil {
-		return keycloak.Organization{}, fmt.Errorf("creating the Organization: %w", err)
+		return keycloak.Organization{}, false, fmt.Errorf("creating the Organization: %w", err)
 	}
-	return keycloak.Organization{ID: created, Name: name, Alias: name, Enabled: enabled}, nil
+	return keycloak.Organization{ID: created, Name: name, Alias: name, Enabled: enabled}, true, nil
 }
 
 // readBack confirms the kernel holds the desired state. A timeout or a lost response is no
@@ -421,7 +480,7 @@ func claimOne(ctx context.Context, tx db.Tx, lease time.Duration, cl *claim) (st
 		return "", rows.Err()
 	}
 	var raw string
-	if err := rows.Scan(&raw, &cl.marked, &cl.attempts, &cl.orgID, &cl.priority); err != nil {
+	if err := rows.Scan(&raw, &cl.marked, &cl.attempts, &cl.orgID, &cl.priority, &cl.sweep); err != nil {
 		return "", err
 	}
 	if cl.tenant, err = id.Parse(raw); err != nil {
