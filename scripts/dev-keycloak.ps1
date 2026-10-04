@@ -130,9 +130,10 @@ $serviceClientId = Upsert-Client @{
     attributes                = $keyAttributes + @{ "jwks.string" = (Get-ClientJWKS "identity-control") }
 }
 
-# Exactly manage-users and view-users. TDD-identity-control-001 gives this service user creation,
-# attribute write, user search, and user disable, and states that it holds no client management,
-# no realm administration, and no credential read. The set is converged, not appended to: a role
+# Exactly manage-users and view-users, which TDD-identity-control-001 gives this service for user
+# creation, attribute write, user search, and user disable, and manage-organizations and
+# view-organizations, which TDD-identity-control-002 2.0.0 gives it to project Tenants. It holds no
+# client management, no realm administration, and no credential read. The set is converged, not appended to: a role
 # granted by an earlier version of this script is removed.
 $realmManagement = (Invoke-RestMethod -Headers $H `
     -Uri "$kcBase/admin/realms/$realm/clients?clientId=realm-management")[0]
@@ -140,7 +141,7 @@ $serviceAccount = Invoke-RestMethod -Headers $H `
     -Uri "$kcBase/admin/realms/$realm/clients/$serviceClientId/service-account-user"
 $mappingUri = "$kcBase/admin/realms/$realm/users/$($serviceAccount.id)/role-mappings/clients/$($realmManagement.id)"
 
-$wanted = @("manage-users", "view-users")
+$wanted = @("manage-users", "view-users", "manage-organizations", "view-organizations")
 $held = @(Invoke-RestMethod -Headers $H -Uri $mappingUri)
 $extra = @($held | Where-Object { $wanted -notcontains $_.name } | ForEach-Object { @{ id = $_.id; name = $_.name } })
 if ($extra.Count -gt 0) {
@@ -240,7 +241,7 @@ Write-Host "      scnehaux-provider attached"
 
 Write-Host ""
 Write-Host "keycloak ready."
-Write-Host "  service client   identity-control (manage-users, view-users), key $keyDir\identity-control.pem"
+Write-Host "  service client   identity-control (manage-users, view-users, manage-organizations, view-organizations), key $keyDir\identity-control.pem"
 Write-Host "  registration     identity-control-registration (manage-clients, view-clients, view-events), key $keyDir\identity-control-registration.pem"
 Write-Host "  caller client    identity-control-caller (Authorization Code + PKCE S256, scnehaux-provider, L0), key $keyDir\identity-control-caller.pem"
 Write-Host ""

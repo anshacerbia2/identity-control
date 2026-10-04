@@ -439,6 +439,19 @@ func run() error {
 	// goroutine. Every replica schedules it; the reconciler's run claim lets one sweep at a time
 	// through, so the others' ticks are skipped rather than duplicated.
 	go securityCommands.Run(ctx)
+	// The Tenant context converger makes the kernel's Organizations match the desired state the
+	// delivery intake keeps (TDD-identity-control-002 2.0.0), through the Principal credential.
+	converger, err := tenantcontext.NewConverger(pool, kernel, tenantcontext.ConvergerConfig{
+		Realm:          keycloak.Realm(cfg.KeycloakRealm),
+		Interval:       cfg.ProjectionInterval,
+		AttemptTimeout: cfg.ProjectionAttemptTimeout,
+		Lease:          cfg.ProjectionLease,
+		MaxAttempts:    cfg.ProjectionMaxAttempts,
+	}, logger, meter)
+	if err != nil {
+		return fmt.Errorf("tenant context converger: %w", err)
+	}
+	go converger.Run(ctx)
 	go scheduleSweeps(ctx, provisioner, registrar, workloads, reconciler, cfg.RegistrationReconcileInterval, logger)
 	if freshness != nil {
 		go freshness.Poll(ctx, projection, frontier, providerauthority.PollInterval, logger)

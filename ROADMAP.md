@@ -591,12 +591,19 @@ Built in the order TDD-005 §Build Order states, one PR per slice:
 `tenant_id`, its members the Principals with an active Membership. Built in this order, one PR per
 slice:
 
-1. **Desired state.** Membership and Tenant events at `POST /v1/deliveries`, version-guarded into
-   `identity.tenant_desired` and `identity.membership_desired`, each marking its Tenant in
-   `identity.tenant_convergence`. Nothing calls the kernel yet.
-2. **Convergence.** The Organizations Admin API in `internal/keycloak`, and the converger: disable,
-   remove, add, read back. The Principal credential gains `manage-organizations` and
-   `view-organizations`.
+1. ✅ **Desired state.**
+   - Membership and Tenant events arrive at `POST /v1/deliveries`.
+   - They are version-guarded into `identity.tenant_desired` and `identity.membership_desired`.
+   - Each marks its Tenant in `identity.tenant_convergence`.
+2. ✅ **Convergence.**
+   - The Organizations Admin API is in `internal/keycloak`.
+   - The converger in `internal/tenantcontext` claims one Tenant at a time, priority first, under a
+     lease. It finds the Organization by recorded id, then by exact name, and creates it only after
+     both. Then it disables, removes, adds, enables, and reads back.
+   - A failure backs off with full jitter, and is `unresolved` after `IDENTITY_PROJECTION_MAX_ATTEMPTS`.
+   - The Principal credential gains `manage-organizations` and `view-organizations`. A server whose
+     client predates them runs `deploy/dev/add-organization-roles.sh`, and `dev-credential-split.ps1`
+     asserts the split.
 3. **Bootstrap and reconciliation.** These come from the snapshot and the kernel's listing, with
    findings.
 4. **The scope.** The registration authority attaches `organization`, optional, to internal and

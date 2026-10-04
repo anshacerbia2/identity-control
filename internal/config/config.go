@@ -135,6 +135,14 @@ type Config struct {
 	OperationLease   time.Duration
 	ExecutorInterval time.Duration
 
+	// The Tenant context converger (TDD-identity-control-002 2.0.0 §Configuration): how often an
+	// idle converger looks for a marked Tenant, the bound on one Admin API call, how long a claim
+	// holds a Tenant, and the attempts before a Tenant is unresolved.
+	ProjectionInterval       time.Duration
+	ProjectionAttemptTimeout time.Duration
+	ProjectionLease          time.Duration
+	ProjectionMaxAttempts    int
+
 	// AdminSearchMinLength and AdminSearchPageSize bound a provider's Principal search: a query
 	// shorter than the floor is refused, and a page holds at most the size (TDD-identity-control-005
 	// §Read Authorization and Disclosure).
@@ -270,6 +278,17 @@ func Load() (Config, error) {
 	cfg.MaxAttempts = intOr("IDENTITY_SECURITY_MAX_ATTEMPTS", 3, &problems)
 	cfg.OperationLease = durationOr("IDENTITY_SECURITY_OPERATION_LEASE", 10*time.Second, &problems)
 	cfg.ExecutorInterval = durationOr("IDENTITY_SECURITY_EXECUTOR_INTERVAL", time.Second, &problems)
+	cfg.ProjectionInterval = durationOr("IDENTITY_PROJECTION_CONVERGER_INTERVAL", time.Second, &problems)
+	cfg.ProjectionAttemptTimeout = durationOr("IDENTITY_PROJECTION_ATTEMPT_TIMEOUT", 2*time.Second, &problems)
+	cfg.ProjectionLease = durationOr("IDENTITY_PROJECTION_LEASE", 30*time.Second, &problems)
+	cfg.ProjectionMaxAttempts = intOr("IDENTITY_PROJECTION_MAX_ATTEMPTS", 8, &problems)
+	if cfg.ProjectionInterval <= 0 || cfg.ProjectionAttemptTimeout <= 0 || cfg.ProjectionMaxAttempts <= 0 {
+		problems = append(problems, errors.New("the IDENTITY_PROJECTION_* settings must be positive"))
+	} else if cfg.ProjectionLease <= 8*cfg.ProjectionAttemptTimeout {
+		// A convergence reads, may create, enable, list, and reads back: a lease shorter than those
+		// calls lets a second converger claim a Tenant the first is still changing.
+		problems = append(problems, errors.New("IDENTITY_PROJECTION_LEASE must exceed eight IDENTITY_PROJECTION_ATTEMPT_TIMEOUTs"))
+	}
 	switch {
 	case cfg.StepUpMaxAge <= 0 || cfg.CommandBudget <= 0 || cfg.AttemptTimeout <= 0 || cfg.MaxAttempts <= 0 ||
 		cfg.ExecutorInterval <= 0:

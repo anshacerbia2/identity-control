@@ -98,7 +98,8 @@ Then register this service's two clients against it:
 ./scripts/dev-keycloak.ps1
 ```
 
-This registers the service client, with `manage-users` and `view-users` only, and the harness
+This registers the service client, with `manage-users`, `view-users`, `manage-organizations` and
+`view-organizations` only, and the harness
 caller: Authorization Code with PKCE, the provider scope attached, `identity-control-api` in `aud`,
 and a 240-second token. It removes the client-management roles an earlier version granted.
 
