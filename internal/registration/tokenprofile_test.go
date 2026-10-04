@@ -17,9 +17,12 @@ func TestEachProfileHoldsItsScopeSets(t *testing.T) {
 		defaults, options []string
 		governed          bool
 	}{
-		{ProfileConfidential, "internal", []string{"acr", "basic", "scnehaux-internal"}, []string{"scnehaux-profile"}, true},
+		{ProfileConfidential, "internal", []string{"acr", "basic", "scnehaux-internal"},
+			[]string{"organization", "scnehaux-profile"}, true},
+		{ProfileConfidential, "privileged", []string{"acr", "basic", "scnehaux-provider"}, []string{"scnehaux-profile"}, true},
 		{ProfilePublic, "external", []string{"acr", "basic", "scnehaux-external"}, []string{}, true},
-		{ProfileWorkload, "workload", []string{"basic", "scnehaux-workload", "service_account"}, []string{}, true},
+		{ProfilePublic, "internal", []string{"acr", "basic", "scnehaux-internal"}, []string{"organization"}, true},
+		{ProfileWorkload, "workload", []string{"basic", "scnehaux-workload", "service_account"}, []string{"organization"}, true},
 		{ProfileResource, "internal", nil, nil, false},
 	} {
 		got, governed := DesiredScopes(c.profile, c.class)
@@ -53,7 +56,7 @@ func TestScopesConvergeToTheSets(t *testing.T) {
 	// web-origins and offline_access are not declared to the fake, so they are skipped: the realm has no
 	// scope by that name to detach, and the client is left holding the identifier.
 	want := ScopeSets{Default: []string{"acr", "basic", "scnehaux-internal", "web-origins"},
-		Optional: []string{"offline_access", "scnehaux-profile"}}
+		Optional: []string{"offline_access", "organization", "scnehaux-profile"}}
 	if !SameScopes(live, want) {
 		t.Errorf("after converging: %+v, want %+v", live, want)
 	}
