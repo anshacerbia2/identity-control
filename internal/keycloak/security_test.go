@@ -46,8 +46,9 @@ func TestSecurityStateIsReadFromTheUserSubresources(t *testing.T) {
 	if err != nil || len(credentials) != 3 || credentials[0].ID != "k1" || credentials[1].Label != "laptop" {
 		t.Fatalf("credentials: %+v, %v", credentials, err)
 	}
-	if r := credentials[2].Remaining; r == nil || *r != 11 || credentials[1].Remaining != nil {
-		t.Errorf("remaining recovery codes: %v; a key's: %v", r, credentials[1].Remaining)
+	if r, n := credentials[2].Remaining, credentials[2].Total; r == nil || *r != 11 || n == nil || *n != 12 ||
+		credentials[1].Remaining != nil {
+		t.Errorf("recovery codes: %v of %v; a key's: %v", r, n, credentials[1].Remaining)
 	}
 	for _, c := range credentials {
 		if strings.Contains(c.ID+c.Type+c.Label, "SECRET") {

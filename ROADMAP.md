@@ -580,7 +580,7 @@ Built in the order TDD-005 §Build Order states, one PR per slice:
 - ✅ **4b · WebAuthn enrollment** (TDD-005 2.7.0). `POST /v1/me/authenticators:enroll` `{"type":"webauthn"}` returns `webauthn-register`, at the same level as a TOTP. identity-kernel's `scnehaux-browser-v2` accepts either factor at `aal2`, and its compat suite registers a key through that action (TDD-identity-kernel-001 1.11.0).
 - ✅ **Recovery** (TDD-005 2.8.0, ADR-IAM-005).
   - `{"type":"recovery-codes"}` returns `CONFIGURE_RECOVERY_AUTHN_CODES`, a new set of codes.
-  - Authenticator listings carry `remaining_codes` for a set.
+  - Authenticator listings carry `remaining_codes` and `total_codes` for a set.
   - The assurance floor no longer refuses to revoke the last second factor of a Principal the kernel has disabled. That is assisted recovery's revocation step.
   - `scripts/dev-token.ps1` keeps the recovery codes the kernel issues with an enrolled TOTP in its file, never printed.
   - `deploy-dev` can be run by hand against an identity-kernel branch (`kernel_ref`).

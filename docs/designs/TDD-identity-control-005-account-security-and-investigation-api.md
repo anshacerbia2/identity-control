@@ -300,7 +300,8 @@ POST  /v1/me/authenticators:enroll          {"type":"recovery-codes"}  ->  {"act
 - **Not a second factor here.** The credential type is `recovery-authn-codes`. It is not counted by
   the assurance floor, nor by the last-authenticator guard: `ADR-IAM-005 §5.2` makes the codes
   recovery, not a factor a provider keeps. A person may remove their set, as any second factor.
-- **How many are left.** Every authenticator listing carries `remaining_codes` for a set:
+- **How many are left.** Every authenticator listing carries `remaining_codes` and `total_codes` for
+  a set:
   `GET /v1/me/authenticators` and `GET /v1/principals/{principal_id}/authenticators`. It comes from the
   metadata the kernel keeps beside the hashes, `{"remaining":11,"total":12}`. The kernel never lists
   the codes or their hashes.
@@ -614,7 +615,8 @@ approximate location. The kernel's session record holds neither, and deriving a 
 would need a geolocation source this estate does not have, so both are left out rather
 than guessed. Authenticator responses expose type, label, creation time,
 last use, and policy-relevant factor class, never credential data. The one exception, since 2.8.0,
-is how many codes of a recovery-code set remain, which is a count, not the codes (§Recovery Codes).
+is how many codes of a recovery-code set remain and how many it began with: counts, not the codes
+(§Recovery Codes).
 
 ### Durable Command Execution
 
