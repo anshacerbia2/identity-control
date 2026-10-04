@@ -354,10 +354,12 @@ func (c *Converger) organization(ctx context.Context, orgID, name string, enable
 			org, err = c.kernel.GetOrganization(ctx, c.cfg.Realm, orgID)
 			return err
 		})
-		if err == nil {
+		// The recorded identifier is trusted only for the Organization that carries this Tenant's
+		// name: one that names another Tenant is not this Tenant's, and is never changed for it.
+		if err == nil && org.Name == name {
 			return org, false, nil
 		}
-		if !errors.Is(err, keycloak.ErrNotFound) {
+		if err != nil && !errors.Is(err, keycloak.ErrNotFound) {
 			return keycloak.Organization{ID: orgID}, false, fmt.Errorf("reading the Organization: %w", err)
 		}
 	}
