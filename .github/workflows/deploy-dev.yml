@@ -183,6 +183,30 @@ jobs:
           export IDENTITY_OPERATOR_TOTP_FILE="$RUNNER_TEMP/operator-totp.json"
           pwsh -NoProfile -File scripts/dev-smoke.ps1
 
+      # TDD-identity-control-002 2.3.0, ADR-IAM-006: the Tenant context end to end against this
+      # kernel. The script stands in for Organization Control: it registers a delivering workload, the
+      # service is restarted to admit it, and Membership and Tenant events posted to /v1/deliveries
+      # must reach a token's tenant_id, and a revocation must refuse that Tenant's refresh.
+      - name: the Tenant context end to end
+        run: |
+          set -o pipefail
+          set -a; . deploy/dev/.env; set +a
+          export IDENTITY_API_URL=http://127.0.0.1:8082 KC_BASE_URL=https://localhost
+          export IDENTITY_OPERATOR_TOTP_FILE="$RUNNER_TEMP/operator-totp.json"
+          state="$RUNNER_TEMP/tenant-proof/state.json"
+          mkdir -p "$(dirname "$state")"
+          line="$(pwsh -NoProfile -File scripts/dev-tenant-proof.ps1 -Phase setup -State "$state" | tail -n 1)"
+          principal="${line#DELIVERY_PRINCIPAL_ID=}"
+          [ -n "$principal" ] && [ "$principal" != "$line" ] || { echo "::error::the setup named no delivering workload"; exit 1; }
+          sed -i '/^IDENTITY_DELIVERY_PRINCIPAL_ID=/d' deploy/dev/.env
+          echo "IDENTITY_DELIVERY_PRINCIPAL_ID=$principal" >> deploy/dev/.env
+          (cd deploy/dev && docker compose up -d identity-control)
+          for i in $(seq 1 60); do
+            curl -fsS "$IDENTITY_API_URL/readyz" >/dev/null 2>&1 && break
+            sleep 1
+          done
+          pwsh -NoProfile -File scripts/dev-tenant-proof.ps1 -Phase prove -State "$state"
+
       # identity-control ROADMAP §Proof B: both drift scenarios, a drift exception and its expiry,
       # and Keycloak stopped then started, against this live kernel. Each convergence time lands in
       # the job summary. Last, because it stops the kernel's Keycloak.

@@ -622,9 +622,16 @@ slice:
      the lower mark, or bootstraps provider authority alone while the registration does not
      subscribe. `docs/run.md` and organization-control's dev README carry the registration with
      the new types.
-   - **5b.** A stack check:
-     - a delivered Membership grant gives a token for its Tenant a `tenant_id`;
-     - a revocation makes its refresh fail.
+   - ✅ **5b.** `deploy-dev` step "the Tenant context end to end" (`scripts/dev-tenant-proof.ps1`)
+     stands in for Organization Control. It registers a delivering workload and an internal client,
+     and posts the events to `/v1/deliveries`. Against the live kernel:
+     - the grant gives a token asked for `organization:<tenant>` a flat `tenant_id`;
+     - the revocation leaves a new sign-in without it, and refuses the earlier refresh with
+       `invalid_grant`.
+
+`ADR-IAM-006`'s Tenant context is built. **Next:**
+- foundation-platform `verify` step 8, the current-state check (STD-IAM-002 1.6.0);
+- the BFF asks for a Tenant at sign-in (identity-experience).
 
 ## Waiting on the Keycloak proof-of-concept
 

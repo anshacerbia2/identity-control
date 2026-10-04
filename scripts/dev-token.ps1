@@ -138,7 +138,12 @@ function Get-ScnehauxToken {
         # absent, then signs in at aal2 with it. For an account with no TOTP yet, such as a CI stack's
         # bootstrap operator, enrolling needs no -Otp: binding a first second factor takes the
         # account's highest level, which is aal1 (NIST SP 800-63B-4 4.1.2.1).
-        [string] $OperatorTotpFile = ""
+        [string] $OperatorTotpFile = "",
+        # The scope asked for. A client holding the kernel's organization scope asks for one Tenant with
+        # "openid organization:<tenant_id>" (ADR-IAM-006).
+        [string] $Scope = "openid",
+        # Returns the whole token response, the refresh token among them, rather than the access token.
+        [switch] $FullResponse
     )
 
     if ($OperatorTotpFile) {
@@ -178,7 +183,7 @@ function Get-ScnehauxToken {
     $authorize = "$KcBase/realms/$Realm/protocol/openid-connect/auth" +
         "?client_id=$([uri]::EscapeDataString($ClientId))" +
         "&response_type=code" +
-        "&scope=openid" +
+        "&scope=$([uri]::EscapeDataString($Scope))" +
         "&redirect_uri=$([uri]::EscapeDataString($RedirectUri))" +
         "&state=$state" +
         "&code_challenge=$challenge" +
@@ -356,5 +361,6 @@ function Get-ScnehauxToken {
             client_assertion      = $assertion
             code_verifier         = $verifier
         }
+    if ($FullResponse) { return $token }
     return $token.access_token
 }
