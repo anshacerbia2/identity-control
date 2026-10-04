@@ -1,4 +1,4 @@
-h1:16qpzX8KlwCn8hk22QZEZVSPocW/5LUGJyT83Xl1RW0=
+h1:/tvY+diTXPSzVrDUW8NY7kz4s+8h/NsYKnHPuSTw4wc=
 20260817151332_baseline_identity_schema.sql h1:GysIRGAJncY8eQTmFIhc3g8FTeFq8dGu9wmdY4kefVQ=
 20260817201931_add_creation_payload.sql h1:ejgDHTQ30FK0/adjz26CYPnLsAJyodOxBHvTI/GOd8M=
 20260820185807_add_bootstrap_ceremony.sql h1:0tiQsqClxrSDiz1Jl+vd6VDStnO/nObLoeKIHBWsX3M=
@@ -22,3 +22,4 @@ h1:16qpzX8KlwCn8hk22QZEZVSPocW/5LUGJyT83Xl1RW0=
 20261003200000_add_security_operation.sql h1:yBRBFOoaW6cRXzdFJvoDWpiBjLA+N3NgglUneTznoD4=
 20261003220000_add_self_operations.sql h1:ajBrhEMZ0jrqIV9Pqsx01HlvqE83RbUwlIfYUzMtRKw=
 20261004000000_add_operation_redrive.sql h1:UP1vg/EtnL5yXPlGPbEufdOrJ41cfxTr5awDSq/hqPI=
+20261004120000_add_tenant_context_projection.sql h1:n4tAYhHMxUiMblHYfc2+0K+PsSiloyQuxXFGRxfmfGU=

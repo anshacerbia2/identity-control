@@ -17,7 +17,7 @@ import (
 	"github.com/anshacerbia2/foundation-platform/outbox"
 	"github.com/anshacerbia2/foundation-platform/verify"
 
-	"github.com/anshacerbia2/identity-control/internal/providerauthority"
+	"github.com/anshacerbia2/identity-control/internal/delivery"
 )
 
 // maxDeliveryBody bounds one delivery. An event carries one grant's state, a few hundred bytes.
@@ -48,9 +48,10 @@ func DeliveryRequirement(organization id.UUID) verify.ClaimRequirement {
 	})
 }
 
-// Applier applies one delivered event: the provider authority projection.
+// Applier applies one delivered event: the router to the provider authority and Tenant context
+// projections.
 type Applier interface {
-	Apply(ctx context.Context, envelope event.Envelope) (providerauthority.Outcome, error)
+	Apply(ctx context.Context, envelope event.Envelope) (delivery.Outcome, error)
 }
 
 // deliveryIntake verifies the delivering workload's token, decodes the envelope, and applies it.
@@ -86,7 +87,7 @@ func deliveryIntake(verifier TokenVerifier, applier Applier) http.Handler {
 
 		outcome, err := applier.Apply(r.Context(), envelope)
 		switch {
-		case errors.Is(err, providerauthority.ErrUnknownType), errors.Is(err, providerauthority.ErrMalformed):
+		case errors.Is(err, delivery.ErrPoison):
 			// Poison: redelivering an event this projection cannot apply fails identically forever.
 			fhttp.Problem(w, r, fhttp.ValidationFailed, err.Error())
 			return

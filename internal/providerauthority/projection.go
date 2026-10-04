@@ -17,6 +17,8 @@ import (
 	"github.com/anshacerbia2/foundation-platform/event"
 	"github.com/anshacerbia2/foundation-platform/id"
 	"github.com/anshacerbia2/foundation-platform/inbox"
+
+	"github.com/anshacerbia2/identity-control/internal/delivery"
 )
 
 // Consumer is this service's name as an Organization projection consumer: the inbox key, and the
@@ -40,10 +42,12 @@ var EventTypes = []event.Type{EventGranted, EventActivated, EventEnded, EventRev
 var (
 	// ErrUnknownType refuses an event this projection does not apply. Organization delivers only
 	// the subscribed types, so one arriving here is a producer defect, and poison.
-	ErrUnknownType = errors.New("providerauthority: the event type is not one this projection applies")
+	ErrUnknownType = fmt.Errorf("providerauthority: the event type is not one this projection applies: %w",
+		delivery.ErrPoison)
 
 	// ErrMalformed refuses a payload this projection cannot read, or one naming another scope.
-	ErrMalformed = errors.New("providerauthority: the payload is not a provider:identity-control grant")
+	ErrMalformed = fmt.Errorf("providerauthority: the payload is not a provider:identity-control grant: %w",
+		delivery.ErrPoison)
 )
 
 // Transactor is the transaction source: foundation-platform's *db.Pool.
@@ -89,17 +93,7 @@ func (g Grant) validate() error {
 }
 
 // Outcome is what applying one delivery did.
-type Outcome struct {
-	// Duplicate is a delivery the inbox guard had already registered: applied before.
-	Duplicate bool
-	// Superseded is an event whose version is not above the one held: discarded.
-	Superseded bool
-}
-
-// Applied reports whether this consumer holds the event's effect, which is when the delivery may
-// carry the application receipt marker (ADR-GLB-016 §5.4). A duplicate does: the guard found it
-// applied. A superseded event does not: it was discarded.
-func (o Outcome) Applied() bool { return !o.Superseded }
+type Outcome = delivery.Outcome
 
 // Projection applies provider grant events and snapshots.
 type Projection struct {
@@ -132,9 +126,10 @@ SET principal_id       = excluded.principal_id,
     applied_at         = excluded.applied_at
 WHERE identity.provider_grant.grant_version < excluded.grant_version`
 
-// advanceAppliedStatement records the highest stream position applied, for progress reports. No
-// row is no bootstrap yet, and nothing is recorded until there is one.
-const advanceAppliedStatement = `UPDATE identity.provider_projection
+// AdvanceAppliedStatement records the highest stream position applied, for progress reports. No
+// row is no bootstrap yet, and nothing is recorded until there is one. The position is this
+// consumer's, whichever projection applied the event, so the Tenant context advances it too.
+const AdvanceAppliedStatement = `UPDATE identity.provider_projection
 SET applied_mark = greatest(applied_mark, $1)
 WHERE id = 1`
 
@@ -171,7 +166,7 @@ func (p *Projection) Apply(ctx context.Context, envelope event.Envelope) (Outcom
 			outcome.Superseded = true
 			return nil
 		}
-		if _, err := tx.Exec(ctx, advanceAppliedStatement, envelope.StreamPosition); err != nil {
+		if _, err := tx.Exec(ctx, AdvanceAppliedStatement, envelope.StreamPosition); err != nil {
 			return fmt.Errorf("providerauthority: recording the applied position: %w", err)
 		}
 		return nil
