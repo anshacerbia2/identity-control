@@ -167,9 +167,13 @@ function Sign-InFor([string] $tenant) {
     }
 }
 
+# Tenant-Of is the token's tenant_id, or $null when it carries none. dev-token.ps1 runs under strict
+# mode, where reading an absent property throws, so presence is checked first.
 function Tenant-Of($response) {
     if ($null -eq $response) { return $null }
-    return (Decode-Claims $response.access_token).tenant_id
+    $claims = Decode-Claims $response.access_token
+    if ($claims.PSObject.Properties.Name -notcontains 'tenant_id') { return $null }
+    return $claims.tenant_id
 }
 
 $tenant = New-UuidV7
