@@ -80,12 +80,15 @@ function Get-TotpCode([string] $Secret, [long] $Step) {
     return ($value % 1000000).ToString("000000")
 }
 
-# Get-HiddenInputs reads a form's hidden fields, which the kernel carries its state in.
+# Get-HiddenInputs reads a form's hidden fields, which the kernel carries its state in. A page that
+# offers another factor also holds the separate "Try another way" form; its tryAnotherWay field is
+# not the page's own, and a browser submitting the page's form does not send it.
 function Get-HiddenInputs([string] $Content) {
     $fields = [ordered]@{}
     foreach ($element in [regex]::Matches($Content, '<input[^>]*type="hidden"[^>]*>')) {
         if ($element.Value -match 'name="([^"]+)"') {
             $name = $Matches[1]
+            if ($name -eq "tryAnotherWay") { continue }
             $value = if ($element.Value -match 'value="([^"]*)"') { [System.Web.HttpUtility]::HtmlDecode($Matches[1]) } else { "" }
             $fields[$name] = $value
         }
