@@ -1,18 +1,23 @@
-// Command identity-provider-bootstrap builds the provider authority projection from Organization
-// Control's snapshot (TDD-identity-control-006 §Bootstrap).
+// Command identity-provider-bootstrap builds this consumer's two projections from Organization
+// Control's snapshots: provider authority (TDD-identity-control-006 §Bootstrap) and the Tenant context
+// (TDD-identity-control-002 2.3.0 §Reconciliation).
 //
-// It reads the snapshot page by page under one mark, replaces the projection in one transaction,
-// and then records the mark with Organization Control, which is what permits this service's progress
-// reports. Until it has run, the projection is never fresh and no activation is honored.
+// It reads each snapshot page by page under one mark, applies it, and then records the lower of the
+// two marks with Organization Control, which is what permits this service's progress reports: the
+// recorded position must not claim more than either snapshot represents. Until it has run, the
+// provider projection is never fresh and no activation is honored.
 //
-// It is safe to run again. The snapshot is applied by version, so a rerun moves no grant backwards,
-// and a grant held locally that the snapshot omits was revoked in Organization's record.
+// A registration that does not yet subscribe to the Membership and Tenant types is refused the
+// Organization snapshot. The provider projection is then bootstrapped alone, and the command says so.
+//
+// It is safe to run again. Each snapshot is applied by version, so a rerun moves nothing backwards.
 //
 //	identity-provider-bootstrap
 package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -27,6 +32,7 @@ import (
 	"github.com/anshacerbia2/identity-control/internal/config"
 	"github.com/anshacerbia2/identity-control/internal/organization"
 	"github.com/anshacerbia2/identity-control/internal/providerauthority"
+	"github.com/anshacerbia2/identity-control/internal/tenantcontext"
 )
 
 func main() {
@@ -78,18 +84,42 @@ func run(timeout time.Duration) error {
 	if err := projection.ReplaceFromSnapshot(ctx, snapshot.Mark, snapshot.Grants); err != nil {
 		return err
 	}
-	// Recorded after the local commit, so Organization never holds a mark this service did not
-	// apply. A failure here leaves the projection built and the command safe to rerun.
-	if err := client.RecordBootstrap(ctx, snapshot.Mark); err != nil {
+
+	mark, tenantRows := snapshot.Mark, -1
+	orgMark, rows, err := client.OrganizationSnapshot(ctx)
+	switch {
+	case errors.Is(err, organization.ErrRefused):
+		logger.WarnContext(ctx, "the Organization snapshot was refused: this consumer's registration does not "+
+			"subscribe to the Membership and Tenant types yet, so the Tenant context is not bootstrapped")
+	case err != nil:
+		return fmt.Errorf("organization snapshot: %w", err)
+	default:
+		desired, err := tenantcontext.NewDesired(pool)
+		if err != nil {
+			return err
+		}
+		if err := desired.ApplySnapshot(ctx, rows); err != nil {
+			return fmt.Errorf("applying the Organization snapshot: %w", err)
+		}
+		mark, tenantRows = min(mark, orgMark), len(rows)
+	}
+
+	// Recorded after the local commits, so Organization never holds a mark this service did not
+	// apply. A failure here leaves the projections built and the command safe to rerun.
+	if err := client.RecordBootstrap(ctx, mark); err != nil {
 		return fmt.Errorf("recording the bootstrap mark with Organization Control: %w", err)
 	}
 
-	logger.InfoContext(ctx, "provider authority projection bootstrapped",
-		slog.Int64("mark", snapshot.Mark),
-		slog.Int("grants", len(snapshot.Grants)))
-	fmt.Printf("\nprovider authority projection bootstrapped\n")
-	fmt.Printf("  mark    %d\n", snapshot.Mark)
-	fmt.Printf("  grants  %d\n", len(snapshot.Grants))
+	logger.InfoContext(ctx, "projections bootstrapped", slog.Int64("mark", mark),
+		slog.Int("grants", len(snapshot.Grants)), slog.Int("tenant_context_rows", tenantRows))
+	fmt.Printf("\nprojections bootstrapped\n")
+	fmt.Printf("  mark            %d\n", mark)
+	fmt.Printf("  grants          %d\n", len(snapshot.Grants))
+	if tenantRows < 0 {
+		fmt.Printf("  tenant context  not bootstrapped: the registration does not subscribe to it\n")
+	} else {
+		fmt.Printf("  memberships     %d\n", tenantRows)
+	}
 	return nil
 }
 
