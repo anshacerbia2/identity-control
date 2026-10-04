@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-006
   title: Provider Authority from Organization's Records
   owner: Core Platform Team
-  version: 1.2.0
+  version: 1.2.1
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-10-02
-  last_reviewed: 2026-10-02
+  last_reviewed: 2026-10-04
   parent_sad: SAD-001
 ---
 
@@ -205,6 +205,9 @@ in one transaction:
    locally and absent from the snapshot is marked revoked, because the snapshot carries every
    unrevoked grant.
 3. Records the mark with `POST /v1/projections/consumers/identity-control/bootstrap`.
+
+Since `TDD-identity-control-002` 2.3.0 the same command also bootstraps the Tenant context. It records
+the lower of the two snapshots' marks, so the recorded position claims no more than either represents.
 
 The consumer is registered first, so deliveries are owed from the registration's commit and every
 event either committed before it and is in the snapshot, or is delivered

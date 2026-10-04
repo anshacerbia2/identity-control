@@ -130,6 +130,9 @@ func (c *Client) call(ctx context.Context, method, path string, body, out any) e
 	if response.StatusCode == http.StatusUnauthorized {
 		c.tokens.Invalidate()
 	}
+	if response.StatusCode == http.StatusForbidden {
+		return fmt.Errorf("organization: %s %s answered 403: %w", method, path, ErrRefused)
+	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		// The body is a problem document from Organization Control, naming no secret; its title is
 		// enough for an operator, and the status says which way to look.
@@ -143,6 +146,10 @@ func (c *Client) call(ctx context.Context, method, path string, body, out any) e
 	}
 	return nil
 }
+
+// ErrRefused is a request Organization Control answered 403: this consumer is not permitted it, such
+// as a snapshot of event types its registration does not subscribe to.
+var ErrRefused = errors.New("organization: refused")
 
 // Snapshot is the provider authority snapshot, every page under one mark.
 type Snapshot struct {

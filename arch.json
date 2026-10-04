@@ -100,7 +100,8 @@
     "cmd/identity-provider-bootstrap": [
       "internal/config",
       "internal/organization",
-      "internal/providerauthority"
+      "internal/providerauthority",
+      "internal/tenantcontext"
     ],
     "_comment_investigation": [
       "internal/investigation serves a provider's reads of another Principal and records each",

@@ -338,7 +338,12 @@ bootstrap-provider`, as Organization Control's README §Driving the service by h
   {"consumer_id":"identity-control","principal_id":"<identity-control-workload principal_id>",
    "projection_version":"v1","max_accepted_age_seconds":60,"stale_behavior":"fail_closed",
    "event_types":["com.scnehaux.organization.provider.lifecycle.granted","com.scnehaux.organization.provider.lifecycle.activated",
-                  "com.scnehaux.organization.provider.security.ended","com.scnehaux.organization.provider.security.revoked"]}
+                  "com.scnehaux.organization.provider.security.ended","com.scnehaux.organization.provider.security.revoked",
+                  "com.scnehaux.organization.membership.lifecycle.granted","com.scnehaux.organization.membership.lifecycle.restored",
+                  "com.scnehaux.organization.membership.security.suspended","com.scnehaux.organization.membership.security.revoked",
+                  "com.scnehaux.organization.tenant.lifecycle.activated","com.scnehaux.organization.tenant.lifecycle.retired",
+                  "com.scnehaux.organization.tenant.security.suspended","com.scnehaux.organization.tenant.security.restored",
+                  "com.scnehaux.organization.projection.repair.reconciled"]}
   ```
 
   `make api M=POST P=/v1/projections/consumers B=consumer.json KEY=local-consumer-ic`
@@ -374,7 +379,14 @@ IDENTITY_WORKLOAD_TOKEN_URL=http://127.0.0.1:8081/realms/scnehaux/protocol/openi
 IDENTITY_WORKLOAD_AUDIENCE=http://127.0.0.1:8081/realms/scnehaux
 ```
 
-Then build the projection from the snapshot: `make provider-bootstrap`.
+Then build the projections from the snapshots: `make provider-bootstrap`. It bootstraps provider
+authority and, when the registration subscribes to the Membership and Tenant types, the Tenant
+context, and records the lower of the two marks (TDD-identity-control-002 2.3.0).
+
+**A server registered before the Tenant context** re-registers with the types above, then runs
+`provider-bootstrap` again. Re-registering with other types clears the recorded mark
+(`TDD-organization-control-002` §Consumer Registry), and progress reports are refused until a
+bootstrap records a new one.
 
 ### 8.6 What you should see
 

@@ -617,8 +617,14 @@ slice:
 4. ✅ **The scope** (`TDD-identity-control-003` 1.28.0). The registration authority attaches
    `organization`, optional, to `internal` and `workload` clients, and the reconciler holds it there.
    A client registered before it is repaired on the next sweep.
-5. **On the development server.** The registration's event types, and a stack check that a revoked
-   Membership's refresh is refused.
+5. **On the development server.**
+   - ✅ **5a** (TDD-002 2.3.0). `provider-bootstrap` also takes the Organization snapshot and records
+     the lower mark, or bootstraps provider authority alone while the registration does not
+     subscribe. `docs/run.md` and organization-control's dev README carry the registration with
+     the new types.
+   - **5b.** A stack check:
+     - a delivered Membership grant gives a token for its Tenant a `tenant_id`;
+     - a revocation makes its refresh fail.
 
 ## Waiting on the Keycloak proof-of-concept
 

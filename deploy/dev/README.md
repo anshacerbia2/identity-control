@@ -84,7 +84,7 @@ Each is a service behind a profile that runs the migrate image, and never starts
 | Task | Run | When |
 | :-- | :-- | :-- |
 | `bootstrap` | `./bootstrap.sh "<operator>" "<reason>"` the first time; to resume, `docker compose run --rm bootstrap -operator … -resume …` | once per Control Database (ADR-IAM-001 §5.11) |
-| `provider-bootstrap` | `docker compose run --rm provider-bootstrap` | once Organization Control serves this consumer; organization-control's `deploy/dev/README.md` says when |
+| `provider-bootstrap` | `docker compose run --rm provider-bootstrap` | once Organization Control serves this consumer, and again after its registration changes; organization-control's `deploy/dev/README.md` says when. It bootstraps provider authority and the Tenant context, and records the lower mark |
 
 ## Wiring to other services
 

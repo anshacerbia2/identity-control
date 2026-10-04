@@ -6,6 +6,7 @@ package organization_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -262,5 +263,15 @@ func TestTheOrganizationSnapshotIsReadUnderOneMark(t *testing.T) {
 	}
 	if len(s.received) != 2 || s.received[1].body["mark"] != float64(41) {
 		t.Errorf("the second page was not read under the first page's mark: %+v", s.received)
+	}
+}
+
+// A 403 is ErrRefused, which the bootstrap reads as a registration that does not subscribe yet.
+func TestARefusalIsTold(t *testing.T) {
+	c, _, _ := client(t, func(w http.ResponseWriter, r request) {
+		w.WriteHeader(http.StatusForbidden)
+	})
+	if _, _, err := c.OrganizationSnapshot(context.Background()); !errors.Is(err, organization.ErrRefused) {
+		t.Errorf("a 403: %v, want ErrRefused", err)
 	}
 }
