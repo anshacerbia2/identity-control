@@ -11,7 +11,7 @@ Week numbers are relative to the first build week, not calendar dates.
 | TDD | Subject | Status |
 | :-- | :-- | :-- |
 | `TDD-identity-control-001` | Canonical Principal identifier and creation path | approved; every proof-of-concept question it depended on is answered |
-| `TDD-identity-control-002` | Keycloak context projection, durable retry, session removal | approved; implementation-gated by PoC |
+| `TDD-identity-control-002` | Tenant context projection into the kernel's Organizations, and its reconciliation | approved 2.0.0 (ADR-IAM-006); built in slices, below |
 | `TDD-identity-control-003` | Protocol client and protected-resource registration | approved |
 | `TDD-identity-control-004` | Workload and bounded agent identity | approved |
 | `TDD-identity-control-005` | Account-security and investigation API mediation | approved |
@@ -585,6 +585,25 @@ Built in the order TDD-005 §Build Order states, one PR per slice:
   - `scripts/dev-token.ps1` keeps the recovery codes the kernel issues with an enrolled TOTP in its file, never printed.
   - `deploy-dev` can be run by hand against an identity-kernel branch (`kernel_ref`).
 
+## Tenant context projection (TDD-identity-control-002 2.0.0)
+
+`ADR-IAM-006` settled the representation: a Keycloak Organization per Tenant, its alias the
+`tenant_id`, its members the Principals with an active Membership. Built in this order, one PR per
+slice:
+
+1. **Desired state.** Membership and Tenant events at `POST /v1/deliveries`, version-guarded into
+   `identity.tenant_desired` and `identity.membership_desired`, each marking its Tenant in
+   `identity.tenant_convergence`. Nothing calls the kernel yet.
+2. **Convergence.** The Organizations Admin API in `internal/keycloak`, and the converger: disable,
+   remove, add, read back. The Principal credential gains `manage-organizations` and
+   `view-organizations`.
+3. **Bootstrap and reconciliation.** These come from the snapshot and the kernel's listing, with
+   findings.
+4. **The scope.** The registration authority attaches `organization`, optional, to internal and
+   workload clients (`TDD-identity-control-003`).
+5. **On the development server.** The registration's event types, and a stack check that a revoked
+   Membership's refresh is refused.
+
 ## Waiting on the Keycloak proof-of-concept
 
 Each item names the question that unblocks it. All of them are adapters, which is why
@@ -594,8 +613,8 @@ none of them blocks the work above.
 | :-- | :-- |
 | ~~`KeycloakAdminClient` create and search~~ | ✅ Unblocked. Attribute search is exact, case-insensitive, and pages without loss (`identity-kernel` question 2). `FindByPrincipalID` now reads every page |
 | ~~Pending-state recovery strategy~~ | ✅ Unblocked by the same answer. Recovery branches on the count as designed |
-| `KeycloakProjector` | Projected context representation — Organizations, Groups, or user attributes |
-| `SessionContainer` | Session removal granularity — per Principal and Tenant context, or per Principal only |
+| ~~`KeycloakProjector`~~ | ✅ Answered by `ADR-IAM-006`: a Keycloak Organization per Tenant (identity-kernel compat run 37207537199). Built as `tenantcontext`, TDD-002 2.0.0 |
+| ~~`SessionContainer`~~ | ✅ Answered: not needed for a revocation. The kernel refuses that Tenant's refresh and leaves the others alone (`ADR-IAM-006 §5.5`) |
 
 The remaining proof-of-concept questions — protocol mapper coverage, attribute
 immutability, issuer URI form, context switch mechanism — are answered in
