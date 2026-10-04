@@ -5,8 +5,10 @@
 #
 #   identity-control         the service's Admin API client. A service account holding
 #                            realm-management manage-users and view-users: create, read, search,
-#                            write attributes, disable. No client management, no realm
-#                            administration, no credential read -- TDD-identity-control-001.
+#                            write attributes, disable -- TDD-identity-control-001. And
+#                            manage-organizations and view-organizations, to project Tenants as
+#                            Organizations -- TDD-identity-control-002 2.0.0. No client management,
+#                            no realm administration, no credential read.
 #
 #   identity-control-caller  development only: how a person obtains a provider-scope token to call
 #                            the API. Authorization Code with PKCE S256 and no password grant
@@ -74,7 +76,8 @@ kc create clients -r "$realm" \
 	-s serviceAccountsEnabled=true -s standardFlowEnabled=false \
 	-s directAccessGrantsEnabled=false -s implicitFlowEnabled=false >/dev/null
 kc add-roles -r "$realm" --uusername service-account-identity-control \
-	--cclientid realm-management --rolename manage-users --rolename view-users
+	--cclientid realm-management --rolename manage-users --rolename view-users \
+	--rolename manage-organizations --rolename view-organizations
 
 caller="$(kc create clients -r "$realm" -i \
 	-s clientId=identity-control-caller -s enabled=true -s publicClient=false \

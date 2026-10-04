@@ -81,6 +81,13 @@ type Client struct {
 	// FailContainment, when set, is returned by EnableUser, LogoutUser and DeleteCredential.
 	FailContainment error
 
+	// FailOrganizations, when set, is returned by every Organizations call. AmbiguousOrganizationCreate
+	// makes CreateOrganization record the Organization and still answer keycloak.ErrAmbiguous, as a
+	// response lost after the kernel committed.
+	FailOrganizations           error
+	AmbiguousOrganizationCreate bool
+	organizations               map[string]*organization
+
 	users    map[keycloak.UserID]stored
 	security map[keycloak.UserID]Security
 	nextID   int
@@ -98,6 +105,9 @@ type Calls struct {
 	Logout            int
 	DeleteCredential  int
 	DeleteSession     int
+	// CreateOrganization counts Organizations created, so a test can assert that a lost response
+	// was followed by a lookup rather than a second create.
+	CreateOrganization int
 }
 
 type stored struct {

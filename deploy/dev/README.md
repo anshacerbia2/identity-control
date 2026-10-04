@@ -226,7 +226,9 @@ go run ./cmd/identity-control
   `realm/`, applied by its `realm-apply`. `create-kernel-clients.sh` only registers this service's
   two clients.
 - **It does not register other applications' clients yet.** The Admin API client holds
-  `manage-users` and `view-users` only, as TDD-identity-control-001 states. Client registration
+  `manage-users` and `view-users`, as TDD-identity-control-001 states, and `manage-organizations` and
+  `view-organizations`, which TDD-identity-control-002 2.0.0 adds to project Tenants. A server whose
+  client predates them runs `./add-organization-roles.sh` once. Client registration
   (TDD-identity-control-003) has its tables and its own credential, `identity-control-registration`,
   holding `manage-clients`, `view-clients` and `view-events`. The registration drift sweep uses it,
   and the service refuses to start without it.

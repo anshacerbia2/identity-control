@@ -79,8 +79,10 @@ Expect "registration reads clients"          200 (Get-Status Get "/clients?max=1
 Expect "registration reads admin events"     200 (Get-Status Get "/admin-events?max=1" $registration)
 Expect "registration cannot read users"      403 (Get-Status Get "/users?max=1" $registration)
 Expect "registration cannot create a user"   403 (Get-Status Post "/users" $registration $probeUser)
+Expect "registration cannot read organizations" 403 (Get-Status Get "/organizations?max=1" $registration)
 
 Expect "users path reads users"              200 (Get-Status Get "/users?max=1" $users)
+Expect "users path reads organizations"      200 (Get-Status Get "/organizations?max=1" $users)
 Expect "users path cannot read clients"      403 (Get-Status Get "/clients?max=1" $users)
 Expect "users path cannot create a client"   403 (Get-Status Post "/clients" $users $probeClient)
 Expect "users path cannot read admin events" 403 (Get-Status Get "/admin-events?max=1" $users)

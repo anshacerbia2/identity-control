@@ -82,7 +82,12 @@
       "envelope are foundation-platform's."
     ],
     "internal/providerauthority": ["internal/delivery"],
-    "internal/tenantcontext": ["internal/delivery", "internal/providerauthority"],
+    "internal/tenantcontext": [
+      "internal/delivery",
+      "internal/keycloak",
+      "internal/keycloak/keycloakfake",
+      "internal/providerauthority"
+    ],
 
     "_comment_organization": [
       "internal/organization is this service's client of Organization Control as the provider",
