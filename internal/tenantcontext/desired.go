@@ -19,7 +19,6 @@ import (
 	"github.com/anshacerbia2/foundation-platform/event"
 	"github.com/anshacerbia2/foundation-platform/id"
 	"github.com/anshacerbia2/foundation-platform/inbox"
-	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/anshacerbia2/identity-control/internal/delivery"
 	"github.com/anshacerbia2/identity-control/internal/providerauthority"
@@ -207,20 +206,8 @@ func (d *Desired) Apply(ctx context.Context, envelope event.Envelope) (delivery.
 			outcome.Duplicate = true
 			return nil
 		}
-		var (
-			tag      pgconn.CommandTag
-			tenantID id.UUID
-		)
-		if membership != nil {
-			tenantID = membership.TenantID
-			tag, err = tx.Exec(ctx, upsertMembershipStatement, membership.MembershipID.String(),
-				membership.PrincipalID.String(), tenantID.String(), membership.MembershipStatus,
-				membership.MembershipVersion, envelope.ID.String())
-		} else {
-			tenantID = tenant.TenantID
-			tag, err = tx.Exec(ctx, upsertTenantStatement, tenantID.String(), tenant.TenantStatus, tenant.TenantVersion,
-				tenant.TenantSecurityVersion, envelope.ID.String())
-		}
+		tenantID, statement, args := desiredWrite(membership, tenant, envelope.ID)
+		tag, err := tx.Exec(ctx, statement, args...)
 		if err != nil {
 			return fmt.Errorf("tenantcontext: writing the desired state for tenant %s: %w", tenantID, err)
 		}
@@ -240,4 +227,16 @@ func (d *Desired) Apply(ctx context.Context, envelope event.Envelope) (delivery.
 		return delivery.Outcome{}, err
 	}
 	return outcome, nil
+}
+
+// desiredWrite is the statement and arguments that write one event's desired state, and the Tenant
+// it belongs to.
+func desiredWrite(membership *Membership, tenant *Tenant, eventID id.UUID) (id.UUID, string, []any) {
+	if membership != nil {
+		return membership.TenantID, upsertMembershipStatement, []any{membership.MembershipID.String(),
+			membership.PrincipalID.String(), membership.TenantID.String(), membership.MembershipStatus,
+			membership.MembershipVersion, eventID.String()}
+	}
+	return tenant.TenantID, upsertTenantStatement, []any{tenant.TenantID.String(), tenant.TenantStatus,
+		tenant.TenantVersion, tenant.TenantSecurityVersion, eventID.String()}
 }
