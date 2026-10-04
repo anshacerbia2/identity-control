@@ -604,8 +604,12 @@ slice:
    - The Principal credential gains `manage-organizations` and `view-organizations`. A server whose
      client predates them runs `deploy/dev/add-organization-roles.sh`, and `dev-credential-split.ps1`
      asserts the split.
-3. **Bootstrap and reconciliation.** These come from the snapshot and the kernel's listing, with
-   findings.
+3. **Bootstrap and reconciliation** (TDD-002 2.1.0).
+   - **3a:** the snapshot's version-guarded upserts, the kernel sweep (unknown Organizations
+     disabled and emptied), and findings for a sweep's changes. It needs organization-control's
+     snapshot row to carry `tenant_version` (TDD-organization-control-002 1.8.0).
+   - **3b:** applying Organization's `projection.repair.reconciled`, and the report an operator posts
+     to its reconcile route.
 4. **The scope.** The registration authority attaches `organization`, optional, to internal and
    workload clients (`TDD-identity-control-003`).
 5. **On the development server.** The registration's event types, and a stack check that a revoked
