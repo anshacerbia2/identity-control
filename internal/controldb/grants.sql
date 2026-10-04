@@ -52,6 +52,9 @@ BEGIN
               ('identity.security_operation_attempt'),
               ('identity.principal_relink'),
               ('identity.principal_finding'),
+              ('identity.tenant_desired'),
+              ('identity.membership_desired'),
+              ('identity.tenant_convergence'),
               ('platform.outbox'),
               ('platform.processed_event'),
               ('platform.dead_letter'),
@@ -171,6 +174,11 @@ REVOKE DELETE, TRUNCATE ON identity.principal_finding FROM identity_runtime;
 -- older event is discarded against.
 REVOKE DELETE, TRUNCATE ON identity.provider_grant FROM identity_runtime;
 REVOKE DELETE, TRUNCATE ON identity.provider_projection FROM identity_runtime;
+-- The Tenant context projection keeps a row per Tenant and per Membership, superseded by version
+-- and never removed (TDD-identity-control-002 2.0.0).
+REVOKE DELETE, TRUNCATE ON identity.tenant_desired FROM identity_runtime;
+REVOKE DELETE, TRUNCATE ON identity.membership_desired FROM identity_runtime;
+REVOKE DELETE, TRUNCATE ON identity.tenant_convergence FROM identity_runtime;
 -- The ceremony grant ends once, by an insert, and is never revived: insert-only like the ceremony
 -- row it retires (TDD-identity-control-006 §The Ceremony's Grant).
 REVOKE UPDATE, DELETE, TRUNCATE ON identity.ceremony_grant_retirement FROM identity_runtime;

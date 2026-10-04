@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-004
   title: Workload and Bounded Agent Identity
   owner: Core Platform Team
-  version: 1.4.0
+  version: 1.4.1
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-11
-  last_reviewed: 2026-10-01
+  last_reviewed: 2026-10-04
   parent_sad: SAD-001
 ---
 
@@ -285,14 +285,14 @@ refused until bounded delegation is built. `:reassign` takes `{"owner_principal_
   "subject_type": "workload",
   "workload_owner": "019235f1-...",
   "tenant_id": "019235f2-...",
-  "membership_version": 7,
   "aud": ["hcm-api"],
   "exp": 1786000540
 }
 ```
 
-`tenant_id` and `membership_version` appear once the workload holds a Membership and its context
-is projected (`TDD-identity-control-002`). `acr` never appears: the workload's client does not hold
+`tenant_id` appears when the workload holds a Membership and asks for that Tenant in its
+client-credentials request with `organization:<tenant_id>` (`ADR-IAM-006 §5.2`,
+`TDD-identity-control-002` 2.0.0). `membership_version` left the token in STD-IAM-002 1.6.0. `acr` never appears: the workload's client does not hold
 the kernel's built-in `acr` scope (`TDD-identity-control-003` §Profiles).
 
 `subject_type` is what makes a workload distinguishable in audit and authorization, as

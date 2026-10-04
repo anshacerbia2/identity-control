@@ -31,6 +31,7 @@ import (
 	"github.com/anshacerbia2/foundation-platform/verify"
 
 	"github.com/anshacerbia2/identity-control/internal/config"
+	"github.com/anshacerbia2/identity-control/internal/delivery"
 	"github.com/anshacerbia2/identity-control/internal/httpapi"
 	"github.com/anshacerbia2/identity-control/internal/identity/provisioning"
 	"github.com/anshacerbia2/identity-control/internal/investigation"
@@ -41,6 +42,7 @@ import (
 	"github.com/anshacerbia2/identity-control/internal/registration"
 	"github.com/anshacerbia2/identity-control/internal/securityref"
 	"github.com/anshacerbia2/identity-control/internal/securitystate"
+	"github.com/anshacerbia2/identity-control/internal/tenantcontext"
 	"github.com/anshacerbia2/identity-control/internal/workload"
 )
 
@@ -311,8 +313,18 @@ func run() error {
 		if err != nil {
 			return fmt.Errorf("delivery verifier: %w", err)
 		}
-		routesConfig.Deliveries, routesConfig.DeliveryVerifier = projection, deliveryVerifier
-		logger.Info("the provider authority intake admits Organization Control's workload",
+		desired, err := tenantcontext.NewDesired(pool)
+		if err != nil {
+			return fmt.Errorf("tenant context intake: %w", err)
+		}
+		router, err := delivery.NewRouter(
+			delivery.Route{Types: providerauthority.EventTypes, Applier: projection},
+			delivery.Route{Types: tenantcontext.EventTypes, Applier: desired})
+		if err != nil {
+			return fmt.Errorf("delivery routes: %w", err)
+		}
+		routesConfig.Deliveries, routesConfig.DeliveryVerifier = router, deliveryVerifier
+		logger.Info("the delivery intake admits Organization Control's workload",
 			slog.String("principal_id", cfg.DeliveryPrincipal.String()))
 	} else {
 		logger.Warn("IDENTITY_DELIVERY_PRINCIPAL_ID is unset; the provider authority intake accepts no delivery")

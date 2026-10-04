@@ -133,7 +133,7 @@ func TestASnapshotReplacesTheProjectionByVersion(t *testing.T) {
 
 	// Progress past the mark survives a rerun from an older snapshot.
 	if err := p.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
-		_, err := tx.Exec(ctx, advanceAppliedStatement, int64(70))
+		_, err := tx.Exec(ctx, AdvanceAppliedStatement, int64(70))
 		return err
 	}); err != nil {
 		t.Fatal(err)

@@ -2162,3 +2162,161 @@ table "security_operation_attempt" {
     expr = "outcome IS NULL OR outcome IN ('applied', 'refused', 'retry', 'unresolved')"
   }
 }
+
+table "tenant_desired" {
+  schema  = schema.identity
+  comment = "The newest accepted state of each Tenant, by tenant_version. TDD-identity-control-002 2.0.0."
+
+  column "tenant_id" {
+    null = false
+    type = uuid
+  }
+  column "tenant_status" {
+    null = false
+    type = text
+  }
+  column "tenant_version" {
+    null = false
+    type = bigint
+  }
+  column "tenant_security_version" {
+    null = false
+    type = bigint
+  }
+  column "source_event_id" {
+    null = true
+    type = uuid
+  }
+  column "accepted_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+
+  primary_key {
+    columns = [column.tenant_id]
+  }
+
+  check "tenant_desired_status_check" {
+    expr = "tenant_status IN ('active', 'suspended', 'offboarding', 'retired')"
+  }
+  check "tenant_desired_version_check" {
+    expr = "tenant_version > 0"
+  }
+}
+
+table "membership_desired" {
+  schema  = schema.identity
+  comment = "The newest accepted state of each Membership, by membership_version. TDD-identity-control-002 2.0.0."
+
+  column "membership_id" {
+    null = false
+    type = uuid
+  }
+  column "principal_id" {
+    null = false
+    type = uuid
+  }
+  column "tenant_id" {
+    null = false
+    type = uuid
+  }
+  column "membership_status" {
+    null = false
+    type = text
+  }
+  column "membership_version" {
+    null = false
+    type = bigint
+  }
+  column "source_event_id" {
+    null = true
+    type = uuid
+  }
+  column "accepted_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+
+  primary_key {
+    columns = [column.membership_id]
+  }
+
+  // Convergence reads a Tenant's Memberships.
+  index "membership_desired_tenant" {
+    columns = [column.tenant_id]
+  }
+
+  // 'absent' is a Membership the snapshot no longer lists.
+  check "membership_desired_status_check" {
+    expr = "membership_status IN ('active', 'suspended', 'revoked', 'absent')"
+  }
+  check "membership_desired_version_check" {
+    expr = "membership_version > 0"
+  }
+}
+
+table "tenant_convergence" {
+  schema  = schema.identity
+  comment = "Tenants whose kernel Organization is to be made to match the desired state, one at a time. TDD-identity-control-002 2.0.0."
+
+  column "tenant_id" {
+    null = false
+    type = uuid
+  }
+  column "priority" {
+    null    = false
+    type    = boolean
+    default = false
+  }
+  column "marked_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+  column "next_attempt_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+  column "lease_until" {
+    null = true
+    type = timestamptz
+  }
+  column "attempts" {
+    null    = false
+    type    = integer
+    default = 0
+  }
+  column "state" {
+    null    = false
+    type    = text
+    default = "pending"
+  }
+  column "last_error_class" {
+    null = true
+    type = text
+  }
+  column "kernel_org_id" {
+    null = true
+    type = text
+  }
+  column "converged_at" {
+    null = true
+    type = timestamptz
+  }
+
+  primary_key {
+    columns = [column.tenant_id]
+  }
+
+  index "tenant_convergence_claim" {
+    columns = [column.priority, column.next_attempt_at]
+    where   = "state = 'pending'"
+  }
+
+  check "tenant_convergence_state_check" {
+    expr = "state IN ('pending', 'converged', 'unresolved')"
+  }
+}
