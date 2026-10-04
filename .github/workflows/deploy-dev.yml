@@ -14,6 +14,13 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Run by hand with a kernel branch, to prove this service against a kernel change before it merges.
+  workflow_dispatch:
+    inputs:
+      kernel_ref:
+        description: identity-kernel branch, tag or commit to run beside this service
+        required: false
+        default: main
 
 permissions:
   contents: read
@@ -31,6 +38,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: anshacerbia2/identity-kernel
+          ref: ${{ inputs.kernel_ref || 'main' }}
           path: .kernel
 
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5

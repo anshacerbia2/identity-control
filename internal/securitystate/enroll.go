@@ -17,8 +17,10 @@ import (
 
 // The kernel actions an enrollment may name, by authenticator type. Nothing else is ever returned.
 // webauthn is a second factor beside the password; a passkey replacing it is not offered
-// (TDD-identity-control-005 2.7.0).
-var enrollActions = map[string]string{"totp": "CONFIGURE_TOTP", "webauthn": "webauthn-register"}
+// (TDD-identity-control-005 2.7.0). recovery-codes issues a new set of recovery codes, replacing any
+// earlier one (ADR-IAM-005 §5.3).
+var enrollActions = map[string]string{"totp": "CONFIGURE_TOTP", "webauthn": "webauthn-register",
+	"recovery-codes": "CONFIGURE_RECOVERY_AUTHN_CODES"}
 
 // ErrStepUp is an enrollment whose caller has not authenticated at the level binding requires. Level
 // is that level: aal2 for a person who already holds a second factor, aal1 otherwise.

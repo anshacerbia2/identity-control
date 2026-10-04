@@ -368,12 +368,21 @@ func (s *Service) revoke(ctx context.Context, c claimed) (string, error) {
 		return ResultLastAuthenticator, nil
 	}
 	if secondFactors[target.Type] && otherSecond == 0 {
-		floor, err := s.holdsAssuranceFloor(ctx, c.subject)
+		// The floor keeps a provider who can sign in at two factors. One the kernel has disabled, by a
+		// suspension or a permanent lockout, cannot sign in, and assisted recovery revokes their lost
+		// factor then (ADR-IAM-005 §5.5).
+		u, err := s.readUser(ctx, c.kernelUser)
 		if err != nil {
 			return "", err
 		}
-		if floor {
-			return ResultAssuranceFloor, nil
+		if u.Enabled {
+			floor, err := s.holdsAssuranceFloor(ctx, c.subject)
+			if err != nil {
+				return "", err
+			}
+			if floor {
+				return ResultAssuranceFloor, nil
+			}
 		}
 	}
 	err = s.call(ctx, func(ctx context.Context) error {

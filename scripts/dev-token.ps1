@@ -254,6 +254,7 @@ function Get-ScnehauxToken {
     # Further pages of the same sign-in: the code a level of two factors asks for, and, when
     # enrolling, the kernel's page that sets up another TOTP.
     $enrolledSecret = $null
+    $recoveryCodes = $null
     for ($step = 0; $step -lt 8; $step++) {
         # A redirect to another of the kernel's pages, such as a required action, is followed; one to
         # the redirect URI ends the sign-in.
@@ -276,6 +277,15 @@ function Get-ScnehauxToken {
             $enrolledStep = Get-TotpStep
             $fields["totp"] = Get-TotpCode $enrolledSecret $enrolledStep
             $fields["userLabel"] = $TotpLabel
+        } elseif ($content -match 'name="generatedRecoveryAuthnCodes"') {
+            # The kernel issues recovery codes with the first TOTP (ADR-IAM-005 §5.3). They are kept
+            # beside that TOTP's secret, and, like it, never printed.
+            if (-not $enrolledSecret) {
+                throw "the kernel asks to save a new set of recovery codes; set them up in the account application"
+            }
+            $recoveryCodes = @([regex]::Matches($content, '<li>([A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4})</li>') |
+                ForEach-Object { $_.Groups[1].Value })
+            if ($recoveryCodes.Count -eq 0) { throw "the kernel's recovery-code page shows no codes" }
         } elseif ($content -match 'name="otp"') {
             if ($Otp) {
                 $fields["otp"] = $Otp
@@ -293,8 +303,9 @@ function Get-ScnehauxToken {
                     $step = Get-TotpStep
                 }
                 $fields["otp"] = Get-TotpCode $stored.secret $step
-                @{ label = $stored.label; secret = $stored.secret; last = $step } | ConvertTo-Json -Compress |
-                    Set-Content -NoNewline $TotpSecretFile
+                # Rewritten whole, so the recovery codes kept beside the secret stay.
+                $stored | Add-Member -NotePropertyName last -NotePropertyValue $step -Force
+                $stored | ConvertTo-Json -Compress | Set-Content -NoNewline $TotpSecretFile
             } else {
                 throw "the kernel asks for a one-time code: pass -Otp, or -TotpSecretFile on a development server"
             }
@@ -306,10 +317,11 @@ function Get-ScnehauxToken {
     }
     if ($enrolledSecret -and $answer.Status -ge 300 -and $answer.Status -lt 400) {
         # Written only once the kernel accepted the code it was set up with. Never printed.
-        @{ label = $TotpLabel; secret = $enrolledSecret; last = $enrolledStep } | ConvertTo-Json -Compress |
-            Set-Content -NoNewline $EnrollTotpFile
+        $enrolled = [ordered]@{ label = $TotpLabel; secret = $enrolledSecret; last = $enrolledStep }
+        if ($recoveryCodes) { $enrolled["recoveryCodes"] = $recoveryCodes }
+        $enrolled | ConvertTo-Json -Compress | Set-Content -NoNewline $EnrollTotpFile
         if ($IsLinux -or $IsMacOS) { chmod 600 $EnrollTotpFile }
-        Write-Host "enrolled the TOTP '$TotpLabel'; its secret is in $EnrollTotpFile"
+        Write-Host "enrolled the TOTP '$TotpLabel'; its secret$(if ($recoveryCodes) { ' and recovery codes are' } else { ' is' }) in $EnrollTotpFile"
     }
     $codeUri = $null
     if ($answer.Status -ge 300 -and $answer.Status -lt 400) {

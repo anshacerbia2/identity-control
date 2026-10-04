@@ -40,6 +40,10 @@ type Credential struct {
 	Type    string
 	Label   string
 	Created time.Time
+	// Remaining and Total are how many recovery codes of a set are unused, and how many it began
+	// with; nil for every other type.
+	Remaining *int
+	Total     *int
 }
 
 // FederatedIdentity is a link from the user to an identity provider's account.
@@ -102,6 +106,24 @@ type credentialRepresentation struct {
 	Type        string `json:"type"`
 	UserLabel   string `json:"userLabel"`
 	CreatedDate int64  `json:"createdDate"`
+	// CredentialData is the credential's metadata as a JSON string. The secret is never listed.
+	CredentialData string `json:"credentialData"`
+}
+
+// RecoveryCodes is the kernel's credential type for a set of recovery codes (ADR-IAM-005 §5.1).
+const RecoveryCodes = "recovery-authn-codes"
+
+// codeCounts reads how many codes of a set are unused, and how many it began with, from the
+// metadata the kernel keeps beside the hashes ({"remaining":11,"total":12}). Nil where it does not say.
+func codeCounts(credentialData string) (remaining, total *int) {
+	var data struct {
+		Remaining *int `json:"remaining"`
+		Total     *int `json:"total"`
+	}
+	if json.Unmarshal([]byte(credentialData), &data) != nil {
+		return nil, nil
+	}
+	return data.Remaining, data.Total
 }
 
 // UserCredentials lists the user's authenticators' metadata, oldest first.
@@ -112,8 +134,11 @@ func (a *Admin) UserCredentials(ctx context.Context, realm Realm, userID UserID)
 	}
 	credentials := make([]Credential, 0, len(raw))
 	for _, r := range raw {
-		credentials = append(credentials, Credential{ID: r.ID, Type: r.Type, Label: r.UserLabel,
-			Created: time.UnixMilli(r.CreatedDate).UTC()})
+		credential := Credential{ID: r.ID, Type: r.Type, Label: r.UserLabel, Created: time.UnixMilli(r.CreatedDate).UTC()}
+		if r.Type == RecoveryCodes {
+			credential.Remaining, credential.Total = codeCounts(r.CredentialData)
+		}
+		credentials = append(credentials, credential)
 	}
 	sort.SliceStable(credentials, func(i, j int) bool { return credentials[i].Created.Before(credentials[j].Created) })
 	return credentials, nil
