@@ -614,8 +614,9 @@ slice:
        makes the Membership `absent`.
      - `GET /v1/projections/tenant-context/report` serves the report an operator posts to
        organization-control's reconcile route.
-4. **The scope.** The registration authority attaches `organization`, optional, to internal and
-   workload clients (`TDD-identity-control-003`).
+4. ✅ **The scope** (`TDD-identity-control-003` 1.28.0). The registration authority attaches
+   `organization`, optional, to `internal` and `workload` clients, and the reconciler holds it there.
+   A client registered before it is repaired on the next sweep.
 5. **On the development server.** The registration's event types, and a stack check that a revoked
    Membership's refresh is refused.
 

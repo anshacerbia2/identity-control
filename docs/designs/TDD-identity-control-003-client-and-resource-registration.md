@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-003
   title: Protocol Client and Protected-Resource Registration
   owner: Core Platform Team
-  version: 1.27.0
+  version: 1.28.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-11
-  last_reviewed: 2026-10-02
+  last_reviewed: 2026-10-04
   parent_sad: SAD-001
 ---
 
@@ -550,7 +550,18 @@ of scopes** (STD-IAM-002 §3.2, §3.2.1):
 | `access.token.header.type.rfc9068` attribute | `true`, so its access tokens carry `typ` `at+jwt` | `true` |
 | `client_id` mapper | a hardcoded claim naming its `client_key`, in access tokens | the same |
 | Default client scopes | exactly `basic`, `acr`, and its managed audience scope | exactly `basic`, `service_account`, and its managed audience scope |
-| Optional client scopes | `scnehaux-profile` for a confidential client, else none | none |
+| Optional client scopes | `scnehaux-profile` for a confidential client; `organization` for an `internal` client (1.28.0) | `organization` (1.28.0) |
+
+**`organization` (1.28.0).** It is the kernel's scope through which a client asks for one Tenant with
+`organization:<tenant_id>`. It is the only path by which `tenant_id` reaches a token (`ADR-IAM-006
+§5.2`, §5.3).
+- **Who holds it.** A client of an audience class that may carry `tenant_id` (STD-IAM-002 §3.2) holds
+  it as an optional scope: `internal`, and `workload`, which is tenant-scoped once its service-account
+  user is a member.
+- **Who never does.** `privileged` here is the provider form, which carries no Tenant, and `external`
+  carries no enterprise claim. Neither ever holds it.
+- **Existing clients.** A client registered before 1.28.0 lacks it. The reconciler reads that as a
+  scope difference, and repairs it toward the registered profile like any other.
 
 The kernel writes the at+jwt header only for a client that carries the attribute, and `client_id`
 only into a service-account token, so both are set per client (identity-kernel compat run
