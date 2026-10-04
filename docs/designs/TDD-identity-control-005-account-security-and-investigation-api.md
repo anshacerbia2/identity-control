@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-005
   title: Account Security and Investigation API Mediation
   owner: Core Platform Team
-  version: 2.7.0
+  version: 2.8.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-14
-  last_reviewed: 2026-10-03
+  last_reviewed: 2026-10-04
   parent_sad: SAD-001
 ---
 
@@ -274,6 +274,38 @@ to reach it.
   a provider at one factor.
 - **Why.** A provider at one factor would re-enroll on the next `aal2` sign-in (`ADR-IAM-004 §5.4`),
   and that is exactly the path an attacker holding the password would use.
+- **Not for a Principal who cannot sign in (2.8.0).** The floor keeps a provider who can sign in at
+  two factors. Before it refuses, the executor reads the kernel user. One the kernel has disabled
+  cannot sign in, whether by a suspension or by a permanent lockout. Its last second factor is then
+  revoked. This is the revocation step of assisted recovery (`ADR-IAM-005 §5.5`): suspend, revoke the
+  lost factor, restore.
+  - The check is the kernel's own state, read when the revocation runs, not this service's mapping.
+    The mapping moves when a command is accepted, so it can show `suspended` before the kernel user
+    is disabled.
+
+## Recovery Codes (2.8.0)
+
+`ADR-IAM-005` adds the kernel's recovery codes, a set of 12 one-time codes, as a recovery method at
+level 2.
+
+```text
+POST  /v1/me/authenticators:enroll          {"type":"recovery-codes"}  ->  {"action":"CONFIGURE_RECOVERY_AUTHN_CODES"}
+```
+
+- **Issuing a set.**
+  - The kernel issues the first set with the first TOTP.
+  - This type issues a new one, replacing the old, through the kernel's action
+    `CONFIGURE_RECOVERY_AUTHN_CODES`.
+  - It is authorized like any enrollment: at the level binding requires, and recent.
+- **Not a second factor here.** The credential type is `recovery-authn-codes`. It is not counted by
+  the assurance floor, nor by the last-authenticator guard: `ADR-IAM-005 §5.2` makes the codes
+  recovery, not a factor a provider keeps. A person may remove their set, as any second factor.
+- **How many are left.** Every authenticator listing carries `remaining_codes` for a set:
+  `GET /v1/me/authenticators` and `GET /v1/principals/{principal_id}/authenticators`. It comes from the
+  metadata the kernel keeps beside the hashes, `{"remaining":11,"total":12}`. The kernel never lists
+  the codes or their hashes.
+  - A set below its total has been used for recovery. The account page says so, and offers a new
+    set (`ADR-IAM-005 §5.4`).
 
 ## Containment as Built (2.2.0)
 
@@ -581,7 +613,8 @@ user-agent strings, or kernel session identifiers. 1.0.0 also listed device clas
 approximate location. The kernel's session record holds neither, and deriving a location
 would need a geolocation source this estate does not have, so both are left out rather
 than guessed. Authenticator responses expose type, label, creation time,
-last use, and policy-relevant factor class, never credential data.
+last use, and policy-relevant factor class, never credential data. The one exception, since 2.8.0,
+is how many codes of a recovery-code set remain, which is a count, not the codes (§Recovery Codes).
 
 ### Durable Command Execution
 
