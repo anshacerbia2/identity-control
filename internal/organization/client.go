@@ -21,6 +21,7 @@ import (
 	"github.com/anshacerbia2/foundation-platform/clientauth"
 
 	"github.com/anshacerbia2/identity-control/internal/providerauthority"
+	"github.com/anshacerbia2/identity-control/internal/tenantcontext"
 )
 
 // TokenSource supplies this service's workload token: clientauth.Tokens in production.
@@ -191,6 +192,43 @@ func (c *Client) ProviderSnapshot(ctx context.Context) (Snapshot, error) {
 		cursor = got.Cursor
 	}
 	return Snapshot{}, fmt.Errorf("organization: the snapshot did not end within %d pages", maxPages)
+}
+
+type organizationPage struct {
+	HighWaterMark int64                       `json:"high_water_mark"`
+	Rows          []tenantcontext.SnapshotRow `json:"rows"`
+	Cursor        string                      `json:"cursor"`
+}
+
+// maxOrganizationPages bounds the Organization snapshot. Its pages hold up to the producer's default
+// of 1000 Memberships, so this reads ten million before it refuses.
+const maxOrganizationPages = 10000
+
+// OrganizationSnapshot reads the whole Organization snapshot, the active Memberships and their
+// Tenants, page by page under the first page's mark (TDD-organization-control-002 §Bootstrap Contract).
+func (c *Client) OrganizationSnapshot(ctx context.Context) (int64, []tenantcontext.SnapshotRow, error) {
+	var (
+		rows   []tenantcontext.SnapshotRow
+		cursor string
+		mark   *int64
+	)
+	for page := 0; page < maxOrganizationPages; page++ {
+		var got organizationPage
+		if err := c.call(ctx, http.MethodPost, "/v1/projections/organization/snapshot",
+			snapshotRequest{ConsumerID: c.consumer, Cursor: cursor, Mark: mark}, &got); err != nil {
+			return 0, nil, err
+		}
+		if mark == nil {
+			first := got.HighWaterMark
+			mark = &first
+		}
+		rows = append(rows, got.Rows...)
+		if got.Cursor == "" {
+			return *mark, rows, nil
+		}
+		cursor = got.Cursor
+	}
+	return 0, nil, fmt.Errorf("organization: the snapshot did not end within %d pages", maxOrganizationPages)
 }
 
 // RecordBootstrap records with Organization Control the mark this consumer bootstrapped from, which

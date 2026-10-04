@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-002
   title: Tenant Context Projection into the Kernel, and Its Reconciliation
   owner: Core Platform Team
-  version: 2.0.0
+  version: 2.1.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -203,6 +203,9 @@ CREATE INDEX tenant_convergence_claim ON identity.tenant_convergence (priority D
 
 ### Findings
 
+A sweep's mark is `tenant_convergence.sweep`, set when a sweep marks the Tenant and cleared when it
+converges. A convergence that follows an event leaves it false and records nothing.
+
 ```sql
 CREATE TABLE identity.projection_finding (
     finding_id    UUID        PRIMARY KEY,
@@ -213,6 +216,8 @@ CREATE TABLE identity.projection_finding (
     detected_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT projection_finding_class_check
         CHECK (finding_class IN ('missing_member', 'extra_member', 'organization_state', 'unknown_organization'))
+-- and on identity.tenant_convergence:
+--     sweep BOOLEAN NOT NULL DEFAULT false
 );
 ```
 
@@ -324,22 +329,64 @@ converged, unless marked again since the claim
   one who does not answers `404` or `400`, which also counts as done.
 - **A timeout is not a failure of the side effect.** The read-back decides.
 
-### Reconciliation
+### Reconciliation (2.1.0)
+
+Reconciliation has two halves, because they repair two different things.
+- **The desired state against the authority.** The snapshot adds what this service missed. The
+  authority's own reconciliation removes what it no longer grants.
+- **The kernel against the desired state.** A sweep makes every Tenant converge, and records what it
+  had to change.
 
 ```text
 every IDENTITY_PROJECTION_RECONCILE_INTERVAL, and at bootstrap:
-    rows := the snapshot, all pages, at one high-water mark
-    for each row: upsert the Tenant and Membership desired state where the snapshot's version is greater
-    a desired Membership the snapshot does not list: set it to 'absent' at its version
+    rows := Organization's snapshot, all pages, under the first page's mark
+    for each row:
+        upsert the Membership's desired state where membership_version is greater
+        upsert its Tenant's desired state where tenant_version is greater
     list the kernel's Organizations
-        an Organization whose name is no known tenant_id → disable it, empty it, unknown_organization
-    mark every known Tenant, sweep = true
+        one whose name is no known tenant_id → disable it, empty it, record unknown_organization
+    mark every known Tenant, as a sweep
+
+on com.scnehaux.organization.projection.repair.reconciled for this consumer:
+    for each finding:
+        a state                → upsert it where membership_version is greater
+        no state (never granted) → the Membership is 'absent'
+    mark each Tenant a finding names
 ```
 
+**Why the snapshot only adds (2.1.0).** 2.0.0 also set a desired Membership the snapshot does not
+list to `absent`. That is unsound, for two reasons.
+- **The snapshot holds active Memberships only.** It cannot say at what version a Membership stopped
+  being active.
+- **Its mark is not a boundary.** Organization's contract states the reason: "`platform.outbox.sequence`
+  is allocated by `nextval` at `INSERT`, not at `COMMIT`". So a Membership granted while the snapshot
+  was read can be missing from it and still be newer than it [R3]. Setting that Membership `absent`
+  would remove a member the authority had just granted.
+
+**Withdrawals come from Organization.** Organization Control's reconciliation compares a consumer's
+report of its active Memberships, `membership_id` and `membership_version`, against the authority. It
+publishes `projection.repair.reconciled`, each finding carrying the authoritative state with its
+version, including a suspended or revoked one [R3].
+- **Applying it.** This service applies that state by the rule it applies every event: a higher
+  version replaces a lower one.
+- **Who sends the report.** Organization's reconcile route admits a provider, because it reports
+  across consumers. So an operator posts this service's report, as foundation-reference's system
+  proof does.
+- **Where the report comes from.** `GET /v1/projections/tenant-context/report`, a provider route,
+  serves it.
+
+**Ordering a Tenant from a snapshot.** A snapshot row carries its Tenant's `tenant_version` since
+`TDD-organization-control-002` 1.8.0. A row therefore orders against a Tenant event exactly as two
+events order. Without it, a snapshot could not safely say whether a Tenant was suspended.
+
 - **Findings.** A sweep's convergence records a finding for each change it had to make (§Findings).
-- **Bootstrap.** Bootstrap is the first sweep. It runs before deliveries are accepted, and records
-  the snapshot's mark with Organization Control, as `cmd/identity-provider-bootstrap` does for
-  provider authority.
+- **Bootstrap.** Bootstrap is the first sweep.
+  - It runs before deliveries are applied.
+  - It records the snapshot's mark with Organization Control, as `cmd/identity-provider-bootstrap`
+    does for provider authority.
+  - A consumer re-registered with more event types loses its recorded mark [R3]. So the bootstrap
+    that follows the registration change of slice 5 takes both snapshots, and records the lower
+    mark.
 
 ## Configuration
 
@@ -367,8 +414,11 @@ every IDENTITY_PROJECTION_RECONCILE_INTERVAL, and at bootstrap:
   - two convergers never hold the same Tenant.
 - **Reconciliation:**
   - a member added by hand is removed, with an `extra_member` finding kept;
-  - a dropped event is repaired, with a `missing_member` finding;
-  - an Organization the authority never created is disabled and emptied.
+  - a dropped event is repaired from the snapshot, with a `missing_member` finding;
+  - a snapshot row older than the held state changes nothing, for a Membership or for its Tenant;
+  - an Organization the authority never created is disabled and emptied;
+  - a repair names a revoked Membership, and its member is removed;
+  - a repair for another consumer is acknowledged and applies nothing.
 - **Against the real kernel.** The `deploy-dev` stack:
   - grants a Membership, and a token for its Tenant carries `tenant_id`;
   - revokes it, and the refresh is refused with `invalid_grant`.
@@ -458,3 +508,12 @@ Runbooks required before production:
   - `OrganizationsResource.java`, `search`: "if {@code true}, the organizations will be searched using
     exact match for the {@code search} param - i.e. either the organization name or one of its domains
     must match exactly".
+- **[R3]** `TDD-organization-control-002` 1.8.0, §Bootstrap Contract and §Reconciliation.
+  - "Why the mark is not a discard boundary": "`platform.outbox.sequence` is allocated by `nextval`
+    at `INSERT`, not at `COMMIT`"; "the versions, not delivery order or `streamposition`, decide which
+    desired state is newer."
+  - The snapshot's predicate: "Only `active` Memberships appear."
+  - `internal/projection/reconcile.go`: a finding's `State` "is the authoritative Membership the
+    consumer repairs toward, in the shape of a Membership event's payload … Null when authority holds
+    no Membership by this identifier, which tells the consumer to remove the row."
+  - Re-registering with other types "clears `snapshot_mark`".

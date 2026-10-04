@@ -66,11 +66,11 @@ func (h *convergerHarness) deliver(eventType string, data any, position int64) {
 	}
 }
 
-// drain converges until no Tenant this test marked is due. Other tests' Tenants may be converged
-// too; each test asserts only its own.
+// drain converges until no Tenant is due. The database is shared, across the tests here and across
+// CI's two runs of them, so a sweep may have marked many Tenants: each test asserts only its own.
 func (h *convergerHarness) drain() {
 	h.t.Helper()
-	for i := 0; i < 50; i++ {
+	for i := 0; i < 10000; i++ {
 		found, err := h.conv.RunOnce(context.Background())
 		if err != nil {
 			h.t.Fatal(err)
@@ -203,5 +203,34 @@ func TestAFailingTenantIsParked(t *testing.T) {
 	}
 	if state != "unresolved" || class != "unavailable" {
 		t.Errorf("after two failures: %s (%s), want unresolved (unavailable)", state, class)
+	}
+}
+
+// A recorded Organization identifier that names another Tenant's Organization is not trusted: the
+// converger finds this Tenant's by its name and leaves the other untouched.
+func TestARecordedIdentifierNamingAnotherTenantIsNotTrusted(t *testing.T) {
+	h := newConvergerHarness(t)
+	ctx := context.Background()
+	other, err := h.kernel.CreateOrganization(ctx, testRealm, newID(t).String(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.kernel.SetOrganizationMember(other, "kc-other-tenant")
+	tenant := newID(t)
+	h.deliver(string(TenantActivated), Tenant{TenantID: tenant, TenantStatus: "active", TenantVersion: 1,
+		TenantSecurityVersion: 1}, 1)
+	if err := h.pool.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE identity.tenant_convergence SET kernel_org_id = $2 WHERE tenant_id = $1`,
+			tenant.String(), other)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h.drain()
+	if members, _ := h.kernel.OrganizationMembers(ctx, testRealm, other); len(members) != 1 {
+		t.Errorf("the other Tenant's Organization was changed: members %v", members)
+	}
+	if org, _ := h.organization(tenant); org.ID == other {
+		t.Error("this Tenant was converged onto another Tenant's Organization")
 	}
 }

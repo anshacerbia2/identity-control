@@ -142,6 +142,9 @@ type Config struct {
 	ProjectionAttemptTimeout time.Duration
 	ProjectionLease          time.Duration
 	ProjectionMaxAttempts    int
+	// ProjectionReconcileInterval is the reconciliation sweep's cadence (TDD-identity-control-002
+	// 2.1.0 §Reconciliation).
+	ProjectionReconcileInterval time.Duration
 
 	// AdminSearchMinLength and AdminSearchPageSize bound a provider's Principal search: a query
 	// shorter than the floor is refused, and a page holds at most the size (TDD-identity-control-005
@@ -282,6 +285,10 @@ func Load() (Config, error) {
 	cfg.ProjectionAttemptTimeout = durationOr("IDENTITY_PROJECTION_ATTEMPT_TIMEOUT", 2*time.Second, &problems)
 	cfg.ProjectionLease = durationOr("IDENTITY_PROJECTION_LEASE", 30*time.Second, &problems)
 	cfg.ProjectionMaxAttempts = intOr("IDENTITY_PROJECTION_MAX_ATTEMPTS", 8, &problems)
+	cfg.ProjectionReconcileInterval = durationOr("IDENTITY_PROJECTION_RECONCILE_INTERVAL", 15*time.Minute, &problems)
+	if cfg.ProjectionReconcileInterval <= 0 {
+		problems = append(problems, errors.New("IDENTITY_PROJECTION_RECONCILE_INTERVAL must be positive"))
+	}
 	if cfg.ProjectionInterval <= 0 || cfg.ProjectionAttemptTimeout <= 0 || cfg.ProjectionMaxAttempts <= 0 {
 		problems = append(problems, errors.New("the IDENTITY_PROJECTION_* settings must be positive"))
 	} else if cfg.ProjectionLease <= 8*cfg.ProjectionAttemptTimeout {

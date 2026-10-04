@@ -55,6 +55,7 @@ BEGIN
               ('identity.tenant_desired'),
               ('identity.membership_desired'),
               ('identity.tenant_convergence'),
+              ('identity.projection_finding'),
               ('platform.outbox'),
               ('platform.processed_event'),
               ('platform.dead_letter'),
@@ -179,6 +180,8 @@ REVOKE DELETE, TRUNCATE ON identity.provider_projection FROM identity_runtime;
 REVOKE DELETE, TRUNCATE ON identity.tenant_desired FROM identity_runtime;
 REVOKE DELETE, TRUNCATE ON identity.membership_desired FROM identity_runtime;
 REVOKE DELETE, TRUNCATE ON identity.tenant_convergence FROM identity_runtime;
+-- A finding is evidence: written once, never changed or removed.
+REVOKE UPDATE, DELETE, TRUNCATE ON identity.projection_finding FROM identity_runtime;
 -- The ceremony grant ends once, by an insert, and is never revived: insert-only like the ceremony
 -- row it retires (TDD-identity-control-006 §The Ceremony's Grant).
 REVOKE UPDATE, DELETE, TRUNCATE ON identity.ceremony_grant_retirement FROM identity_runtime;

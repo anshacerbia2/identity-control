@@ -2306,6 +2306,12 @@ table "tenant_convergence" {
     null = true
     type = timestamptz
   }
+  // A sweep marked the Tenant: its convergence records what it had to change.
+  column "sweep" {
+    null    = false
+    type    = boolean
+    default = false
+  }
 
   primary_key {
     columns = [column.tenant_id]
@@ -2318,5 +2324,48 @@ table "tenant_convergence" {
 
   check "tenant_convergence_state_check" {
     expr = "state IN ('pending', 'converged', 'unresolved')"
+  }
+}
+
+table "projection_finding" {
+  schema  = schema.identity
+  comment = "What a reconciliation sweep had to change in the kernel, kept as evidence. TDD-identity-control-002 2.1.0."
+
+  column "finding_id" {
+    null = false
+    type = uuid
+  }
+  column "finding_class" {
+    null = false
+    type = text
+  }
+  column "tenant_id" {
+    null = true
+    type = uuid
+  }
+  column "principal_id" {
+    null = true
+    type = uuid
+  }
+  column "detail" {
+    null = false
+    type = jsonb
+  }
+  column "detected_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+
+  primary_key {
+    columns = [column.finding_id]
+  }
+
+  index "projection_finding_detected" {
+    columns = [column.detected_at]
+  }
+
+  check "projection_finding_class_check" {
+    expr = "finding_class IN ('missing_member', 'extra_member', 'organization_state', 'unknown_organization')"
   }
 }

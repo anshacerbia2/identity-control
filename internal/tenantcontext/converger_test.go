@@ -39,6 +39,16 @@ func TestTheConvergerIsConfiguredOrRefused(t *testing.T) {
 	if _, err := NewDesired(nil); err == nil {
 		t.Error("an intake with no transactor was accepted")
 	}
+	desired, err := NewDesired(&unavailable{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewReconciler(desired, &unavailable{}, kernel, "", nil, nil); err == nil {
+		t.Error("a sweep with no realm was accepted")
+	}
+	if _, err := NewReconciler(nil, &unavailable{}, kernel, "r", nil, nil); err == nil {
+		t.Error("a sweep with no desired state was accepted")
+	}
 
 	// Run keeps trying while the database is unavailable, and stops when its context ends.
 	tx := &unavailable{}
