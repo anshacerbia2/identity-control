@@ -66,11 +66,11 @@ func (h *convergerHarness) deliver(eventType string, data any, position int64) {
 	}
 }
 
-// drain converges until no Tenant this test marked is due. Other tests' Tenants may be converged
-// too; each test asserts only its own.
+// drain converges until no Tenant is due. The database is shared, across the tests here and across
+// CI's two runs of them, so a sweep may have marked many Tenants: each test asserts only its own.
 func (h *convergerHarness) drain() {
 	h.t.Helper()
-	for i := 0; i < 50; i++ {
+	for i := 0; i < 10000; i++ {
 		found, err := h.conv.RunOnce(context.Background())
 		if err != nil {
 			h.t.Fatal(err)

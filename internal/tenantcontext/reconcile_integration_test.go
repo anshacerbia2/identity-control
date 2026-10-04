@@ -79,9 +79,12 @@ func TestASweepRepairsAndRecords(t *testing.T) {
 	}
 	h.drain()
 	_, members := h.organization(tenant)
-	want := map[keycloak.UserID]bool{aliceUser: true, bobUser: true}
-	if len(members) != 2 || !want[members[0]] || !want[members[1]] {
-		t.Errorf("after the sweep: members %v, want alice and bob", members)
+	held := map[keycloak.UserID]bool{}
+	for _, m := range members {
+		held[m] = true
+	}
+	if len(members) != 2 || !held[aliceUser] || !held[bobUser] {
+		t.Errorf("after the sweep: members %v, want alice %s and bob %s", members, aliceUser, bobUser)
 	}
 	got := findings(t, h.pool, tenant)
 	if got["missing_member"] != 1 || got["extra_member"] != 1 {
@@ -150,7 +153,7 @@ func TestAnUnknownOrganizationIsWithdrawn(t *testing.T) {
 	var count int
 	if err := h.pool.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
 		return tx.QueryRow(ctx, `SELECT count(*) FROM identity.projection_finding
-			WHERE finding_class = 'unknown_organization' AND detail->>'organization_id' = $1`, orgID).Scan(&count)
+			WHERE finding_class = 'unknown_organization' AND detail->>'name' = $1`, stray.String()).Scan(&count)
 	}); err != nil {
 		t.Fatal(err)
 	}
