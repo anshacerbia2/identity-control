@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-002
   title: Tenant Context Projection into the Kernel, and Its Reconciliation
   owner: Core Platform Team
-  version: 2.2.0
+  version: 2.3.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -418,8 +418,11 @@ events order. Without it, a snapshot could not safely say whether a Tenant was s
   - It records the snapshot's mark with Organization Control, as `cmd/identity-provider-bootstrap`
     does for provider authority.
   - A consumer re-registered with more event types loses its recorded mark [R3]. So the bootstrap
-    that follows the registration change of slice 5 takes both snapshots, and records the lower
-    mark.
+    takes both snapshots, and records the lower mark (2.3.0).
+  - **The command.** `cmd/identity-provider-bootstrap` does both. A registration that does not
+    subscribe to the Membership and Tenant types is refused the Organization snapshot (`403`). The
+    command then bootstraps provider authority alone and says so. A server can therefore deploy this
+    service before its registration changes.
 
 ## Configuration
 
