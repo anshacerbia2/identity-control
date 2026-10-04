@@ -17,6 +17,7 @@
   "internalEdges": {
     "cmd/identity-control": [
       "internal/config",
+      "internal/delivery",
       "internal/httpapi",
       "internal/identity/provisioning",
       "internal/investigation",
@@ -27,6 +28,7 @@
       "internal/registration",
       "internal/securityref",
       "internal/securitystate",
+      "internal/tenantcontext",
       "internal/workload"
     ],
     "cmd/identity-migrate": ["internal/controldb"],
@@ -79,7 +81,8 @@
       "grants (TDD-identity-control-006). It reaches no internal package: the inbox guard and the",
       "envelope are foundation-platform's."
     ],
-    "internal/providerauthority": [],
+    "internal/providerauthority": ["internal/delivery"],
+    "internal/tenantcontext": ["internal/delivery", "internal/providerauthority"],
 
     "_comment_organization": [
       "internal/organization is this service's client of Organization Control as the provider",
@@ -117,6 +120,7 @@
       "internal/securityref"
     ],
     "internal/httpapi": [
+      "internal/delivery",
       "internal/identity/provisioning",
       "internal/investigation",
       "internal/keycloak",
