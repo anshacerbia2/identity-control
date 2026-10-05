@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-005
   title: Account Security and Investigation API Mediation
   owner: Core Platform Team
-  version: 2.8.0
+  version: 2.9.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-14
-  last_reviewed: 2026-10-04
+  last_reviewed: 2026-10-05
   parent_sad: SAD-001
 ---
 
@@ -568,6 +568,7 @@ GET   /v1/principals/{principal_id}/sessions
 GET   /v1/principals/{principal_id}/authenticators
 GET   /v1/principals/{principal_id}/federation-links
 GET   /v1/principals/{principal_id}/findings
+GET   /v1/principals/{principal_id}/events
 POST  /v1/principals/{principal_id}:suspend
 POST  /v1/principals/{principal_id}:restore
 POST  /v1/principals/{principal_id}:retire
@@ -581,8 +582,12 @@ Every mutation requires `Idempotency-Key`. Administrative mutations additionally
 `expected_version` in the body and `X-Administrative-Reason`, visible US-ASCII
 (STD-GLB-001 §Request Header Values). The correlation identifier is the one the request
 middleware assigns or accepts, and it is recorded on the operation. `GET
-/v1/principals/{principal_id}/events` is not offered until the Audit API exists. Until then the
-evidence is the insert-only record this service keeps (§Evidence). A command returns its final
+/v1/principals/{principal_id}/events` reads the kernel event record this service keeps
+(2.9.0, `TDD-identity-control-007`). Up to 2.8.0 it was not offered until the Audit API existed. The
+record now exists here, because `STD-IAM-001 §3.8` (2.3.0) has Identity Runtime keep every kernel
+event until Audit & Evidence has received it, so the route reads what this service holds. It
+answers the hundred most recent events, newest first. It is how an investigator sees a Principal's
+sign-ins and failures without the kernel's Admin Console (ADR-IAM-001 §5.8). A command returns its final
 result when execution completes inside the request budget; otherwise it returns
 `202 Accepted` with an operation URL. Repeating the same idempotency key returns the
 same operation and never repeats a completed side effect.
@@ -613,7 +618,11 @@ it holds, and whether it is the caller's own. They do not expose raw IP addresse
 user-agent strings, or kernel session identifiers. 1.0.0 also listed device class and
 approximate location. The kernel's session record holds neither, and deriving a location
 would need a geolocation source this estate does not have, so both are left out rather
-than guessed. Authenticator responses expose type, label, creation time,
+than guessed. Event responses (2.9.0) expose when, the kind (`user` or `admin`), the Principal's role
+in it (the subject of a user event, the actor of an admin event), the kernel's event type, an
+outcome with the kernel's error code on a failure, the client, and an admin event's resource type.
+They do not expose the IP address, the session, a kernel user identifier, or an admin event's
+resource path, which names kernel identifiers. Authenticator responses expose type, label, creation time,
 last use, and policy-relevant factor class, never credential data. The one exception, since 2.8.0,
 is how many codes of a recovery-code set remain and how many it began with: counts, not the codes
 (§Recovery Codes).

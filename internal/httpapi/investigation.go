@@ -25,6 +25,7 @@ type Investigator interface {
 	Authenticators(ctx context.Context, actor investigation.Actor, principalID id.UUID) ([]investigation.Authenticator, error)
 	FederationLinks(ctx context.Context, actor investigation.Actor, principalID id.UUID) ([]investigation.FederationLink, error)
 	Findings(ctx context.Context, actor investigation.Actor, principalID id.UUID) ([]investigation.Finding, error)
+	Events(ctx context.Context, actor investigation.Actor, principalID id.UUID) ([]investigation.Event, error)
 }
 
 // Investigation is the handler.
@@ -134,4 +135,9 @@ func (h *Investigation) FederationLinks(w http.ResponseWriter, r *http.Request) 
 // Findings handles GET /v1/principals/{principal_id}/findings.
 func (h *Investigation) Findings(w http.ResponseWriter, r *http.Request) {
 	list(h.reader.Findings, "findings")(w, r)
+}
+
+// Events handles GET /v1/principals/{principal_id}/events (TDD-identity-control-005 2.9.0).
+func (h *Investigation) Events(w http.ResponseWriter, r *http.Request) {
+	list(h.reader.Events, "events")(w, r)
 }

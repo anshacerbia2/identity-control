@@ -663,6 +663,11 @@ slice:
    the mark. `deploy-dev` sweeps the live kernel twice. Not yet: canonical `identity.*` events, which
    follow with Audit & Evidence, and the kernel's listener, which follows a consumer that needs
    events sooner than one interval (ADR-IAM-001 §5.7).
+9. ✅ **A Principal's events, for an investigator** (`TDD-identity-control-005` 2.9.0).
+   `GET /v1/principals/{principal_id}/events` reads the record of item 8, newest first, the hundred
+   most recent: kind, role, type, outcome, client and resource type, and no IP address, session,
+   kernel identifier or resource path. A provider route at `aal2`, recorded as `read.events`. It is
+   what replaces the kernel's Admin Console for seeing who signed in and failed (ADR-IAM-001 §5.8).
 
 ## Waiting on the Keycloak proof-of-concept
 

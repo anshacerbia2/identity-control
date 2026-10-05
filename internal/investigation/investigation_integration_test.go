@@ -6,6 +6,7 @@ package investigation
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"strings"
@@ -266,5 +267,56 @@ func TestAReadThatFailsIsNotRecorded(t *testing.T) {
 	}
 	if records := h.evidence(); len(records) != 0 {
 		t.Errorf("%d records of reads that were not served", len(records))
+	}
+}
+
+// The Principal's kernel events, newest first, as the record holds them (TDD-identity-control-005 2.9.0):
+// a failed sign-in, a sign-in, and an admin change it made, with no IP address, session, kernel
+// identifier or resource path; the read is recorded.
+func TestAProviderReadsAPrincipalsEvents(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	alice, _ := h.principal("alice.events", "alice.events@example.com", true)
+	base := time.Now().UTC().Truncate(time.Millisecond)
+	insert := `INSERT INTO identity.kernel_event (realm, kind, kc_event_id, occurred_at, event_type, kc_user_id,
+	    principal_id, client_id, session_id, ip_address, error, resource_type, resource_path)
+	    VALUES ($1, $2, $3, $4, $5, 'kc-secret-user', $6, $7, 'kc-session-1', '203.0.113.77', nullif($8, ''),
+	    nullif($9, ''), nullif($10, ''))`
+	for _, e := range []struct {
+		kind, eventType, client, failure, resourceType, path string
+		at                                                   time.Time
+	}{
+		{"user", "LOGIN_ERROR", "app", "invalid_user_credentials", "", "", base.Add(-3 * time.Minute)},
+		{"user", "LOGIN", "app", "", "", "", base.Add(-2 * time.Minute)},
+		{"admin", "UPDATE", "admin-cli", "", "USER", "users/kc-other-user", base.Add(-time.Minute)},
+	} {
+		eventID, _ := id.NewV7()
+		if err := h.pool.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+			_, err := tx.Exec(ctx, insert, string(testRealm), e.kind, eventID.String(), e.at, e.eventType,
+				alice.String(), e.client, e.failure, e.resourceType, e.path)
+			return err
+		}); err != nil {
+			t.Fatalf("record an event: %v", err)
+		}
+	}
+
+	events, err := h.service.Events(ctx, h.actor, alice)
+	if err != nil || len(events) != 3 {
+		t.Fatalf("Events: %+v, %v", events, err)
+	}
+	if events[0].Type != "UPDATE" || events[0].Role != "actor" || events[0].ResourceType != "USER" ||
+		events[1].Type != "LOGIN" || events[1].Outcome != "success" || events[1].Role != "subject" ||
+		events[2].Type != "LOGIN_ERROR" || events[2].Outcome != "failure" || events[2].Error != "invalid_user_credentials" {
+		t.Errorf("events read as %+v; want newest first, each with its role and outcome", events)
+	}
+	encoded, _ := json.Marshal(events)
+	for _, hidden := range []string{"203.0.113.77", "kc-session-1", "kc-secret-user", "kc-other-user"} {
+		if strings.Contains(string(encoded), hidden) {
+			t.Errorf("the events disclose %q: %s", hidden, encoded)
+		}
+	}
+	records := h.evidence()
+	if len(records) != 1 || records[0].action != "read.events" || records[0].subject != alice.String() {
+		t.Errorf("the read was recorded as %+v; want one read.events about the Principal", records)
 	}
 }
