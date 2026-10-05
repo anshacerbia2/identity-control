@@ -145,6 +145,23 @@ type Finding struct {
 	Resolution string     `json:"resolution,omitempty"`
 }
 
+// Event is one kernel event in the Principal's record (TDD-identity-control-007): a user event the
+// Principal was the subject of, or an admin event it acted in. No IP address, session or kernel
+// identifier, and no admin resource path, which names kernel identifiers (TDD-identity-control-005
+// §Read Authorization and Disclosure).
+type Event struct {
+	OccurredAt time.Time `json:"occurred_at"`
+	// Kind is user or admin; Role is subject for a user event and actor for an admin event.
+	Kind string `json:"kind"`
+	Role string `json:"role"`
+	// Type is the kernel's: LOGIN, LOGIN_ERROR, LOGOUT, ...; or CREATE, UPDATE, DELETE, ACTION.
+	Type         string `json:"type"`
+	Outcome      string `json:"outcome"`
+	Error        string `json:"error,omitempty"`
+	ClientID     string `json:"client_id,omitempty"`
+	ResourceType string `json:"resource_type,omitempty"`
+}
+
 // PurposeRevoke is the purpose an authenticator's reference is sealed for: the administrative
 // revocation (TDD-identity-control-005 §API).
 const PurposeRevoke = securityref.PurposeAdminRevoke
@@ -427,4 +444,49 @@ func (s *Service) Findings(ctx context.Context, actor Actor, principalID id.UUID
 		return s.record(ctx, tx, actor, &principalID, "read.findings", nil, len(findings))
 	})
 	return findings, err
+}
+
+const eventsStatement = `SELECT occurred_at, kind, event_type, coalesce(error, ''), coalesce(client_id, ''),
+       coalesce(resource_type, '')
+FROM identity.kernel_event
+WHERE principal_id = $1
+ORDER BY occurred_at DESC, kc_event_id DESC
+LIMIT 100`
+
+// Events reads the Principal's kernel events, newest first: the hundred most recent the record holds
+// (TDD-identity-control-005 2.9.0, TDD-identity-control-007).
+func (s *Service) Events(ctx context.Context, actor Actor, principalID id.UUID) ([]Event, error) {
+	var events []Event
+	err := s.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		if _, _, err := s.readPrincipal(ctx, tx, principalID); err != nil {
+			return err
+		}
+		rows, err := tx.Query(ctx, eventsStatement, principalID.String())
+		if err != nil {
+			return fmt.Errorf("investigation: read the events: %w", err)
+		}
+		events = []Event{}
+		for rows.Next() {
+			var e Event
+			if err := rows.Scan(&e.OccurredAt, &e.Kind, &e.Type, &e.Error, &e.ClientID, &e.ResourceType); err != nil {
+				rows.Close()
+				return err
+			}
+			e.OccurredAt = e.OccurredAt.UTC()
+			e.Role, e.Outcome = "subject", "success"
+			if e.Kind == "admin" {
+				e.Role = "actor"
+			}
+			if e.Error != "" {
+				e.Outcome = "failure"
+			}
+			events = append(events, e)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		return s.record(ctx, tx, actor, &principalID, "read.events", nil, len(events))
+	})
+	return events, err
 }

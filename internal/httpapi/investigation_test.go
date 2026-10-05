@@ -72,6 +72,13 @@ func (s *stubInvestigator) Findings(_ context.Context, actor investigation.Actor
 	return []investigation.Finding{}, nil
 }
 
+func (s *stubInvestigator) Events(_ context.Context, actor investigation.Actor, subject id.UUID) ([]investigation.Event, error) {
+	if err := s.seen(actor, subject); err != nil {
+		return nil, err
+	}
+	return []investigation.Event{}, nil
+}
+
 func investigationHandler(t *testing.T, stub *stubInvestigator) http.Handler {
 	t.Helper()
 	investigations, err := httpapi.NewInvestigation(stub)
@@ -98,6 +105,7 @@ func TestAProviderReadsAPrincipalsSecurityState(t *testing.T) {
 		"/authenticators":   "authenticators",
 		"/federation-links": "federation_links",
 		"/findings":         "findings",
+		"/events":           "events",
 	} {
 		t.Run("principal"+path, func(t *testing.T) {
 			stub := &stubInvestigator{}
@@ -172,7 +180,8 @@ func TestOnlyAProviderReadsAnotherPrincipal(t *testing.T) {
 	subject := mustUUID(t).String()
 	for _, path := range []string{"/v1/principals:search?q=alice", "/v1/principals/" + subject,
 		"/v1/principals/" + subject + "/sessions", "/v1/principals/" + subject + "/authenticators",
-		"/v1/principals/" + subject + "/federation-links", "/v1/principals/" + subject + "/findings"} {
+		"/v1/principals/" + subject + "/federation-links", "/v1/principals/" + subject + "/findings",
+		"/v1/principals/" + subject + "/events"} {
 		stub := &stubInvestigator{}
 		handler := investigationHandler(t, stub)
 		anonymous := serve(handler, httptest.NewRequest(http.MethodGet, path, nil))
