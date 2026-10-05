@@ -41,6 +41,13 @@ jobs:
           ref: ${{ inputs.kernel_ref || 'main' }}
           path: .kernel
 
+      # identity-experience's create-bff-client.sh, which made the BFF's client on the development
+      # server, so the adoption procedure below runs against a client made the same way.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: anshacerbia2/identity-experience
+          path: .experience
+
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: ${{ env.GO_VERSION }}
@@ -206,6 +213,22 @@ jobs:
             sleep 1
           done
           pwsh -NoProfile -File scripts/dev-tenant-proof.ps1 -Phase prove -State "$state"
+
+      # STD-GLB-009 1.3.0: a procedure step runs in CI. The BFF's client is made the way the development
+      # server's was, by identity-experience's create-bff-client.sh, then adopted by
+      # scripts/dev-adopt-bff.ps1 exactly as deploy/dev/README.md tells an operator to. A wrong
+      # declaration is refused on audience_profile (ADR-IAM-001 §5.12 rule 3), and the adopted BFF's own
+      # token at aal2 is served on a provider route.
+      - name: the BFF adoption procedure
+        run: |
+          set -a; . deploy/dev/.env; set +a
+          export IDENTITY_API_URL=http://127.0.0.1:8082 KC_BASE_URL=https://localhost
+          export IDENTITY_OPERATOR_TOTP_FILE="$RUNNER_TEMP/operator-totp.json"
+          keys="$RUNNER_TEMP/bff-keys"
+          bash .kernel/deploy/dev/new-client-key.sh identity-experience-bff "$keys" "$(id -u):$(id -g)"
+          bash .experience/deploy/dev/create-bff-client.sh deploy/dev/.env "$keys/identity-experience-bff.jwk.json"
+          pwsh -NoProfile -File scripts/dev-bff-adoption-proof.ps1 \
+            -BffJwkFile "$keys/identity-experience-bff.jwk.json" -BffKeyFile "$keys/identity-experience-bff.pem"
 
       # identity-control ROADMAP §Proof B: both drift scenarios, a drift exception and its expiry,
       # and Keycloak stopped then started, against this live kernel. Each convergence time lands in

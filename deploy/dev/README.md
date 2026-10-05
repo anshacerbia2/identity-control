@@ -278,11 +278,17 @@ Content-Type: application/json
  "converge":["token_format","audience_scope"],"dry_run":true}
 ```
 
+`deploy-dev` runs this procedure on every change, against a client made by `create-bff-client.sh`
+the way this server's was (`scripts/dev-bff-adoption-proof.ps1`, STD-GLB-009 1.3.0). It also checks
+that a wrong declaration is refused at the plan, and that the adopted BFF's own token is served on a
+provider route.
+
 **The class is `privileged`, in the `provider-scope` form, never `internal`.** The script attached
 `scnehaux-provider`, and the Admin Portal's calls are provider routes, which require `acr` and
 `auth_time` (STD-IAM-002 §3.1.1). Adopted as `internal`, converging `audience_scope` would replace
 that scope with `scnehaux-internal`, and the BFF's next token would carry neither: every provider
-route would refuse it. This section said `internal` until 2026-10-05.
+route would refuse it. This section said `internal` until 2026-10-05. Such a declaration is now
+refused at the plan, on `audience_profile` (`TDD-identity-control-003` 1.30.0).
 
 The answer is the plan. `adoptable: true` means the client runs as declared. A `token_lifespan`,
 `audience_scope`, `enabled` or `token_format` difference is converged only if named in

@@ -91,3 +91,35 @@ func TestThePlanRefusesWhatTheDeclarationDoesNotMatch(t *testing.T) {
 		}
 	}
 }
+
+// The audience profile scope blocks (ADR-IAM-001 §5.12 rule 3, TDD-identity-control-003 1.30.0). A BFF
+// the script made with scnehaux-provider, declared internal, is refused even with audience_scope named
+// in converge: converging it would have replaced the provider profile, and every provider route would
+// have refused the next token. Declared as what it runs, privileged in the provider-scope form, it is
+// adoptable with its other scopes converged.
+func TestTheProfileScopeBlocksAWrongDeclaration(t *testing.T) {
+	provider := ScopeSets{Default: []string{"acr", "basic", "email", "scnehaux-provider"}, Optional: []string{}}
+
+	wrong := adoptable(ClassAudienceScope)
+	plan := planAdoption(wrong, runningBFF(), provider, "scnehaux-internal", 240, []keycloak.JWK{bffKey})
+	if plan.Adoptable || !differs(plan, ClassAudienceProfile) {
+		t.Fatalf("a provider client declared internal was adoptable: %+v", plan)
+	}
+	if plan.Refusal == "" || plan.Refusal[:len(ClassAudienceProfile)] != ClassAudienceProfile {
+		t.Errorf("the refusal %q does not name %s", plan.Refusal, ClassAudienceProfile)
+	}
+
+	right := adoptable(ClassAudienceScope)
+	right.AudienceClass, right.PrivilegedForm = "privileged", FormProviderScope
+	plan = planAdoption(right, runningBFF(), provider, "scnehaux-provider", 240, []keycloak.JWK{bffKey})
+	if !plan.Adoptable || differs(plan, ClassAudienceProfile) || !differs(plan, ClassAudienceScope) {
+		t.Errorf("the same client declared as it runs: %+v; want adoptable with audience_scope converged", plan)
+	}
+
+	// No profile scope at all is a different claim surface too.
+	none := ScopeSets{Default: []string{"acr", "basic"}, Optional: []string{}}
+	plan = planAdoption(right, runningBFF(), none, "scnehaux-provider", 240, []keycloak.JWK{bffKey})
+	if plan.Adoptable || !differs(plan, ClassAudienceProfile) {
+		t.Errorf("a client holding no profile scope was adoptable: %+v", plan)
+	}
+}

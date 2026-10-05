@@ -31,7 +31,36 @@ const (
 	ClassRedirectURIs  = "redirect_uris"
 	ClassClientKeys    = "client_keys"
 	ClassTokenFormat   = "token_format"
+	// ClassAudienceProfile is the audience profile scope among the client's default scopes: its claim
+	// surface (STD-IAM-002 §3.2.1). It blocks (ADR-IAM-001 §5.12 rule 3, TDD-identity-control-003
+	// 1.30.0): a difference means the declaration names the wrong class or form, and converging it
+	// would rewrite every token the client is issued.
+	ClassAudienceProfile = "audience_profile"
 )
+
+// profileScopes are the audience profile scopes the kernel declares, of every class and form.
+func profileScopes() map[string]bool {
+	out := map[string]bool{}
+	for _, scope := range managedScopes {
+		out[scope] = true
+	}
+	for _, scope := range privilegedScopes {
+		out[scope] = true
+	}
+	return out
+}
+
+// heldProfiles are the audience profile scopes among the client's default scopes, sorted.
+func heldProfiles(scopes ScopeSets) []string {
+	profiles := profileScopes()
+	held := []string{}
+	for _, scope := range scopes.Default {
+		if profiles[scope] {
+			held = append(held, scope)
+		}
+	}
+	return sortedStrings(held)
+}
 
 // convergeable are the repairable classes an adoption may converge when the request names them.
 var convergeable = []string{ClassTokenLifespan, ClassAudienceScope, ClassEnabled, ClassTokenFormat}
@@ -310,6 +339,7 @@ func planAdoption(req AdoptRequest, client keycloak.Client, scopes ScopeSets, sc
 		return out
 	}
 	desiredURIs, observedURIs := sortedStrings(req.RedirectURIs), sortedStrings(client.RedirectURIs)
+	desiredProfile, observedProfile := []string{scopeName}, heldProfiles(scopes)
 	plan := Plan{ClientKey: req.ClientKey, profile: req.Profile, audienceClass: req.AudienceClass,
 		privilegedForm: req.PrivilegedForm, Differences: []Difference{
 			{FieldClass: ClassTokenLifespan, Policy: PolicyRepair, Desired: lifespan, Observed: client.AccessTokenLifespan,
@@ -321,6 +351,8 @@ func planAdoption(req AdoptRequest, client keycloak.Client, scopes ScopeSets, sc
 				Observed: map[string]any{"at_jwt": client.RFC9068, "client_id": client.ClientIDClaim},
 				Differs:  !client.RFC9068 || client.ClientIDClaim != req.ClientKey},
 			{FieldClass: ClassEnabled, Policy: PolicyRepair, Desired: true, Observed: client.Enabled, Differs: !client.Enabled},
+			{FieldClass: ClassAudienceProfile, Policy: PolicyBlock, Desired: desiredProfile, Observed: observedProfile,
+				Differs: !slices.Equal(desiredProfile, observedProfile)},
 			{FieldClass: ClassRedirectURIs, Policy: PolicyBlock, Desired: desiredURIs, Observed: observedURIs,
 				Differs: !slices.Equal(desiredURIs, observedURIs)},
 			{FieldClass: ClassClientKeys, Policy: PolicyBlock,
