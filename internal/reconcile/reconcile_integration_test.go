@@ -177,7 +177,7 @@ func (h *harness) caller() registered {
 // holdsItsScopes gives a client the scope sets its profile holds (TDD-identity-control-003 §Profiles),
 // for an internal-audience registration the harness stored.
 func (h *harness) holdsItsScopes(client keycloak.ClientUUID, profile string) {
-	desired, _ := clientregistration.DesiredScopes(profile, "internal")
+	desired, _ := clientregistration.DesiredScopes(profile, "internal", "")
 	h.kernel.HoldScopes(client, desired.Default, desired.Optional)
 }
 

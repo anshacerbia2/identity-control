@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -255,6 +256,8 @@ func TestTheValidationRulesRefuse(t *testing.T) {
 		"an unknown profile":            {func(r *Request) { r.Profile = "native" }, ErrInvalid},
 		"a declared client lifetime":    {func(r *Request) { r.LifetimeClass = "L2" }, ErrInvalid},
 		"an unknown audience class":     {func(r *Request) { r.AudienceClass = "everyone" }, ErrInvalid},
+		"a form for another class":      {func(r *Request) { r.PrivilegedForm = FormTenantScoped }, ErrInvalid},
+		"an unknown privileged form":    {func(r *Request) { r.AudienceClass, r.PrivilegedForm = "privileged", "everyone" }, ErrInvalid},
 		"an undeclared scope":           {func(r *Request) { r.AudienceClass = "workload" }, ErrScopeUndeclared},
 		"a malformed client_key":        {func(r *Request) { r.ClientKey = "Web App" }, ErrInvalid},
 		"an unregistered audience":      {func(r *Request) { r.Audience = []string{"orders", "nobody"} }, ErrInvalid},
@@ -421,4 +424,60 @@ func TestAnUnknownRegistrationIsNotFound(t *testing.T) {
 // sameIDs reports whether the scope identifiers are exactly these, in any order.
 func sameIDs(got []string, want ...string) bool {
 	return slices.Equal(sortedStrings(got), sortedStrings(want))
+}
+
+// A privileged registration names its form (TDD-identity-control-003 1.29.0). Naming none is the
+// provider-scope form, as every privileged registration was before; tenant-scoped takes
+// scnehaux-privileged and holds organization, so a sign-in asks for its Tenant.
+func TestAPrivilegedRegistrationTakesItsFormsScope(t *testing.T) {
+	h := newHarness(t)
+	for _, c := range []struct {
+		key, form, wantForm, scope string
+		optional                   []string
+	}{
+		{"provider-console", "", FormProviderScope, "scope-provider", []string{"scope-sign-in"}},
+		{"tenant-console", FormTenantScoped, FormTenantScoped, "scope-privileged", []string{"scope-organization", "scope-sign-in"}},
+	} {
+		req := h.request(c.key, ProfileConfidential)
+		req.AudienceClass, req.PrivilegedForm = "privileged", c.form
+		req.RedirectURIs = []string{"https://" + c.key + ".example.com/callback"}
+		req.PublicKey = testKey(t).public
+		registration, err := h.service.Register(context.Background(), req)
+		if err != nil {
+			t.Fatalf("%s: %v", c.key, err)
+		}
+		if registration.PrivilegedForm != c.wantForm {
+			t.Errorf("%s: privileged_form %q, want %q", c.key, registration.PrivilegedForm, c.wantForm)
+		}
+		_, client := h.state(registration.ID)
+		_, scopes, ok := h.kernel.Spec(keycloak.ClientUUID(client))
+		if !ok {
+			t.Fatalf("%s: no client was created", c.key)
+		}
+		if !sameIDs(scopes, "scope-acr", "scope-basic", c.scope) ||
+			!sameIDs(h.kernel.OptionalScopes(keycloak.ClientUUID(client)), c.optional...) {
+			t.Errorf("%s: default scopes %v, optional %v; want basic, acr and %s, and %v optional", c.key, scopes,
+				h.kernel.OptionalScopes(keycloak.ClientUUID(client)), c.scope, c.optional)
+		}
+		read, err := h.service.Get(context.Background(), registration.ID)
+		if err != nil || read.PrivilegedForm != c.wantForm {
+			t.Errorf("%s: Get answered %+v, %v", c.key, read, err)
+		}
+	}
+
+	// The database holds the rule as well: a privileged row without a form, or a form on another class.
+	for name, statement := range map[string]string{
+		"a privileged row without a form": `UPDATE identity.client_registration SET privileged_form = NULL
+		    WHERE realm = $1 AND client_key = 'provider-console'`,
+		"a form on an internal row": `UPDATE identity.client_registration SET audience_class = 'internal'
+		    WHERE realm = $1 AND client_key = 'tenant-console'`,
+	} {
+		err := h.pool.InTx(context.Background(), func(ctx context.Context, tx db.Tx) error {
+			_, err := tx.Exec(ctx, statement, string(testRealm))
+			return err
+		})
+		if err == nil || !strings.Contains(err.Error(), "client_privileged_form_check") {
+			t.Errorf("%s: %v, want client_privileged_form_check to refuse it", name, err)
+		}
+	}
 }

@@ -52,6 +52,7 @@ func (h *Registrations) ProposeRegistration(w http.ResponseWriter, r *http.Reque
 		Request: registration.Request{
 			RegisteredBy: principal, Developer: !IsProvider(r.Context()),
 			ClientKey: body.ClientKey, Profile: body.Profile, AudienceClass: body.AudienceClass,
+			PrivilegedForm: body.PrivilegedForm,
 			ApplicationRef: body.ApplicationRef, LifetimeClass: body.LifetimeClass,
 			Audience: body.Audience, RedirectURIs: body.RedirectURIs, PublicKey: body.PublicKey,
 		},

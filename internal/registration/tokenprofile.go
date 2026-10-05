@@ -35,9 +35,17 @@ const (
 )
 
 // tenantClasses are the audience classes that may carry tenant_id (STD-IAM-002 §3.2): internal, and
-// a workload, which is tenant-scoped once its service-account user is a member. privileged is the
-// provider form here, which carries no Tenant, and external carries no enterprise claim.
+// a workload, which is tenant-scoped once its service-account user is a member. privileged carries a
+// Tenant only in its tenant-scoped form (tenantScoped), and external carries no enterprise claim.
 var tenantClasses = map[string]bool{"internal": true, "workload": true}
+
+// tenantScoped reports whether a client of the class and form may carry tenant_id.
+func tenantScoped(audienceClass, privilegedForm string) bool {
+	if audienceClass == "privileged" {
+		return privilegedForm == FormTenantScoped
+	}
+	return tenantClasses[audienceClass]
+}
 
 // ScopeSets are a client's default and optional client scopes, by name.
 type ScopeSets struct {
@@ -47,11 +55,11 @@ type ScopeSets struct {
 
 // DesiredScopes are the closed sets a client of this profile and audience class holds. ok is false
 // for a resource, which is issued no token and whose scopes are not governed.
-func DesiredScopes(profile, audienceClass string) (ScopeSets, bool) {
+func DesiredScopes(profile, audienceClass, privilegedForm string) (ScopeSets, bool) {
 	if profile == ProfileResource {
 		return ScopeSets{}, false
 	}
-	desired := ScopeSets{Default: []string{ScopeBasic, managedScopes[audienceClass]}, Optional: []string{}}
+	desired := ScopeSets{Default: []string{ScopeBasic, ManagedScope(audienceClass, privilegedForm)}, Optional: []string{}}
 	if profile == ProfileWorkload {
 		desired.Default = append(desired.Default, ScopeServiceAccount)
 	} else {
@@ -60,7 +68,7 @@ func DesiredScopes(profile, audienceClass string) (ScopeSets, bool) {
 	if profile == ProfileConfidential {
 		desired.Optional = append(desired.Optional, ScopeProfile)
 	}
-	if tenantClasses[audienceClass] {
+	if tenantScoped(audienceClass, privilegedForm) {
 		desired.Optional = append(desired.Optional, ScopeOrganization)
 	}
 	slices.Sort(desired.Default)

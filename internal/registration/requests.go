@@ -71,6 +71,7 @@ type document struct {
 	ClientKey      string          `json:"client_key"`
 	Profile        string          `json:"profile"`
 	AudienceClass  string          `json:"audience_class"`
+	PrivilegedForm string          `json:"privileged_form,omitempty"`
 	ApplicationRef string          `json:"application_ref"`
 	LifetimeClass  string          `json:"lifetime_class,omitempty"`
 	Audience       []string        `json:"audience,omitempty"`
@@ -197,7 +198,7 @@ func readRequest(ctx context.Context, tx db.Tx, statement string, args ...any) (
 // members. A private key was refused before this is reached.
 func documentOf(req Request) (json.RawMessage, error) {
 	doc := document{ClientKey: req.ClientKey, Profile: req.Profile, AudienceClass: req.AudienceClass,
-		ApplicationRef: strings.TrimSpace(req.ApplicationRef), LifetimeClass: req.LifetimeClass,
+		PrivilegedForm: req.PrivilegedForm, ApplicationRef: strings.TrimSpace(req.ApplicationRef), LifetimeClass: req.LifetimeClass,
 		Audience: req.Audience, RedirectURIs: req.RedirectURIs}
 	if keyed(req.Profile) {
 		parsed, err := parsePublicKey(req.PublicKey)
@@ -219,7 +220,7 @@ func requestOf(raw json.RawMessage) (Request, error) {
 		return Request{}, fmt.Errorf("registration: read a stored request: %w", err)
 	}
 	return Request{ClientKey: doc.ClientKey, Profile: doc.Profile, AudienceClass: doc.AudienceClass,
-		ApplicationRef: doc.ApplicationRef, LifetimeClass: doc.LifetimeClass, Audience: doc.Audience,
+		PrivilegedForm: doc.PrivilegedForm, ApplicationRef: doc.ApplicationRef, LifetimeClass: doc.LifetimeClass, Audience: doc.Audience,
 		RedirectURIs: doc.RedirectURIs, PublicKey: doc.PublicKey}, nil
 }
 
@@ -265,7 +266,7 @@ func (s *Service) ProposeRegistration(ctx context.Context, proposal Registration
 	if err := proposal.validate(); err != nil {
 		return RegistrationRequest{}, false, err
 	}
-	req := proposal.Request
+	req := proposal.Request.normalized()
 	if err := validate(req); err != nil {
 		return RegistrationRequest{}, false, err
 	}

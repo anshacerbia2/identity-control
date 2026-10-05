@@ -108,6 +108,7 @@ type registerRequest struct {
 	ClientKey      string          `json:"client_key"`
 	Profile        string          `json:"profile"`
 	AudienceClass  string          `json:"audience_class"`
+	PrivilegedForm string          `json:"privileged_form"`
 	ApplicationRef string          `json:"application_ref"`
 	LifetimeClass  string          `json:"lifetime_class"`
 	Audience       []string        `json:"audience"`
@@ -142,6 +143,7 @@ func (h *Registrations) Register(w http.ResponseWriter, r *http.Request) {
 		// standing, so that is what such a caller registers on.
 		Developer: !IsProvider(r.Context()),
 		ClientKey: body.ClientKey, Profile: body.Profile, AudienceClass: body.AudienceClass,
+		PrivilegedForm: body.PrivilegedForm,
 		ApplicationRef: body.ApplicationRef, LifetimeClass: body.LifetimeClass,
 		Audience: body.Audience, RedirectURIs: body.RedirectURIs, PublicKey: body.PublicKey,
 	})
@@ -158,6 +160,7 @@ type adoptRequest struct {
 	ClientKey      string            `json:"client_key"`
 	Profile        string            `json:"profile"`
 	AudienceClass  string            `json:"audience_class"`
+	PrivilegedForm string            `json:"privileged_form"`
 	ApplicationRef string            `json:"application_ref"`
 	LifetimeClass  string            `json:"lifetime_class"`
 	Audience       []string          `json:"audience"`
@@ -201,6 +204,7 @@ func (h *Registrations) Adopt(w http.ResponseWriter, r *http.Request) {
 	result, err := h.registrar.Adopt(r.Context(), registration.AdoptRequest{
 		Request: registration.Request{CallerScope: scope, IdempotencyKey: key, RegisteredBy: principal,
 			ClientKey: body.ClientKey, Profile: body.Profile, AudienceClass: body.AudienceClass,
+			PrivilegedForm: body.PrivilegedForm,
 			ApplicationRef: body.ApplicationRef, LifetimeClass: body.LifetimeClass, Audience: body.Audience,
 			RedirectURIs: body.RedirectURIs},
 		PublicKeys: body.PublicKeys, Reason: reason, DryRun: body.DryRun, Converge: body.Converge,

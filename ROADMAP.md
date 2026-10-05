@@ -633,6 +633,13 @@ slice:
 - foundation-platform `verify` step 8, the current-state check (STD-IAM-002 1.6.0);
 - the BFF asks for a Tenant at sign-in (identity-experience).
 
+6. ✅ **The tenant-scoped privileged form** (`TDD-identity-control-003` 1.29.0). A `privileged`
+   registration names `privileged_form`: `provider-scope`, the default and what every earlier one
+   was, holds `scnehaux-provider`; `tenant-scoped` holds identity-kernel's `scnehaux-privileged`
+   and `organization` optional, so a Tenant administrator's sign-in asks for its Tenant
+   (`ADR-ORG-003 §5.3`). The migration records `provider-scope` for every existing `privileged`
+   row, and a check holds the form to the class. It stays a provider's to register.
+
 ## Waiting on the Keycloak proof-of-concept
 
 Each item names the question that unblocks it. All of them are adapters, which is why

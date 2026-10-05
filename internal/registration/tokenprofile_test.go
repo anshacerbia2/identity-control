@@ -13,21 +13,25 @@ import (
 // Each profile's closed sets (TDD-identity-control-003 §Profiles).
 func TestEachProfileHoldsItsScopeSets(t *testing.T) {
 	for _, c := range []struct {
-		profile, class    string
-		defaults, options []string
-		governed          bool
+		profile, class, form string
+		defaults, options    []string
+		governed             bool
 	}{
-		{ProfileConfidential, "internal", []string{"acr", "basic", "scnehaux-internal"},
+		{ProfileConfidential, "internal", "", []string{"acr", "basic", "scnehaux-internal"},
 			[]string{"organization", "scnehaux-profile"}, true},
-		{ProfileConfidential, "privileged", []string{"acr", "basic", "scnehaux-provider"}, []string{"scnehaux-profile"}, true},
-		{ProfilePublic, "external", []string{"acr", "basic", "scnehaux-external"}, []string{}, true},
-		{ProfilePublic, "internal", []string{"acr", "basic", "scnehaux-internal"}, []string{"organization"}, true},
-		{ProfileWorkload, "workload", []string{"basic", "scnehaux-workload", "service_account"}, []string{"organization"}, true},
-		{ProfileResource, "internal", nil, nil, false},
+		{ProfileConfidential, "privileged", FormProviderScope, []string{"acr", "basic", "scnehaux-provider"},
+			[]string{"scnehaux-profile"}, true},
+		// The tenant-scoped form (1.29.0): its own profile scope, and organization to ask for a Tenant.
+		{ProfileConfidential, "privileged", FormTenantScoped, []string{"acr", "basic", "scnehaux-privileged"},
+			[]string{"organization", "scnehaux-profile"}, true},
+		{ProfilePublic, "external", "", []string{"acr", "basic", "scnehaux-external"}, []string{}, true},
+		{ProfilePublic, "internal", "", []string{"acr", "basic", "scnehaux-internal"}, []string{"organization"}, true},
+		{ProfileWorkload, "workload", "", []string{"basic", "scnehaux-workload", "service_account"}, []string{"organization"}, true},
+		{ProfileResource, "internal", "", nil, nil, false},
 	} {
-		got, governed := DesiredScopes(c.profile, c.class)
+		got, governed := DesiredScopes(c.profile, c.class, c.form)
 		if governed != c.governed || !slices.Equal(got.Default, c.defaults) || !slices.Equal(got.Optional, c.options) {
-			t.Errorf("%s/%s: %+v governed %v, want %v %v", c.profile, c.class, got, governed, c.defaults, c.options)
+			t.Errorf("%s/%s/%s: %+v governed %v, want %v %v", c.profile, c.class, c.form, got, governed, c.defaults, c.options)
 		}
 	}
 	if !SameScopes(ScopeSets{Default: []string{"basic", "acr", "basic"}}, ScopeSets{Default: []string{"acr", "basic"}}) {
@@ -45,7 +49,7 @@ func TestScopesConvergeToTheSets(t *testing.T) {
 	client := keycloak.ClientUUID("kc-bff")
 	kernel.Put(keycloak.Client{ID: client, ClientID: "bff", Enabled: true})
 	kernel.HoldScopes(client, []string{"acr", "basic", "email", "profile", "web-origins"}, []string{"email", "offline_access"})
-	desired, _ := DesiredScopes(ProfileConfidential, "internal")
+	desired, _ := DesiredScopes(ProfileConfidential, "internal", "")
 	if err := ConvergeScopes(context.Background(), kernel, "realm", client, desired, time.Second); err != nil {
 		t.Fatal(err)
 	}
