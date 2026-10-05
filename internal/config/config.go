@@ -59,6 +59,11 @@ type Config struct {
 	RegistrationClientID      string
 	RegistrationClientKeyFile string
 
+	// KernelEventInterval is the kernel event record's sweep cadence and window overlap
+	// (TDD-identity-control-007). At most 7h: the kernel keeps events 7 days, and each must be read at
+	// least twice before it expires, with a safety factor of twenty-four (TDD-identity-kernel-003).
+	KernelEventInterval time.Duration
+
 	// RegistrationReconcileInterval is the registration drift sweep cadence. identity-kernel keeps
 	// admin events for 7 days, and a change must still carry its event when a sweep reads it.
 	RegistrationReconcileInterval time.Duration
@@ -224,6 +229,10 @@ func Load() (Config, error) {
 	cfg.ProvisionTimeout = durationOr("IDENTITY_PROVISION_TIMEOUT", 10*time.Second, &problems)
 	cfg.PendingRecoveryAfter = durationOr("IDENTITY_PENDING_RECOVERY_AFTER", 60*time.Second, &problems)
 	cfg.ReconcilePageSize = intOr("IDENTITY_RECONCILE_PAGE_SIZE", 200, &problems)
+	cfg.KernelEventInterval = durationOr("IDENTITY_KERNEL_EVENT_INTERVAL", time.Hour, &problems)
+	if cfg.KernelEventInterval <= 0 || cfg.KernelEventInterval > 7*time.Hour {
+		problems = append(problems, errors.New("IDENTITY_KERNEL_EVENT_INTERVAL must be positive and at most 7h, so every kernel event is read at least twice before its 7-day retention expires it"))
+	}
 	cfg.RegistrationReconcileInterval = durationOr("IDENTITY_REGISTRATION_RECONCILE_INTERVAL", time.Hour, &problems)
 	if cfg.RegistrationReconcileInterval >= 7*24*time.Hour {
 		problems = append(problems, errors.New("IDENTITY_REGISTRATION_RECONCILE_INTERVAL must be shorter than the kernel's 7-day admin-event retention, or a change loses its attribution before a sweep reads it"))

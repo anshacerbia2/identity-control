@@ -47,6 +47,10 @@ type RoutesConfig struct {
 	// is not mounted.
 	TenantContext TenantReporter
 
+	// KernelEvents sweeps the kernel's event store into the record on request (TDD-identity-control-007).
+	// Nil, its route is not mounted.
+	KernelEvents KernelEventSweeper
+
 	// Deliveries applies Organization's provider grant events, and DeliveryVerifier admits the
 	// delivering workload alone (TDD-identity-control-006). Either nil, the intake answers 503.
 	Deliveries       Applier
@@ -145,6 +149,9 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 		api.HandleFunc("GET /v1/principals/{principal_id}/authenticators", p(cfg.Investigation.Authenticators))
 		api.HandleFunc("GET /v1/principals/{principal_id}/federation-links", p(cfg.Investigation.FederationLinks))
 		api.HandleFunc("GET /v1/principals/{principal_id}/findings", p(cfg.Investigation.Findings))
+	}
+	if cfg.KernelEvents != nil {
+		api.HandleFunc("POST /v1/kernel-events:sweep", p(kernelEventSweep(cfg.KernelEvents)))
 	}
 	if cfg.TenantContext != nil {
 		api.HandleFunc("GET /v1/projections/tenant-context/report", p(tenantReport(cfg.TenantContext)))

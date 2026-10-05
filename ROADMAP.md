@@ -653,6 +653,16 @@ slice:
    another claim surface. `deploy-dev` runs the BFF's adoption procedure against a client
    `create-bff-client.sh` made, as STD-GLB-009 1.3.0 requires of a procedure step. Found when
    `deploy/dev/README.md` declared the BFF `internal`.
+8. ✅ **The kernel event record** (`TDD-identity-control-007`, STD-IAM-001 §3.8 2.3.0). Every user and
+   admin event the kernel records is read from its native store through the Admin API, in windows
+   that overlap by one interval, and written once into `identity.kernel_event`, keyed on the kernel's
+   event identifier, with its Principal resolved and every credential value redacted. It is kept
+   until Audit & Evidence has it; the kernel keeps its own for 7 days. The sweep runs every
+   `IDENTITY_KERNEL_EVENT_INTERVAL` (1h, at most 7h) and on `POST /v1/kernel-events:sweep`, with the
+   registration credential, which already holds `view-events`. A read that reaches its bound keeps
+   the mark. `deploy-dev` sweeps the live kernel twice. Not yet: canonical `identity.*` events, which
+   follow with Audit & Evidence, and the kernel's listener, which follows a consumer that needs
+   events sooner than one interval (ADR-IAM-001 §5.7).
 
 ## Waiting on the Keycloak proof-of-concept
 

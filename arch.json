@@ -21,6 +21,7 @@
       "internal/httpapi",
       "internal/identity/provisioning",
       "internal/investigation",
+      "internal/kernelevents",
       "internal/keycloak",
       "internal/organization",
       "internal/providerauthority",
@@ -109,6 +110,7 @@
       "seals object handles with internal/securityref, which reaches no internal package: it is",
       "the AEAD codec and nothing else."
     ],
+    "internal/kernelevents": ["internal/keycloak", "internal/keycloak/keycloakfake"],
     "internal/securityref": [],
     "internal/investigation": [
       "internal/keycloak",
@@ -129,6 +131,7 @@
       "internal/delivery",
       "internal/identity/provisioning",
       "internal/investigation",
+      "internal/kernelevents",
       "internal/keycloak",
       "internal/providerauthority",
       "internal/reconcile",

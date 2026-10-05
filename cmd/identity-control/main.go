@@ -35,6 +35,7 @@ import (
 	"github.com/anshacerbia2/identity-control/internal/httpapi"
 	"github.com/anshacerbia2/identity-control/internal/identity/provisioning"
 	"github.com/anshacerbia2/identity-control/internal/investigation"
+	"github.com/anshacerbia2/identity-control/internal/kernelevents"
 	"github.com/anshacerbia2/identity-control/internal/keycloak"
 	"github.com/anshacerbia2/identity-control/internal/organization"
 	"github.com/anshacerbia2/identity-control/internal/providerauthority"
@@ -288,7 +289,16 @@ func run() error {
 	// The provider authority projection's intake (TDD-identity-control-006). It verifies its own
 	// caller, Organization Control's workload, with the same issuer, audience and keys and a claim
 	// rule that admits that workload alone. Unconfigured, the intake answers 503.
+	// The kernel event record (TDD-identity-control-007): read with the registration credential, which
+	// already holds view-events, the one role both of the kernel's event stores need.
+	kernelEvents, err := kernelevents.NewSweeper(pool, registry, keycloak.Realm(cfg.KeycloakRealm),
+		cfg.KernelEventInterval, logger)
+	if err != nil {
+		return fmt.Errorf("kernel event sweep: %w", err)
+	}
+
 	routesConfig := httpapi.RoutesConfig{
+		KernelEvents:  kernelEvents,
 		Principals:    principals,
 		Registrations: registrations,
 		Workloads:     workloadHandler,
@@ -465,6 +475,7 @@ func run() error {
 		return fmt.Errorf("tenant context reconciler: %w", err)
 	}
 	go scheduleTenantSweeps(ctx, tenantSweep, cfg.ProjectionReconcileInterval, logger)
+	go scheduleKernelEventSweeps(ctx, kernelEvents, cfg.KernelEventInterval, logger)
 	go scheduleSweeps(ctx, provisioner, registrar, workloads, reconciler, cfg.RegistrationReconcileInterval, logger)
 	if freshness != nil {
 		go freshness.Poll(ctx, projection, frontier, providerauthority.PollInterval, logger)
@@ -629,6 +640,24 @@ func scheduleTenantSweeps(ctx context.Context, sweep *tenantcontext.Reconciler, 
 	for {
 		if _, err := sweep.Sweep(ctx); err != nil && ctx.Err() == nil {
 			logger.Error("tenant context sweep failed", slog.String("error", err.Error()))
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// scheduleKernelEventSweeps sweeps the kernel's event store into the record every interval, the first
+// at once (TDD-identity-control-007). A failed sweep is logged; the next reads the same window.
+func scheduleKernelEventSweeps(ctx context.Context, sweeper *kernelevents.Sweeper, interval time.Duration,
+	logger *slog.Logger) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		if _, err := sweeper.Sweep(ctx); err != nil && ctx.Err() == nil {
+			logger.Error("kernel event sweep failed", slog.String("error", err.Error()))
 		}
 		select {
 		case <-ctx.Done():

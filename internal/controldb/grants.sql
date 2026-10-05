@@ -56,6 +56,8 @@ BEGIN
               ('identity.membership_desired'),
               ('identity.tenant_convergence'),
               ('identity.projection_finding'),
+              ('identity.kernel_event'),
+              ('identity.kernel_event_mark'),
               ('platform.outbox'),
               ('platform.processed_event'),
               ('platform.dead_letter'),
@@ -182,6 +184,10 @@ REVOKE DELETE, TRUNCATE ON identity.membership_desired FROM identity_runtime;
 REVOKE DELETE, TRUNCATE ON identity.tenant_convergence FROM identity_runtime;
 -- A finding is evidence: written once, never changed or removed.
 REVOKE UPDATE, DELETE, TRUNCATE ON identity.projection_finding FROM identity_runtime;
+-- The kernel event record (TDD-identity-control-007, STD-IAM-001 §3.8): written once by the sweep,
+-- never edited, and kept until Audit & Evidence has it. The mark moves; nothing deletes it.
+REVOKE UPDATE, DELETE, TRUNCATE ON identity.kernel_event FROM identity_runtime;
+REVOKE DELETE, TRUNCATE ON identity.kernel_event_mark FROM identity_runtime;
 -- The ceremony grant ends once, by an insert, and is never revived: insert-only like the ceremony
 -- row it retires (TDD-identity-control-006 §The Ceremony's Grant).
 REVOKE UPDATE, DELETE, TRUNCATE ON identity.ceremony_grant_retirement FROM identity_runtime;
