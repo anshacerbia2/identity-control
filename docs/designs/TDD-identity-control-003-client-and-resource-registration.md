@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-003
   title: Protocol Client and Protected-Resource Registration
   owner: Core Platform Team
-  version: 1.29.0
+  version: 1.30.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -685,6 +685,7 @@ adopt(request):
         audience_scope   repairable   exactly the default and optional scopes of §Profiles
         token_format     repairable   the at+jwt attribute and the client_id mapper
         enabled          repairable   the client is enabled
+        audience_profile blocking     its audience profile scope is the declaration's (1.30.0)
         redirect_uris    blocking
         client_keys      blocking     client-jwt, the held JWKS, exactly the declared keys
     if dry_run: return the plan, change nothing
@@ -716,6 +717,17 @@ it was adopted, the registration. The first declared key is recorded `active` an
   is a change to a client that is still unmanaged, and the adoption retried finds nothing left to
   converge. A record written before a failed convergence would describe a registration whose
   client does not match it.
+- **The audience profile scope blocks (1.30.0, `ADR-IAM-001 §5.12` rule 3).** It is the managed
+  scope among the client's default scopes: `scnehaux-internal`, `-provider`, `-privileged`,
+  `-workload` or `-external`, the client's claim surface. A difference means the declaration names
+  the wrong `audience_class` or `privileged_form`, not that the client drifted, so it is not
+  converged: converging it would rewrite every token the client is issued. A client holding none,
+  or another one, is refused, and the refusal names `audience_profile`. The other scopes still
+  converge under `audience_scope` when named. ADR-IAM-001 [R40] and [R41] give the sources:
+  Kubernetes Server-Side Apply refuses a change to a field another manager owns unless forced, and
+  Terraform's import answers an unexpected change by fixing the configuration. The case that found
+  it: `deploy/dev/README.md` declared the BFF `internal`, and converging `audience_scope` would
+  have replaced its `scnehaux-provider`, so every provider route would have refused its next token.
 - **A client the unmanaged branch disabled is adopted disabled** unless `enabled` is named: whether
   it runs again is the operator's decision, not a side effect of adopting it.
 
@@ -1544,6 +1556,8 @@ two creates nothing.
   Database.
 - A client whose redirect URIs or keys differ from the declaration is refused, and so is one that
   authenticates with a secret or a JWKS URL, and the refusal carries the plan.
+- A client whose audience profile scope is not the declaration's, or that holds none, is refused
+  even with `audience_scope` named in `converge` (1.30.0).
 - A repairable difference is refused unless named, and converged when named.
 - A client that does not exist, a client_key already registered, a profile other than
   `confidential`, and a declared key already registered are refused.

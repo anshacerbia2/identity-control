@@ -647,6 +647,12 @@ slice:
    and `organization` optional, so a Tenant administrator's sign-in asks for its Tenant
    (`ADR-ORG-003 §5.3`). The migration records `provider-scope` for every existing `privileged`
    row, and a check holds the form to the class. It stays a provider's to register.
+7. ✅ **An adoption blocks on the claim surface** (`TDD-identity-control-003` 1.30.0, ADR-IAM-001
+   §5.12 rule 3). The audience profile scope is a blocking field class, `audience_profile`: a
+   declaration naming the wrong class or form is refused at the plan rather than converged into
+   another claim surface. `deploy-dev` runs the BFF's adoption procedure against a client
+   `create-bff-client.sh` made, as STD-GLB-009 1.3.0 requires of a procedure step. Found when
+   `deploy/dev/README.md` declared the BFF `internal`.
 
 ## Waiting on the Keycloak proof-of-concept
 
