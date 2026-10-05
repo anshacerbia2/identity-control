@@ -255,17 +255,34 @@ a plan first, then the adoption, held to the key it already authenticates with. 
 sweep reports it `unmanaged`, and the server must stay on `IDENTITY_UNMANAGED_CLIENTS=report`,
 the default, or the BFF is disabled with every open session.
 
-With a provider-scope token (`scripts/dev-token.ps1`), plan it:
+`scripts/dev-adopt-bff.ps1` does both steps, with the caller's credentials from the environment as
+`dev-smoke.ps1` reads them and the BFF's **public** JWK, the one `new-client-key.mjs` wrote beside its
+private key. It plans first and adopts only with `-Apply`:
+
+```powershell
+pwsh ./scripts/dev-adopt-bff.ps1 -BffJwkFile ./identity-experience-bff.jwk.json          # the plan
+pwsh ./scripts/dev-adopt-bff.ps1 -BffJwkFile ./identity-experience-bff.jwk.json -Apply   # adopt
+```
+
+The declaration it sends, with a provider-scope token (`scripts/dev-token.ps1`):
 
 ```http
 POST /v1/registrations:adopt
 X-Administrative-Reason: the BFF comes under registration
 Content-Type: application/json
 
-{"client_key":"identity-experience-bff","profile":"confidential","audience_class":"internal",
- "application_ref":"identity-experience","redirect_uris":["<the BFF's callback URIs, exactly>"],
- "public_keys":[<the public JWK of identity-experience-bff.pem>],"dry_run":true}
+{"client_key":"identity-experience-bff","profile":"confidential","audience_class":"privileged",
+ "privileged_form":"provider-scope","application_ref":"identity-experience",
+ "redirect_uris":["http://127.0.0.1:8090/auth/callback"],"audience":["identity-control-api"],
+ "public_keys":[<the public JWK of identity-experience-bff>],
+ "converge":["token_format","audience_scope"],"dry_run":true}
 ```
+
+**The class is `privileged`, in the `provider-scope` form, never `internal`.** The script attached
+`scnehaux-provider`, and the Admin Portal's calls are provider routes, which require `acr` and
+`auth_time` (STD-IAM-002 §3.1.1). Adopted as `internal`, converging `audience_scope` would replace
+that scope with `scnehaux-internal`, and the BFF's next token would carry neither: every provider
+route would refuse it. This section said `internal` until 2026-10-05.
 
 The answer is the plan. `adoptable: true` means the client runs as declared. A `token_lifespan`,
 `audience_scope`, `enabled` or `token_format` difference is converged only if named in
