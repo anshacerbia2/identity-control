@@ -80,7 +80,7 @@ type Plan struct {
 	Differences []Difference `json:"differences"`
 
 	// The declaration's profile and audience class, which the scope sets are derived from.
-	profile, audienceClass string
+	profile, audienceClass, privilegedForm string
 }
 
 // AdoptResult is the plan, and the registration when the client was adopted.
@@ -109,6 +109,7 @@ func (s *Service) Adopt(ctx context.Context, req AdoptRequest) (AdoptResult, err
 			return AdoptResult{}, invalid("converge names only token_lifespan, audience_scope, enabled or token_format")
 		}
 	}
+	req.Request = req.Request.normalized()
 	if err := validate(req.Request); err != nil {
 		return AdoptResult{}, err
 	}
@@ -138,7 +139,7 @@ func (s *Service) Adopt(ctx context.Context, req AdoptRequest) (AdoptResult, err
 		}
 	}
 
-	scopeName := managedScopes[req.AudienceClass]
+	scopeName := ManagedScope(req.AudienceClass, req.PrivilegedForm)
 	scopeID, err := call(ctx, s.cfg.CallTimeout, func(ctx context.Context) (string, error) {
 		return s.kernel.ClientScopeID(ctx, s.cfg.Realm, scopeName)
 	})
@@ -296,7 +297,7 @@ func (s *Service) checkAdoptable(ctx context.Context, req Request, keys []Public
 // planAdoption compares the client with the declaration, per field class.
 func planAdoption(req AdoptRequest, client keycloak.Client, scopes ScopeSets, scopeName string, lifespan int,
 	keys []keycloak.JWK) Plan {
-	desiredScopes, _ := DesiredScopes(req.Profile, req.AudienceClass)
+	desiredScopes, _ := DesiredScopes(req.Profile, req.AudienceClass, req.PrivilegedForm)
 	sortedSets := func(sets ScopeSets) ScopeSets {
 		return ScopeSets{Default: sortedStrings(sets.Default), Optional: sortedStrings(sets.Optional)}
 	}
@@ -309,24 +310,25 @@ func planAdoption(req AdoptRequest, client keycloak.Client, scopes ScopeSets, sc
 		return out
 	}
 	desiredURIs, observedURIs := sortedStrings(req.RedirectURIs), sortedStrings(client.RedirectURIs)
-	plan := Plan{ClientKey: req.ClientKey, profile: req.Profile, audienceClass: req.AudienceClass, Differences: []Difference{
-		{FieldClass: ClassTokenLifespan, Policy: PolicyRepair, Desired: lifespan, Observed: client.AccessTokenLifespan,
-			Differs: client.AccessTokenLifespan != lifespan},
-		{FieldClass: ClassAudienceScope, Policy: PolicyRepair, Desired: sortedSets(desiredScopes),
-			Observed: sortedSets(scopes), Differs: !SameScopes(scopes, desiredScopes)},
-		{FieldClass: ClassTokenFormat, Policy: PolicyRepair,
-			Desired:  map[string]any{"at_jwt": true, "client_id": req.ClientKey},
-			Observed: map[string]any{"at_jwt": client.RFC9068, "client_id": client.ClientIDClaim},
-			Differs:  !client.RFC9068 || client.ClientIDClaim != req.ClientKey},
-		{FieldClass: ClassEnabled, Policy: PolicyRepair, Desired: true, Observed: client.Enabled, Differs: !client.Enabled},
-		{FieldClass: ClassRedirectURIs, Policy: PolicyBlock, Desired: desiredURIs, Observed: observedURIs,
-			Differs: !slices.Equal(desiredURIs, observedURIs)},
-		{FieldClass: ClassClientKeys, Policy: PolicyBlock,
-			Desired: map[string]any{"authenticator": "client-jwt", "held_jwks": true, "kids": kids(keys)},
-			Observed: map[string]any{"authenticator": client.Credential.Authenticator, "held_jwks": client.Credential.HeldJWKS,
-				"unreadable": client.Credential.Unreadable, "kids": kids(client.Credential.Keys)},
-			Differs: !client.Credential.ByKeys(keys)},
-	}}
+	plan := Plan{ClientKey: req.ClientKey, profile: req.Profile, audienceClass: req.AudienceClass,
+		privilegedForm: req.PrivilegedForm, Differences: []Difference{
+			{FieldClass: ClassTokenLifespan, Policy: PolicyRepair, Desired: lifespan, Observed: client.AccessTokenLifespan,
+				Differs: client.AccessTokenLifespan != lifespan},
+			{FieldClass: ClassAudienceScope, Policy: PolicyRepair, Desired: sortedSets(desiredScopes),
+				Observed: sortedSets(scopes), Differs: !SameScopes(scopes, desiredScopes)},
+			{FieldClass: ClassTokenFormat, Policy: PolicyRepair,
+				Desired:  map[string]any{"at_jwt": true, "client_id": req.ClientKey},
+				Observed: map[string]any{"at_jwt": client.RFC9068, "client_id": client.ClientIDClaim},
+				Differs:  !client.RFC9068 || client.ClientIDClaim != req.ClientKey},
+			{FieldClass: ClassEnabled, Policy: PolicyRepair, Desired: true, Observed: client.Enabled, Differs: !client.Enabled},
+			{FieldClass: ClassRedirectURIs, Policy: PolicyBlock, Desired: desiredURIs, Observed: observedURIs,
+				Differs: !slices.Equal(desiredURIs, observedURIs)},
+			{FieldClass: ClassClientKeys, Policy: PolicyBlock,
+				Desired: map[string]any{"authenticator": "client-jwt", "held_jwks": true, "kids": kids(keys)},
+				Observed: map[string]any{"authenticator": client.Credential.Authenticator, "held_jwks": client.Credential.HeldJWKS,
+					"unreadable": client.Credential.Unreadable, "kids": kids(client.Credential.Keys)},
+				Differs: !client.Credential.ByKeys(keys)},
+		}}
 	plan.Adoptable = true
 	for _, difference := range plan.Differences {
 		if !difference.Differs {
@@ -366,7 +368,7 @@ func (s *Service) converge(ctx context.Context, plan Plan, client keycloak.Clien
 				return struct{}{}, s.kernel.PatchClient(ctx, s.cfg.Realm, client.ID, keycloak.ClientPatch{AccessTokenLifespan: &value})
 			})
 		case ClassAudienceScope:
-			desired, _ := DesiredScopes(plan.profile, plan.audienceClass)
+			desired, _ := DesiredScopes(plan.profile, plan.audienceClass, plan.privilegedForm)
 			err = ConvergeScopes(ctx, s.kernel, s.cfg.Realm, client.ID, desired, s.cfg.CallTimeout)
 		case ClassTokenFormat:
 			clientKey := plan.ClientKey
@@ -389,8 +391,8 @@ func (s *Service) converge(ctx context.Context, plan Plan, client keycloak.Clien
 
 const insertAdoptedStatement = `INSERT INTO identity.client_registration
     (registration_id, kc_client_id, realm, client_key, profile, application_authority, application_ref, registered_by,
-     audience_class, lifetime_class, audience, redirect_uris, state, activated_at)
-VALUES ($1, $2, $3, $4, $5, 'manual', $6, $7, $8, $9, $10, $11, 'active', now())`
+     audience_class, lifetime_class, audience, redirect_uris, state, activated_at, privileged_form)
+VALUES ($1, $2, $3, $4, $5, 'manual', $6, $7, $8, $9, $10, $11, 'active', now(), $12)`
 
 const insertAdoptionStatement = `INSERT INTO identity.registration_adoption
     (adoption_id, registration_id, kc_client_id, adopted_by, reason, observed, converged)
@@ -412,7 +414,8 @@ func (s *Service) insertAdopted(ctx context.Context, tx db.Tx, req AdoptRequest,
 	}
 	if _, err := tx.Exec(ctx, insertAdoptedStatement, registrationID.String(), string(client.ID), string(s.cfg.Realm),
 		req.ClientKey, req.Profile, req.ApplicationRef, req.RegisteredBy.String(), req.AudienceClass, lifetime,
-		append([]string{}, req.Audience...), append([]string{}, req.RedirectURIs...)); err != nil {
+		append([]string{}, req.Audience...), append([]string{}, req.RedirectURIs...),
+		nullableForm(req.PrivilegedForm)); err != nil {
 		return Registration{}, fmt.Errorf("registration: record the adopted registration: %w", err)
 	}
 	now := s.now()

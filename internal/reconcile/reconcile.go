@@ -186,8 +186,8 @@ type registration struct {
 	state       string
 	suspendedAt *time.Time
 
-	// audienceClass selects the managed scope among the client's scope sets.
-	audienceClass string
+	// audienceClass and privilegedForm select the managed scope among the client's scope sets.
+	audienceClass, privilegedForm string
 }
 
 // comparesTokenProfile reports whether the profile is issued tokens, and so holds a token format
@@ -196,7 +196,7 @@ func (r registration) comparesTokenProfile() bool { return r.profile != "resourc
 
 // desiredScopes are the scope sets the registration's client holds.
 func (r registration) desiredScopes() registrations.ScopeSets {
-	desired, _ := registrations.DesiredScopes(r.profile, r.audienceClass)
+	desired, _ := registrations.DesiredScopes(r.profile, r.audienceClass, r.privilegedForm)
 	return desired
 }
 

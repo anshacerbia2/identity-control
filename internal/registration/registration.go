@@ -39,14 +39,44 @@ const (
 )
 
 // managedScopes maps an audience class to the one managed client scope a registration attaches.
-// They are identity-kernel's names (realm/client-scopes.json). The privileged class is the
-// provider-scope form, the only privileged form the kernel declares. A class whose scope the realm
-// does not declare is refused at registration, never registered without its claim surface.
+// They are identity-kernel's names (realm/client-scopes.json). The privileged class's scope is its
+// form's (privilegedScopes). A class whose scope the realm does not declare is refused at
+// registration, never registered without its claim surface.
 var managedScopes = map[string]string{
 	"internal":   "scnehaux-internal",
 	"privileged": "scnehaux-provider",
 	"external":   "scnehaux-external",
 	"workload":   "scnehaux-workload",
+}
+
+// The privileged forms a registration names (STD-IAM-002 §3.1.1, TDD-identity-control-003 1.29.0).
+// provider-scope is also the claim surface of the resource-scoped form, which carries the same claims.
+const (
+	FormProviderScope = "provider-scope"
+	FormTenantScoped  = "tenant-scoped"
+)
+
+// privilegedScopes maps a privileged form to its managed scope.
+var privilegedScopes = map[string]string{
+	FormProviderScope: "scnehaux-provider",
+	FormTenantScoped:  "scnehaux-privileged",
+}
+
+// ManagedScope is the one managed client scope a registration of the class and form attaches.
+func ManagedScope(audienceClass, privilegedForm string) string {
+	if audienceClass == "privileged" {
+		return privilegedScopes[privilegedForm]
+	}
+	return managedScopes[audienceClass]
+}
+
+// normalized gives a privileged request that names no form the provider-scope form, which every
+// privileged registration was before forms were named.
+func (r Request) normalized() Request {
+	if r.AudienceClass == "privileged" && r.PrivilegedForm == "" {
+		r.PrivilegedForm = FormProviderScope
+	}
+	return r
 }
 
 var (
@@ -93,9 +123,12 @@ type Request struct {
 	// commit together (TDD-identity-control-003 §Registration Requests).
 	reserved func(ctx context.Context, tx db.Tx, registration Registration) error
 
-	ClientKey      string   `json:"client_key"`
-	Profile        string   `json:"profile"`
-	AudienceClass  string   `json:"audience_class"`
+	ClientKey     string `json:"client_key"`
+	Profile       string `json:"profile"`
+	AudienceClass string `json:"audience_class"`
+	// PrivilegedForm is a privileged registration's form, provider-scope or tenant-scoped, and empty
+	// for every other class. A privileged request naming none is provider-scope.
+	PrivilegedForm string   `json:"privileged_form,omitempty"`
 	ApplicationRef string   `json:"application_ref"`
 	LifetimeClass  string   `json:"lifetime_class"`
 	Audience       []string `json:"audience"`
@@ -114,6 +147,7 @@ type Registration struct {
 	ClientKey            string    `json:"client_key"`
 	Profile              string    `json:"profile"`
 	AudienceClass        string    `json:"audience_class"`
+	PrivilegedForm       string    `json:"privileged_form,omitempty"`
 	ApplicationAuthority string    `json:"application_authority"`
 	ApplicationRef       string    `json:"application_ref"`
 	RegisteredBy         id.UUID   `json:"registered_by"`
@@ -249,6 +283,12 @@ func validate(req Request) error {
 		return invalid("audience_class must be internal, privileged, workload or external")
 	}
 	switch {
+	case req.AudienceClass != "privileged" && req.PrivilegedForm != "":
+		return invalid("privileged_form is named only for the privileged audience class")
+	case req.AudienceClass == "privileged" && privilegedScopes[req.PrivilegedForm] == "":
+		return invalid("privileged_form must be provider-scope or tenant-scoped")
+	}
+	switch {
 	case req.Profile == ProfileWorkload && req.AudienceClass != "workload":
 		return invalid("a workload registers the workload audience class")
 	case !keyed(req.Profile) && submitted(req.PublicKey):
@@ -342,6 +382,7 @@ func (s *Service) Register(ctx context.Context, req Request) (Registration, erro
 			return Registration{}, err
 		}
 	}
+	req = req.normalized()
 	prepared, err := s.Prepare(ctx, req)
 	if err != nil {
 		return Registration{}, err
@@ -412,6 +453,7 @@ type Prepared struct {
 // reads happen here, before anything is written: a class whose scope the realm lacks is refused with
 // nothing recorded.
 func (s *Service) Prepare(ctx context.Context, req Request) (Prepared, error) {
+	req = req.normalized()
 	if err := validate(req); err != nil {
 		return Prepared{}, err
 	}
@@ -424,10 +466,10 @@ func (s *Service) Prepare(ctx context.Context, req Request) (Prepared, error) {
 		prepared.key = &parsed
 	}
 	scopeID, err := call(ctx, s.cfg.CallTimeout, func(ctx context.Context) (string, error) {
-		return s.kernel.ClientScopeID(ctx, s.cfg.Realm, managedScopes[req.AudienceClass])
+		return s.kernel.ClientScopeID(ctx, s.cfg.Realm, ManagedScope(req.AudienceClass, req.PrivilegedForm))
 	})
 	if errors.Is(err, keycloak.ErrNotFound) {
-		return Prepared{}, fmt.Errorf("%w: %s", ErrScopeUndeclared, managedScopes[req.AudienceClass])
+		return Prepared{}, fmt.Errorf("%w: %s", ErrScopeUndeclared, ManagedScope(req.AudienceClass, req.PrivilegedForm))
 	}
 	if err != nil {
 		return Prepared{}, err
@@ -538,12 +580,13 @@ func (s *Service) reportDirect(ctx context.Context, path string, registration Re
 // the managed audience scope among them. A resource is issued no token, so it only holds its managed
 // scope. Idempotent, so recovery and recreation run it again safely.
 func (s *Service) scope(ctx context.Context, registration Registration, client keycloak.ClientUUID, scopeID string) error {
-	desired, governed := DesiredScopes(registration.Profile, registration.AudienceClass)
+	desired, governed := DesiredScopes(registration.Profile, registration.AudienceClass, registration.PrivilegedForm)
 	if !governed {
 		if _, err := call(ctx, s.cfg.CallTimeout, func(ctx context.Context) (struct{}, error) {
 			return struct{}{}, s.kernel.AddDefaultClientScope(ctx, s.cfg.Realm, client, scopeID)
 		}); err != nil {
-			return fmt.Errorf("registration: attach %s: %w", managedScopes[registration.AudienceClass], err)
+			return fmt.Errorf("registration: attach %s: %w",
+				ManagedScope(registration.AudienceClass, registration.PrivilegedForm), err)
 		}
 		return nil
 	}
@@ -668,7 +711,7 @@ func (s *Service) RecoverPending(ctx context.Context) (int, error) {
 
 func (s *Service) recoverOne(ctx context.Context, registration Registration) error {
 	scopeID, err := call(ctx, s.cfg.CallTimeout, func(ctx context.Context) (string, error) {
-		return s.kernel.ClientScopeID(ctx, s.cfg.Realm, managedScopes[registration.AudienceClass])
+		return s.kernel.ClientScopeID(ctx, s.cfg.Realm, ManagedScope(registration.AudienceClass, registration.PrivilegedForm))
 	})
 	if err != nil {
 		return err
@@ -719,7 +762,7 @@ func (s *Service) Recreate(ctx context.Context, registrationID id.UUID) (keycloa
 		return "", ErrWorkloadRecreate
 	}
 	scopeID, err := call(ctx, s.cfg.CallTimeout, func(ctx context.Context) (string, error) {
-		return s.kernel.ClientScopeID(ctx, s.cfg.Realm, managedScopes[registration.AudienceClass])
+		return s.kernel.ClientScopeID(ctx, s.cfg.Realm, ManagedScope(registration.AudienceClass, registration.PrivilegedForm))
 	})
 	if err != nil {
 		return "", err

@@ -35,7 +35,7 @@ func (h *harness) bootstrapped(clientKey string, keys ...testKeyPair) keycloak.C
 		RedirectURIs: []string{"https://bff.example.com/callback"}, AccessTokenLifespan: 240,
 		Credential: keycloak.ClientCredential{Authenticator: "client-jwt", HeldJWKS: true, Keys: held},
 		RFC9068:    true, ClientIDClaim: clientKey})
-	desired, _ := DesiredScopes(ProfileConfidential, "internal")
+	desired, _ := DesiredScopes(ProfileConfidential, "internal", "")
 	h.kernel.HoldScopes(client, desired.Default, desired.Optional)
 	return client
 }
