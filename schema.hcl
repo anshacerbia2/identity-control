@@ -2379,3 +2379,130 @@ table "projection_finding" {
     expr = "finding_class IN ('missing_member', 'extra_member', 'organization_state', 'unknown_organization')"
   }
 }
+
+// The kernel event record (TDD-identity-control-007): one row per user or admin event the kernel
+// recorded, read from its native store and kept until Audit & Evidence has it (STD-IAM-001 §3.8).
+// Written once and never edited: the runtime role inserts and reads.
+table "kernel_event" {
+  schema  = schema.identity
+  comment = "Every kernel user and admin event, read from the native store. Insert-only. TDD-identity-control-007."
+
+  column "realm" {
+    null = false
+    type = text
+  }
+  column "kind" {
+    null = false
+    type = text
+  }
+  column "kc_event_id" {
+    null = false
+    type = text
+  }
+  column "occurred_at" {
+    null = false
+    type = timestamptz
+  }
+  column "event_type" {
+    null = false
+    type = text
+  }
+  // The subject of a user event, the actor of an admin event. Kept here and never published.
+  column "kc_user_id" {
+    null = true
+    type = text
+  }
+  column "principal_id" {
+    null = true
+    type = uuid
+  }
+  column "client_id" {
+    null = true
+    type = text
+  }
+  column "session_id" {
+    null = true
+    type = text
+  }
+  column "ip_address" {
+    null = true
+    type = text
+  }
+  column "error" {
+    null = true
+    type = text
+  }
+  column "resource_type" {
+    null = true
+    type = text
+  }
+  column "resource_path" {
+    null = true
+    type = text
+  }
+  column "details" {
+    null    = false
+    type    = jsonb
+    default = sql("'{}'::jsonb")
+  }
+  column "recorded_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+
+  primary_key {
+    columns = [column.realm, column.kind, column.kc_event_id]
+  }
+
+  index "kernel_event_occurred" {
+    columns = [column.occurred_at]
+  }
+  index "kernel_event_principal" {
+    columns = [column.principal_id, column.occurred_at]
+  }
+
+  check "kernel_event_kind_check" {
+    expr = "kind IN ('user', 'admin')"
+  }
+}
+
+// How far each kind's sweep has read (TDD-identity-control-007 §The Sweep).
+table "kernel_event_mark" {
+  schema  = schema.identity
+  comment = "The newest kernel event time a complete sweep of each kind read. TDD-identity-control-007."
+
+  column "realm" {
+    null = false
+    type = text
+  }
+  column "kind" {
+    null = false
+    type = text
+  }
+  column "read_through" {
+    null = false
+    type = timestamptz
+  }
+  column "swept_at" {
+    null = false
+    type = timestamptz
+  }
+  column "last_read" {
+    null = false
+    type = integer
+  }
+  column "last_recorded" {
+    null = false
+    type = integer
+  }
+
+  primary_key {
+    columns = [column.realm, column.kind]
+  }
+
+  check "kernel_event_mark_kind_check" {
+    expr = "kind IN ('user', 'admin')"
+  }
+}
+

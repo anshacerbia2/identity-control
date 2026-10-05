@@ -230,6 +230,15 @@ jobs:
           pwsh -NoProfile -File scripts/dev-bff-adoption-proof.ps1 \
             -BffJwkFile "$keys/identity-experience-bff.jwk.json" -BffKeyFile "$keys/identity-experience-bff.pem"
 
+      # TDD-identity-control-007: the kernel event record, against this kernel's native store, which the
+      # steps above filled with sign-ins and admin changes. Before Proof B, which stops Keycloak.
+      - name: the kernel event record
+        run: |
+          set -a; . deploy/dev/.env; set +a
+          export IDENTITY_API_URL=http://127.0.0.1:8082 KC_BASE_URL=https://localhost
+          export IDENTITY_OPERATOR_TOTP_FILE="$RUNNER_TEMP/operator-totp.json"
+          pwsh -NoProfile -File scripts/dev-kernel-events-proof.ps1
+
       # identity-control ROADMAP §Proof B: both drift scenarios, a drift exception and its expiry,
       # and Keycloak stopped then started, against this live kernel. Each convergence time lands in
       # the job summary. Last, because it stops the kernel's Keycloak.

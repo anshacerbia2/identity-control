@@ -587,3 +587,25 @@ func TestASecurityCommandIsNeverRewritten(t *testing.T) {
 		}
 	}
 }
+
+// The kernel event record is written once and never edited (TDD-identity-control-007, STD-IAM-001
+// §3.8): the runtime inserts and reads. Its mark moves and is never deleted.
+func TestTheKernelEventRecordIsInsertOnly(t *testing.T) {
+	pool, ctx := openPool(t)
+	const table = "identity.kernel_event"
+	for _, privilege := range []string{"SELECT", "INSERT"} {
+		if !queryBool(t, pool, ctx, `SELECT has_table_privilege($1, $2, $3)`, runtimeRole, table, privilege) {
+			t.Errorf("%s lacks %s on %s; the sweep cannot record", runtimeRole, privilege, table)
+		}
+	}
+	for _, privilege := range []string{"UPDATE", "DELETE", "TRUNCATE"} {
+		if queryBool(t, pool, ctx, `SELECT has_table_privilege($1, $2, $3)`, runtimeRole, table, privilege) {
+			t.Errorf("%s holds %s on %s; a recorded event could be rewritten or removed", runtimeRole, privilege, table)
+		}
+	}
+	for _, privilege := range []string{"DELETE", "TRUNCATE"} {
+		if queryBool(t, pool, ctx, `SELECT has_table_privilege($1, $2, $3)`, runtimeRole, "identity.kernel_event_mark", privilege) {
+			t.Errorf("%s holds %s on identity.kernel_event_mark", runtimeRole, privilege)
+		}
+	}
+}
