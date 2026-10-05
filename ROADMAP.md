@@ -629,9 +629,17 @@ slice:
      - the revocation leaves a new sign-in without it, and refuses the earlier refresh with
        `invalid_grant`.
 
-`ADR-IAM-006`'s Tenant context is built. **Next:**
-- foundation-platform `verify` step 8, the current-state check (STD-IAM-002 1.6.0);
-- the BFF asks for a Tenant at sign-in (identity-experience).
+`ADR-IAM-006`'s Tenant context is built.
+- ✅ **STD-IAM-002 §3.5 step 8, the current-state check (1.6.0), is each resource's.** It cannot be
+  in foundation-platform's `verify`, which may not name `tenant_id` and reads none of a resource's
+  records (its package doc). This service refuses `tenant_id`, because none of its operations
+  belongs to a Tenant. organization-control checks its own Membership, Tenant and administration
+  grant (ADR-ORG-003 §5.3). foundation-reference decides from its projection and refuses a token
+  issued for another Tenant than the route names.
+- **Next:** a Tenant administrator's sign-in asks for its Tenant. Its console is SAD-012's
+  Organization Experience, not identity-experience, whose SAD rejects Tenant and Membership
+  administration there; that repository is not decided yet. The token it needs is registrable now:
+  a `tenant-scoped` `privileged` client (item 6).
 
 6. ✅ **The tenant-scoped privileged form** (`TDD-identity-control-003` 1.29.0). A `privileged`
    registration names `privileged_form`: `provider-scope`, the default and what every earlier one
