@@ -44,6 +44,7 @@ BEGIN
               ('identity.application_developer'),
               ('identity.registration_request'),
               ('identity.provider_grant'),
+              ('identity.provider_emergency_use'),
               ('identity.provider_projection'),
               ('identity.ceremony_grant_retirement'),
               ('identity.privileged_access'),
@@ -177,6 +178,11 @@ REVOKE DELETE, TRUNCATE ON identity.principal_finding FROM identity_runtime;
 -- older event is discarded against.
 REVOKE DELETE, TRUNCATE ON identity.provider_grant FROM identity_runtime;
 REVOKE DELETE, TRUNCATE ON identity.provider_projection FROM identity_runtime;
+-- The use of each projected emergency grant (ADR-ORG-002 §5.2): every request one authorizes
+-- records it, and the validation report reads it. Only the last use and the count are rewritten,
+-- and nothing deletes one: it is the evidence that the grant was validated.
+REVOKE UPDATE, DELETE, TRUNCATE ON identity.provider_emergency_use FROM identity_runtime;
+GRANT UPDATE (last_used_at, uses) ON identity.provider_emergency_use TO identity_runtime;
 -- The Tenant context projection keeps a row per Tenant and per Membership, superseded by version
 -- and never removed (TDD-identity-control-002 2.0.0).
 REVOKE DELETE, TRUNCATE ON identity.tenant_desired FROM identity_runtime;

@@ -1786,6 +1786,13 @@ table "provider_grant" {
     type    = timestamptz
     default = sql("now()")
   }
+  // When this service first held the grant, never rewritten by a later version: the start of a
+  // never-used emergency grant's 90 days (ADR-ORG-002 §5.2).
+  column "first_applied_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
 
   primary_key {
     columns = [column.grant_id]
@@ -1811,6 +1818,49 @@ table "provider_grant" {
   }
   check "provider_grant_revoked_inactive" {
     expr = "grant_status = 'active' OR activation_id IS NULL"
+  }
+}
+
+table "provider_emergency_use" {
+  schema  = schema.identity
+  comment = "The last use of each projected emergency grant, recorded by every request it authorizes. ADR-ORG-002 §5.2, TDD-identity-control-006."
+
+  column "grant_id" {
+    null = false
+    type = uuid
+  }
+  column "first_used_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+  column "last_used_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+  column "uses" {
+    null    = false
+    type    = bigint
+    default = 1
+  }
+
+  primary_key {
+    columns = [column.grant_id]
+  }
+
+  foreign_key "provider_emergency_use_grant_fk" {
+    columns     = [column.grant_id]
+    ref_columns = [table.provider_grant.column.grant_id]
+    on_update   = NO_ACTION
+    on_delete   = NO_ACTION
+  }
+
+  check "provider_emergency_use_uses_check" {
+    expr = "uses > 0"
+  }
+  check "provider_emergency_use_order_check" {
+    expr = "first_used_at <= last_used_at"
   }
 }
 

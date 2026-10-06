@@ -51,6 +51,10 @@ type RoutesConfig struct {
 	// Nil, its route is not mounted.
 	KernelEvents KernelEventSweeper
 
+	// EmergencyGrants reports each projected emergency grant's last use (ADR-ORG-002 §5.2). Nil, its
+	// route is not mounted.
+	EmergencyGrants EmergencyValidator
+
 	// Deliveries applies Organization's provider grant events, and DeliveryVerifier admits the
 	// delivering workload alone (TDD-identity-control-006). Either nil, the intake answers 503.
 	Deliveries       Applier
@@ -156,6 +160,9 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	}
 	if cfg.TenantContext != nil {
 		api.HandleFunc("GET /v1/projections/tenant-context/report", p(tenantReport(cfg.TenantContext)))
+	}
+	if cfg.EmergencyGrants != nil {
+		api.HandleFunc("GET /v1/provider-grants:emergency-validation", p(emergencyValidation(cfg.EmergencyGrants)))
 	}
 	// Route class self: any person, acting on the Principal in its token.
 	s := selfOnly

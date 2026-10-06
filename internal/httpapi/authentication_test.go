@@ -588,3 +588,52 @@ func TestTheTokenSidTravelsWithTheRequest(t *testing.T) {
 		t.Errorf("status %d, sid %q", w.Code, seen)
 	}
 }
+
+// recordingDecider is a decider that also records emergency uses, as *providerauthority.Decider does.
+type recordingDecider struct {
+	decider
+	used []id.UUID
+	err  error
+}
+
+func (d *recordingDecider) RecordEmergencyUse(_ context.Context, principal id.UUID) error {
+	d.used = append(d.used, principal)
+	return d.err
+}
+
+// A request a projected emergency grant authorizes records the grant's use, which is its validation
+// (ADR-ORG-002 §5.2). The ceremony's grant and an activation record nothing, and a failure to record
+// is reported and refuses nothing.
+func TestAnEmergencyGrantsUseIsRecordedAndNeverRefuses(t *testing.T) {
+	for name, c := range map[string]struct {
+		decision providerauthority.Decision
+		recorded bool
+	}{
+		"an emergency grant": {providerauthority.Decision{Provider: true, Basis: providerauthority.BasisEmergency, Emergency: true}, true},
+		"the ceremony":       {providerauthority.Decision{Provider: true, Basis: providerauthority.BasisCeremony, Emergency: true}, false},
+		"an activation":      {providerauthority.Decision{Provider: true, Basis: providerauthority.BasisActivation}, false},
+		"an owner":           {providerauthority.Decision{}, false},
+	} {
+		for _, failing := range []bool{false, true} {
+			var logged bytes.Buffer
+			providers := &recordingDecider{decider: decider{decision: c.decision, asked: new(id.UUID)}}
+			if failing {
+				providers.err = errors.New("connection refused")
+			}
+			reached := false
+			handler := authenticateLogging(t, realVerifier(t), providers, slog.New(slog.NewJSONHandler(&logged, nil)))(
+				http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached = true }))
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, bearerRequest("Bearer "+token(t, validClaims())))
+			if !reached || w.Code != http.StatusOK {
+				t.Errorf("%s, failing %t: status %d, reached %t", name, failing, w.Code, reached)
+			}
+			if (len(providers.used) == 1) != c.recorded {
+				t.Errorf("%s: recorded %v, want recorded %t", name, providers.used, c.recorded)
+			}
+			if reported := strings.Contains(logged.String(), "use could not be recorded"); reported != (failing && c.recorded) {
+				t.Errorf("%s, failing %t: the failure was reported %t", name, failing, reported)
+			}
+		}
+	}
+}
