@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-002
   title: Tenant Context Projection into the Kernel, and Its Reconciliation
   owner: Core Platform Team
-  version: 2.3.0
+  version: 2.3.1
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-11
-  last_reviewed: 2026-10-04
+  last_reviewed: 2026-10-06
   parent_sad: SAD-001
 ---
 
@@ -326,8 +326,11 @@ classification, a `membership_id`, and a `state`.
 ### Authority Read for Reconciliation
 
 The reconciler reads the authoritative set only through Organization Control's published contract,
-`GET /v1/projections/organization/snapshot`, as this service's workload. Its rows carry the same
-fields as the events.
+`POST /v1/projections/snapshot`, as this service's workload, page by page under the first page's
+mark. Its rows carry the same fields as the events. Until 2.3.1 the client called
+`/v1/projections/organization/snapshot`, the path the design documents named, which Organization
+Control never served. Organization's deploy-dev, which wires the three stacks, found it the first
+time `provider-bootstrap` ran against the real service.
 
 ## Algorithms / Logic
 
