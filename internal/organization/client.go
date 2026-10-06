@@ -221,7 +221,7 @@ func (c *Client) OrganizationSnapshot(ctx context.Context) (int64, []tenantconte
 	)
 	for page := 0; page < maxOrganizationPages; page++ {
 		var got organizationPage
-		if err := c.call(ctx, http.MethodPost, "/v1/projections/organization/snapshot",
+		if err := c.call(ctx, http.MethodPost, "/v1/projections/snapshot",
 			snapshotRequest{ConsumerID: c.consumer, Cursor: cursor, Mark: mark}, &got); err != nil {
 			return 0, nil, err
 		}

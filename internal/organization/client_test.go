@@ -264,6 +264,13 @@ func TestTheOrganizationSnapshotIsReadUnderOneMark(t *testing.T) {
 	if len(s.received) != 2 || s.received[1].body["mark"] != float64(41) {
 		t.Errorf("the second page was not read under the first page's mark: %+v", s.received)
 	}
+	// Organization Control's route, POST /v1/projections/snapshot. The design documents once named
+	// /v1/projections/organization/snapshot, which it never served.
+	for i, r := range s.received {
+		if r.method != http.MethodPost || r.path != "/v1/projections/snapshot" {
+			t.Errorf("request %d is %s %s, want POST /v1/projections/snapshot", i, r.method, r.path)
+		}
+	}
 }
 
 // A 403 is ErrRefused, which the bootstrap reads as a registration that does not subscribe yet.
