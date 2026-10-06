@@ -5,6 +5,7 @@ package securitynotify
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -83,6 +84,8 @@ func TestAnAddressIsAddedProvenAndRemovedWithItsNotifications(t *testing.T) {
 	if err != nil || added.State != "pending" {
 		t.Fatalf("Add: %+v, %v", added, err)
 	}
+	// The code sent to it; a later Add draws another.
+	code := *issued
 	proofs := requests(t, p, principal, EventAddressProof)
 	if len(proofs) != 1 || proofs[0].recipients != 1 || !proofs[0].sealed {
 		t.Fatalf("the proof request is %+v; want one, to the new address alone, its code sealed", proofs)
@@ -104,8 +107,12 @@ func TestAnAddressIsAddedProvenAndRemovedWithItsNotifications(t *testing.T) {
 			handed = &capture.received[i]
 		}
 	}
-	if handed == nil || handed.Code != *issued || len(handed.Addresses) != 1 || handed.Addresses[0] != "second@example.test" {
-		t.Fatalf("the hand-over was %+v; want the issued code to the new address", handed)
+	if handed == nil || handed.Code != code || len(handed.Addresses) != 1 || handed.Addresses[0] != "second@example.test" {
+		got := "none"
+		if handed != nil {
+			got = fmt.Sprintf("to %v, code matches %t", handed.Addresses, handed.Code == code)
+		}
+		t.Fatalf("the hand-over was %s; want the issued code to the new address", got)
 	}
 	if proofs := requests(t, p, principal, EventAddressProof); proofs[0].sealed || proofs[0].state != StateSubmitted {
 		t.Errorf("after the hand-over the proof request is %+v; want submitted, its seal cleared", proofs[0])
@@ -115,14 +122,14 @@ func TestAnAddressIsAddedProvenAndRemovedWithItsNotifications(t *testing.T) {
 	if err := a.Verify(ctx, principal, added.AddressID, "00000000"); !errors.Is(err, ErrWrongCode) {
 		t.Errorf("a wrong code answered %v", err)
 	}
-	if err := a.Verify(ctx, principal, added.AddressID, *issued); err != nil {
+	if err := a.Verify(ctx, principal, added.AddressID, code); err != nil {
 		t.Fatalf("the right code answered %v", err)
 	}
 	changed := requests(t, p, principal, EventAddressChanged)
 	if len(changed) != 1 || changed[0].recipients != 1 {
 		t.Fatalf("the added notification is %+v; want one, to the address held before", changed)
 	}
-	if err := a.Verify(ctx, principal, added.AddressID, *issued); !errors.Is(err, ErrNotPending) {
+	if err := a.Verify(ctx, principal, added.AddressID, code); !errors.Is(err, ErrNotPending) {
 		t.Errorf("verifying an active address answered %v", err)
 	}
 
