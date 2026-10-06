@@ -15,7 +15,7 @@ Week numbers are relative to the first build week, not calendar dates.
 | `TDD-identity-control-003` | Protocol client and protected-resource registration | approved |
 | `TDD-identity-control-004` | Workload and bounded agent identity | approved |
 | `TDD-identity-control-005` | Account-security and investigation API mediation | approved |
-| `TDD-identity-control-006` | Provider authority from Organization's records: delivery intake, local projection, freshness, the per-request decision that replaces `provider_scope`, and the ceremony grant | built: intake and projection, bootstrap and freshness (`cmd/identity-provider-bootstrap`, the frontier poll), the per-request decision (`providerauthority.Decider`; `provider_scope` refused) and the ceremony grant with its insert-only retirement. The kernel's `provider_scope` mapper is removed in identity-kernel |
+| `TDD-identity-control-006` | Provider authority from Organization's records: delivery intake, local projection, freshness, the per-request decision that replaces `provider_scope`, and the ceremony grant | built: intake and projection, bootstrap and freshness (`cmd/identity-provider-bootstrap`, the frontier poll), the per-request decision (`providerauthority.Decider`; `provider_scope` refused) and the ceremony grant with its insert-only retirement. The kernel's `provider_scope` mapper is removed in identity-kernel. Emergency grant validation (1.3.0, ADR-ORG-002 §5.2): each request a projected emergency grant authorizes records its use, and one unused for 90 days is overdue on `GET /v1/provider-grants:emergency-validation` and logged at WARN by the scheduled pass |
 
 Three documents were inherited from the former monorepo. All three are gone from `docs/designs`,
 and their content lives here:

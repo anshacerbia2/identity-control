@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-006
   title: Provider Authority from Organization's Records
   owner: Core Platform Team
-  version: 1.2.1
+  version: 1.3.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-10-02
-  last_reviewed: 2026-10-04
+  last_reviewed: 2026-10-06
   parent_sad: SAD-001
 ---
 
@@ -156,7 +156,8 @@ CREATE TABLE identity.provider_projection (
 ## API / Interface
 
 ```text
-POST /v1/deliveries        Organization Control's workload only
+POST /v1/deliveries                              Organization Control's workload only
+GET  /v1/provider-grants:emergency-validation    provider: each emergency grant's last use
 ```
 
 | Outcome | Status | `X-Application-Receipt` |
@@ -280,6 +281,41 @@ The bootstrap ceremony creates the first Principal before any Organization grant
   authority comes from Organization's record alone.
 - The ceremony no longer writes the kernel attribute `scnehaux_provider_scope`.
 
+### Emergency Grant Validation
+
+`ADR-ORG-002 §5.2` (2026-10-06): an emergency grant is validated by using it, "at least every 90
+days" (ADR-ORG-002 [R5]). Each API records its own scope's use, because only it sees the requests
+(§5.3). Organization Control records `provider:organization-control`; this service records
+`provider:identity-control`.
+
+```sql
+ALTER TABLE identity.provider_grant
+    ADD COLUMN first_applied_at TIMESTAMPTZ NOT NULL DEFAULT now();   -- never rewritten by a version
+
+CREATE TABLE identity.provider_emergency_use (
+    grant_id      UUID PRIMARY KEY REFERENCES identity.provider_grant (grant_id),
+    first_used_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_used_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    uses          BIGINT      NOT NULL DEFAULT 1 CHECK (uses > 0)
+);
+```
+
+- **Each use is recorded.** A request the decision answers with basis `emergency` writes the use,
+  in its own transaction, beside the `WARN` it already logs. The grant is looked up again in the
+  write, so a grant revoked in between records nothing. The ceremony's grant is not recorded: the
+  first emergency grant projected retires it. A failure to record is logged at `ERROR` and refuses
+  nothing, because a break-glass path that fails on its own bookkeeping fails when it is needed.
+- **The clock.** Overdue is 90 days from the last use. A grant never used counts from
+  `first_applied_at`, when this service first held it. The projection carries no grant time, and a
+  later version leaves `first_applied_at` as it was.
+- **The report.**
+  - `GET /v1/provider-grants:emergency-validation` lists every active projected emergency grant
+    with `held_since`, `last_used_at`, `uses`, `due_at` and `overdue`, the oldest due first.
+  - The scheduled pass logs each overdue grant at `WARN`. An overdue grant is still in force.
+  - A drill is a request made on purpose, and its `X-Administrative-Reason` says so.
+- **The record is evidence.** The runtime role cannot delete one, and rewrites only `last_used_at`
+  and `uses`.
+
 ## Configuration
 
 | Setting | Effect |
@@ -303,6 +339,12 @@ The bootstrap ceremony creates the first Principal before any Organization grant
   expired activation does not, a revoked grant does not, and the ceremony grant authorizes until an
   emergency grant is projected and never after.
 - A token carrying `provider_scope` is refused.
+- Validation:
+  - A request on a projected emergency grant records its use; the ceremony's grant, an activation
+    and an owner record nothing.
+  - A failure to record refuses nothing and is reported.
+  - The report leaves eligible grants out, keeps a grant's 90 days across versions, and marks
+    overdue a grant never used for 90 days, and a used one 90 days after its last use.
 
 ## Security Notes
 

@@ -359,6 +359,19 @@ func run() error {
 		logger.Warn("IDENTITY_ORGANIZATION_BASE_URL is unset; the provider projection is never fresh and no activation is honored")
 	}
 
+	// The provider decision reads the projection and the held freshness, never the network. A
+	// typed nil would read as a configured freshness, so an unconfigured one stays a nil interface.
+	var held providerauthority.FreshnessReader
+	if freshness != nil {
+		held = freshness
+	}
+	providers, err := providerauthority.NewDecider(pool, held)
+	if err != nil {
+		return fmt.Errorf("provider decision: %w", err)
+	}
+	// Each projected emergency grant's last use, reported on its route (ADR-ORG-002 §5.2).
+	routesConfig.EmergencyGrants = providers
+
 	surface, err := httpapi.Routes(routesConfig)
 	if err != nil {
 		return fmt.Errorf("routes: %w", err)
@@ -384,16 +397,6 @@ func run() error {
 	}
 	if !cfg.EnforceAccessTokenType {
 		tokens = httpapi.ReportTokenType(verifier, logger)
-	}
-	// The provider decision reads the projection and the held freshness, never the network. A
-	// typed nil would read as a configured freshness, so an unconfigured one stays a nil interface.
-	var held providerauthority.FreshnessReader
-	if freshness != nil {
-		held = freshness
-	}
-	providers, err := providerauthority.NewDecider(pool, held)
-	if err != nil {
-		return fmt.Errorf("provider decision: %w", err)
 	}
 	// The assurance floor reads the same provider decision: a provider keeps a second factor.
 	securityCommands.UseProviders(providerHolder{providers})
@@ -476,7 +479,7 @@ func run() error {
 	}
 	go scheduleTenantSweeps(ctx, tenantSweep, cfg.ProjectionReconcileInterval, logger)
 	go scheduleKernelEventSweeps(ctx, kernelEvents, cfg.KernelEventInterval, logger)
-	go scheduleSweeps(ctx, provisioner, registrar, workloads, reconciler, cfg.RegistrationReconcileInterval, logger)
+	go scheduleSweeps(ctx, provisioner, registrar, workloads, reconciler, providers, cfg.RegistrationReconcileInterval, logger)
 	if freshness != nil {
 		go freshness.Poll(ctx, projection, frontier, providerauthority.PollInterval, logger)
 	}
@@ -507,7 +510,7 @@ func run() error {
 // meant to look, and it stops blocking the next one after two intervals.
 func scheduleSweeps(ctx context.Context, provisioner *provisioning.Provisioner, registrar *registration.Service,
 	workloads *workload.Service,
-	reconciler *reconcile.Reconciler, interval time.Duration, logger *slog.Logger) {
+	reconciler *reconcile.Reconciler, providers *providerauthority.Decider, interval time.Duration, logger *slog.Logger) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -576,6 +579,24 @@ func scheduleSweeps(ctx context.Context, provisioner *provisioning.Provisioner, 
 				logger.LogAttrs(ctx, level, "a registration change has waited past its approval threshold",
 					slog.String("client_key", change.ClientKey), slog.String("change_id", change.ID.String()),
 					slog.Time("proposed_at", change.ProposedAt))
+			}
+		}
+		// An emergency grant unused for 90 days is overdue for validation (ADR-ORG-002 §5.2). It is
+		// still in force; the warning asks its holder to use it on purpose.
+		if report, err := providers.EmergencyValidation(ctx, time.Now()); err != nil {
+			logger.Error("the emergency grant validation report could not be read", slog.String("error", err.Error()))
+		} else {
+			for _, grant := range report {
+				if !grant.Overdue {
+					continue
+				}
+				attrs := []slog.Attr{slog.String("grant_id", grant.GrantID.String()),
+					slog.String("principal_id", grant.PrincipalID.String()), slog.Time("due_at", grant.DueAt)}
+				if grant.LastUsedAt != nil {
+					attrs = append(attrs, slog.Time("last_used_at", *grant.LastUsedAt))
+				}
+				logger.LogAttrs(ctx, slog.LevelWarn, "an emergency provider grant has not been used in 90 days; its "+
+					"holder validates it by signing in and making a request with a reason that says it is a drill", attrs...)
 			}
 		}
 		run, err := reconciler.Sweep(ctx)

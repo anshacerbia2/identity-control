@@ -110,6 +110,13 @@ type ProviderDecider interface {
 	Decide(ctx context.Context, principal id.UUID) (providerauthority.Decision, error)
 }
 
+// EmergencyUseRecorder records a request a projected emergency grant authorized, which is how the
+// grant is validated (ADR-ORG-002 §5.2). *providerauthority.Decider is one; a decider that is not
+// records nothing.
+type EmergencyUseRecorder interface {
+	RecordEmergencyUse(ctx context.Context, principal id.UUID) error
+}
+
 // TokenVerifier is the verification this middleware performs.
 //
 // An interface rather than *verify.Verifier so the middleware can be tested without generating a
@@ -203,6 +210,15 @@ func Authenticate(verifier TokenVerifier, providers ProviderDecider, logger *slo
 					logger.WarnContext(ctx, "emergency provider authority used",
 						slog.String("principal_id", principal), slog.String("basis", decision.Basis),
 						slog.String("method", r.Method), slog.String("path", r.URL.Path))
+				}
+				// The use is the grant's validation. A failure to record it is reported and refuses
+				// nothing: the grant is in force, and a break-glass path that fails on its own
+				// bookkeeping fails when it is needed.
+				if recorder, ok := providers.(EmergencyUseRecorder); ok && decision.Basis == providerauthority.BasisEmergency {
+					if err := recorder.RecordEmergencyUse(ctx, parsed); err != nil {
+						logger.ErrorContext(ctx, "an emergency grant's use could not be recorded",
+							slog.String("principal_id", principal), slog.String("error", err.Error()))
+					}
 				}
 			case decision.Stale:
 				logger.WarnContext(ctx, "an activation in force was not honored; the provider projection is stale",
