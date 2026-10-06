@@ -10,6 +10,8 @@ import (
 
 	"github.com/anshacerbia2/foundation-platform/db"
 	"github.com/anshacerbia2/foundation-platform/id"
+
+	"github.com/anshacerbia2/identity-control/internal/securityref"
 )
 
 // Deliverer hands a request to the Notification Platform, or to the development stand-in. It answers
@@ -35,7 +37,15 @@ const (
 type Dispatcher struct {
 	tx      Transactor
 	deliver Deliverer
+	sealer  Sealer
 	logger  *slog.Logger
+}
+
+// WithSealer lets the dispatcher open a proof request's sealed code. Without one, a proof request is
+// failed rather than handed over without its code.
+func (d *Dispatcher) WithSealer(s Sealer) *Dispatcher {
+	d.sealer = s
+	return d
 }
 
 // NewDispatcher builds the dispatcher.
@@ -53,7 +63,7 @@ func NewDispatcher(tx Transactor, deliver Deliverer, logger *slog.Logger) (*Disp
 // request over twice. Its recipients are read from the addresses it was requested for, whatever their
 // state now.
 const takeStatement = `SELECT n.notification_id::text, n.principal_id::text, n.event, n.occurred_at, n.details::text,
-       n.attempts,
+       n.attempts, coalesce(n.sealed_secret, ''),
        ARRAY(SELECT a.address FROM identity.notification_address a
              WHERE a.address_id = ANY(n.recipients) ORDER BY a.added_at, a.address_id)
 FROM identity.security_notification n
@@ -63,12 +73,20 @@ LIMIT 1
 FOR UPDATE OF n SKIP LOCKED`
 
 const submittedStatement = `UPDATE identity.security_notification
-SET state = 'submitted', platform_ref = $2, submitted_at = now(), attempts = attempts + 1, last_error = NULL
+SET state = 'submitted', platform_ref = $2, submitted_at = now(), attempts = attempts + 1, last_error = NULL,
+    sealed_secret = NULL
+WHERE notification_id = $1`
+
+// unopenableStatement fails a proof request whose code can no longer be opened: its seal expired, or
+// no sealer is configured. The code is not sent, and the seal is cleared.
+const unopenableStatement = `UPDATE identity.security_notification
+SET state = 'failed', attempts = attempts + 1, last_error = $2, sealed_secret = NULL
 WHERE notification_id = $1`
 
 const retryStatement = `UPDATE identity.security_notification
 SET attempts = $2::integer, next_attempt_at = now() + $3::interval, last_error = $4,
-    state = CASE WHEN $2::integer >= $5::integer THEN 'failed' ELSE 'requested' END
+    state = CASE WHEN $2::integer >= $5::integer THEN 'failed' ELSE 'requested' END,
+    sealed_secret = CASE WHEN $2::integer >= $5::integer THEN NULL ELSE sealed_secret END
 WHERE notification_id = $1`
 
 // Dispatch hands over every due request, up to the batch, and answers how many it handed over.
@@ -100,10 +118,11 @@ func (d *Dispatcher) one(ctx context.Context) (bool, error) {
 			notificationID, princ string
 			details               string
 			attempts              int
+			sealed                string
 		)
 		if rows.Next() {
 			taken = true
-			err = rows.Scan(&notificationID, &princ, &r.Event, &r.OccurredAt, &details, &attempts, &r.Addresses)
+			err = rows.Scan(&notificationID, &princ, &r.Event, &r.OccurredAt, &details, &attempts, &sealed, &r.Addresses)
 		}
 		rows.Close()
 		if err == nil {
@@ -122,6 +141,16 @@ func (d *Dispatcher) one(ctx context.Context) (bool, error) {
 			return err
 		}
 		r.OccurredAt = r.OccurredAt.UTC()
+		if r.Event == EventAddressProof {
+			opened, ok := d.openCode(r.PrincipalID, sealed)
+			if !ok {
+				d.logger.ErrorContext(ctx, "an address proof could not be handed over; its code expired or cannot be opened",
+					slog.String("notification_id", notificationID))
+				_, err := tx.Exec(ctx, unopenableStatement, notificationID, "the proof code expired before it was handed over")
+				return err
+			}
+			r.Code = opened
+		}
 
 		ref, deliverErr := d.deliver.Deliver(ctx, r)
 		if deliverErr == nil {
@@ -148,4 +177,15 @@ func (d *Dispatcher) one(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("securitynotify: dispatch: %w", err)
 	}
 	return taken, nil
+}
+
+func (d *Dispatcher) openCode(principal id.UUID, sealed string) (string, bool) {
+	if d.sealer == nil || sealed == "" {
+		return "", false
+	}
+	ref, err := d.sealer.Open(sealed, securityref.KindNotificationProof, principal, ProofPurpose)
+	if err != nil {
+		return "", false
+	}
+	return ref.KernelID, true
 }

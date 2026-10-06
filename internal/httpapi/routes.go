@@ -177,6 +177,11 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 		api.HandleFunc("POST /v1/me/authenticators/{authenticator_action}", s(cfg.Me.AuthenticatorAction))
 		api.HandleFunc("POST /v1/me/authenticators:enroll", s(cfg.Me.Enroll))
 		api.HandleFunc("GET /v1/me/security-operations/{operation_id}", s(cfg.Me.Operation))
+		if cfg.Me.addresses != nil {
+			api.HandleFunc("GET /v1/me/notification-addresses", s(cfg.Me.NotificationAddresses))
+			api.HandleFunc("POST /v1/me/notification-addresses", s(cfg.Me.AddNotificationAddress))
+			api.HandleFunc("POST /v1/me/notification-addresses/{address_action}", s(cfg.Me.NotificationAddressAction))
+		}
 	}
 	if cfg.Security != nil {
 		api.HandleFunc("POST /v1/principals/{principal_id}/sessions:terminate-all", p(cfg.Security.TerminateAll))

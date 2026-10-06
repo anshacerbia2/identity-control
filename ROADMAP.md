@@ -684,8 +684,13 @@ slice:
      production refuses it.
    - A provider reads a Principal's addresses and notifications. `deploy-dev` proves the bootstrap
      operator's TOTP enrolment reaches the stand-in.
-   - Not yet: adding and proving addresses at aal2 with the Identity Experience; notifications from
-     this service's own commands; and the Notification Platform client, which waits on that platform. Until both sides are in production, this remains a production gate.
+   - A person's own addresses (1.2.0): `GET` and `POST /v1/me/notification-addresses`, and
+     `:verify` and `:remove` on one. Adding and removing need a recent aal2. An added address is
+     proven by an 8-digit code, sent to it alone and sealed under the `securityref` key ring until
+     the dispatcher hands it over. Proving and removing are each notified to the addresses held
+     before, and the last active address stays.
+   - Not yet: the Identity Experience page for those routes; notifications from assisted recovery;
+     and the Notification Platform client, which waits on that platform. Until both sides are in production, this remains a production gate.
 
 ## Waiting on the Keycloak proof-of-concept
 

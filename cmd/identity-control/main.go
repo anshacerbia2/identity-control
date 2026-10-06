@@ -278,6 +278,13 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("self-service handler: %w", err)
 	}
+	// A person's own notification addresses, each proven with a code sealed under the same key ring
+	// as every other handle, for its lifetime (TDD-identity-control-008 1.2.0).
+	addresses, err := securitynotify.NewAddresses(pool, refs, cfg.SecurityRefTTL)
+	if err != nil {
+		return fmt.Errorf("notification addresses: %w", err)
+	}
+	meHandler.UseAddresses(addresses)
 
 	// The key source performs no fetch here. A cold replica loads the key set on its first
 	// verification, and NewJWKS deliberately touches no network so the composition root decides
@@ -490,6 +497,7 @@ func run() error {
 		if err != nil {
 			return fmt.Errorf("security notification dispatcher: %w", err)
 		}
+		dispatcher.WithSealer(refs)
 		logger.Warn("IDENTITY_NOTIFICATION_DELIVERY=standin: account security notifications are accepted and not delivered")
 		go scheduleNotificationDispatch(ctx, dispatcher, logger)
 	}

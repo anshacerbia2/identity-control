@@ -34,6 +34,9 @@ const (
 	KindCredential    Kind = "credential"
 	KindConsent       Kind = "consent"
 	KindFederatedLink Kind = "federation-link"
+	// KindNotificationProof is a notification address's proof code, sealed while its request waits
+	// for the dispatcher (TDD-identity-control-008 1.2.0). Its "kernel identifier" is the code.
+	KindNotificationProof Kind = "notification-address-proof"
 )
 
 // PurposeAdminRevoke is the purpose an authenticator's handle is sealed for in a provider's read:
