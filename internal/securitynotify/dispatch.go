@@ -67,8 +67,8 @@ SET state = 'submitted', platform_ref = $2, submitted_at = now(), attempts = att
 WHERE notification_id = $1`
 
 const retryStatement = `UPDATE identity.security_notification
-SET attempts = $2, next_attempt_at = now() + $3::interval, last_error = $4,
-    state = CASE WHEN $2 >= $5 THEN 'failed' ELSE 'requested' END
+SET attempts = $2::integer, next_attempt_at = now() + $3::interval, last_error = $4,
+    state = CASE WHEN $2::integer >= $5::integer THEN 'failed' ELSE 'requested' END
 WHERE notification_id = $1`
 
 // Dispatch hands over every due request, up to the batch, and answers how many it handed over.
