@@ -332,12 +332,11 @@ func TestAProviderReadsAPrincipalsNotifications(t *testing.T) {
 	notificationID, _ := id.NewV7()
 	occurred := time.Now().UTC().Truncate(time.Millisecond)
 	if err := h.pool.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
-		if _, err := tx.Exec(ctx, `INSERT INTO identity.notification_address (address_id, principal_id, channel, address, origin, state)
-		    VALUES ($1, $2, 'email', 'alice.notify@example.com', 'creation', 'active'),
-		           ($3, $2, 'email', 'old@example.com', 'added', 'removed')`, addressID.String(), alice.String(), removedID.String()); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(ctx, `UPDATE identity.notification_address SET removed_at = now() WHERE address_id = $1`, removedID.String()); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO identity.notification_address
+		    (address_id, principal_id, channel, address, origin, state, removed_at)
+		    VALUES ($1, $2, 'email', 'alice.notify@example.com', 'creation', 'active', NULL),
+		           ($3, $2, 'email', 'old@example.com', 'added', 'removed', now())`,
+			addressID.String(), alice.String(), removedID.String()); err != nil {
 			return err
 		}
 		_, err := tx.Exec(ctx, `INSERT INTO identity.security_notification
