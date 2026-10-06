@@ -26,6 +26,8 @@ type Investigator interface {
 	FederationLinks(ctx context.Context, actor investigation.Actor, principalID id.UUID) ([]investigation.FederationLink, error)
 	Findings(ctx context.Context, actor investigation.Actor, principalID id.UUID) ([]investigation.Finding, error)
 	Events(ctx context.Context, actor investigation.Actor, principalID id.UUID) ([]investigation.Event, error)
+	NotificationAddresses(ctx context.Context, actor investigation.Actor, principalID id.UUID) ([]investigation.NotificationAddress, error)
+	SecurityNotifications(ctx context.Context, actor investigation.Actor, principalID id.UUID) ([]investigation.SecurityNotification, error)
 }
 
 // Investigation is the handler.
@@ -140,4 +142,16 @@ func (h *Investigation) Findings(w http.ResponseWriter, r *http.Request) {
 // Events handles GET /v1/principals/{principal_id}/events (TDD-identity-control-005 2.9.0).
 func (h *Investigation) Events(w http.ResponseWriter, r *http.Request) {
 	list(h.reader.Events, "events")(w, r)
+}
+
+// NotificationAddresses handles GET /v1/principals/{principal_id}/notification-addresses
+// (TDD-identity-control-008).
+func (h *Investigation) NotificationAddresses(w http.ResponseWriter, r *http.Request) {
+	list(h.reader.NotificationAddresses, "notification_addresses")(w, r)
+}
+
+// SecurityNotifications handles GET /v1/principals/{principal_id}/security-notifications
+// (TDD-identity-control-008).
+func (h *Investigation) SecurityNotifications(w http.ResponseWriter, r *http.Request) {
+	list(h.reader.SecurityNotifications, "security_notifications")(w, r)
 }

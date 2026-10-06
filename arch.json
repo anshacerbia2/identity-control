@@ -28,6 +28,7 @@
       "internal/reconcile",
       "internal/registration",
       "internal/securityref",
+      "internal/securitynotify",
       "internal/securitystate",
       "internal/tenantcontext",
       "internal/workload"
@@ -111,6 +112,12 @@
       "the AEAD codec and nothing else."
     ],
     "internal/kernelevents": ["internal/keycloak", "internal/keycloak/keycloakfake"],
+    "_comment_securitynotify": [
+      "internal/securitynotify decides account security notifications from kernel events",
+      "(ADR-IAM-007, TDD-identity-control-008). It reads the kernel event type and nothing else of",
+      "keycloak; the sweep calls it through a hook, so kernelevents does not depend on it."
+    ],
+    "internal/securitynotify": ["internal/keycloak"],
     "internal/securityref": [],
     "internal/investigation": [
       "internal/keycloak",

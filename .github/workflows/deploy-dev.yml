@@ -99,6 +99,8 @@ jobs:
             echo "KEYS_OWNER=$(id -u):$(id -g)"
             # Short enough that Proof B sees the schedule run within the job.
             echo "IDENTITY_REGISTRATION_RECONCILE_INTERVAL=20s"
+            # The development stand-in for the Notification Platform (TDD-identity-control-008).
+            echo "IDENTITY_NOTIFICATION_DELIVERY=standin"
           } > .env
 
       - name: register this service's clients in the kernel
@@ -238,6 +240,15 @@ jobs:
           export IDENTITY_API_URL=http://127.0.0.1:8082 KC_BASE_URL=https://localhost
           export IDENTITY_OPERATOR_TOTP_FILE="$RUNNER_TEMP/operator-totp.json"
           pwsh -NoProfile -File scripts/dev-kernel-events-proof.ps1
+
+      # TDD-identity-control-008: the sweep above recorded the bootstrap operator's TOTP enrolment, so
+      # its notifications are requested to the creation address and the stand-in accepts them.
+      - name: account security notifications
+        run: |
+          set -a; . deploy/dev/.env; set +a
+          export IDENTITY_API_URL=http://127.0.0.1:8082 KC_BASE_URL=https://localhost
+          export IDENTITY_OPERATOR_TOTP_FILE="$RUNNER_TEMP/operator-totp.json"
+          pwsh -NoProfile -File scripts/dev-notifications-proof.ps1
 
       # identity-control ROADMAP §Proof B: both drift scenarios, a drift exception and its expiry,
       # and Keycloak stopped then started, against this live kernel. Each convergence time lands in

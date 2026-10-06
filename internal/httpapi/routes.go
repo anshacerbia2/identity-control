@@ -154,6 +154,8 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 		api.HandleFunc("GET /v1/principals/{principal_id}/federation-links", p(cfg.Investigation.FederationLinks))
 		api.HandleFunc("GET /v1/principals/{principal_id}/findings", p(cfg.Investigation.Findings))
 		api.HandleFunc("GET /v1/principals/{principal_id}/events", p(cfg.Investigation.Events))
+		api.HandleFunc("GET /v1/principals/{principal_id}/notification-addresses", p(cfg.Investigation.NotificationAddresses))
+		api.HandleFunc("GET /v1/principals/{principal_id}/security-notifications", p(cfg.Investigation.SecurityNotifications))
 	}
 	if cfg.KernelEvents != nil {
 		api.HandleFunc("POST /v1/kernel-events:sweep", p(kernelEventSweep(cfg.KernelEvents)))

@@ -247,8 +247,10 @@ func TestKernelFailureLeavesTheMappingPending(t *testing.T) {
 	}
 	// The first transaction committed, so the pending mapping is durable.
 	statements := tx.txs[0].Calls()
-	if len(statements) != 2 {
-		t.Fatalf("first checkpoint sent %d statements, want 2 (claim and insert)", len(statements))
+	// The claim, the pending mapping, and the person's creation notification address
+	// (TDD-identity-control-008), which commits with the mapping.
+	if len(statements) != 3 {
+		t.Fatalf("first checkpoint sent %d statements, want 3 (claim, insert, creation address)", len(statements))
 	}
 }
 

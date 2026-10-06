@@ -64,6 +64,11 @@ type Config struct {
 	// least twice before it expires, with a safety factor of twenty-four (TDD-identity-kernel-003).
 	KernelEventInterval time.Duration
 
+	// NotificationDelivery is IDENTITY_NOTIFICATION_DELIVERY: empty, no dispatcher runs and account
+	// security notifications are recorded and wait; "standin", the development server's stand-in for
+	// the Notification Platform accepts them, which production refuses (TDD-identity-control-008).
+	NotificationDelivery string
+
 	// RegistrationReconcileInterval is the registration drift sweep cadence. identity-kernel keeps
 	// admin events for 7 days, and a change must still carry its event when a sweep reads it.
 	RegistrationReconcileInterval time.Duration
@@ -254,6 +259,17 @@ func Load() (Config, error) {
 	case "non-production":
 	default:
 		problems = append(problems, fmt.Errorf("IDENTITY_ENVIRONMENT is %q; it is production or non-production", environment))
+	}
+	switch mode := strings.TrimSpace(os.Getenv("IDENTITY_NOTIFICATION_DELIVERY")); mode {
+	case "":
+	case "standin":
+		if cfg.Production {
+			problems = append(problems, errors.New("IDENTITY_NOTIFICATION_DELIVERY=standin is refused in production: "+
+				"it accepts every notification and delivers none, so the person would not be told"))
+		}
+		cfg.NotificationDelivery = mode
+	default:
+		problems = append(problems, fmt.Errorf("IDENTITY_NOTIFICATION_DELIVERY is %q; it is empty or standin", mode))
 	}
 	switch mode := stringOr("IDENTITY_UNMANAGED_CLIENTS", "report"); mode {
 	case "report":

@@ -60,7 +60,16 @@ type Sweeper struct {
 	interval time.Duration
 	now      func() time.Time
 	logger   *slog.Logger
+	recorded RecordedHook
 }
+
+// RecordedHook is called for each event the sweep records for the first time, in the transaction that
+// records it, so what it writes commits with the event or not at all. Account security notifications
+// are requested this way (TDD-identity-control-008).
+type RecordedHook func(ctx context.Context, tx db.Tx, realm keycloak.Realm, event keycloak.KernelEvent) error
+
+// OnRecorded sets the hook. Nil, the default, calls nothing.
+func (s *Sweeper) OnRecorded(hook RecordedHook) { s.recorded = hook }
 
 // NewSweeper builds the sweep. The interval is the window overlap as well as the cadence.
 func NewSweeper(tx Transactor, store keycloak.EventStore, realm keycloak.Realm, interval time.Duration,
@@ -166,6 +175,11 @@ func (s *Sweeper) sweepKind(ctx context.Context, kind string) (KindResult, error
 				return fmt.Errorf("record %s: %w", event.ID, err)
 			}
 			result.Recorded += int(tag.RowsAffected())
+			if tag.RowsAffected() == 1 && s.recorded != nil {
+				if err := s.recorded(ctx, tx, s.realm, event); err != nil {
+					return err
+				}
+			}
 		}
 		return tx.QueryRow(ctx, saveMarkStatement, string(s.realm), kind, readThrough, now, result.Read,
 			result.Recorded).Scan(&result.ReadThrough)

@@ -532,3 +532,29 @@ func TestLoadBootstrapRequiresWhatRegistersTheResource(t *testing.T) {
 		})
 	}
 }
+
+// The development stand-in for the Notification Platform accepts every notification and delivers
+// none, so production refuses it (TDD-identity-control-008 §The Adapter).
+func TestTheNotificationStandInIsRefusedInProduction(t *testing.T) {
+	for _, c := range []struct {
+		environment, delivery string
+		ok                    bool
+	}{
+		{"non-production", "", true},
+		{"non-production", "standin", true},
+		{"production", "", true},
+		{"production", "standin", false},
+		{"non-production", "smtp", false},
+	} {
+		setRequired(t)
+		t.Setenv("IDENTITY_ENVIRONMENT", c.environment)
+		t.Setenv("IDENTITY_NOTIFICATION_DELIVERY", c.delivery)
+		cfg, err := config.Load()
+		if (err == nil) != c.ok {
+			t.Errorf("%s with %q: err %v, want accepted %t", c.environment, c.delivery, err, c.ok)
+		}
+		if err == nil && cfg.NotificationDelivery != c.delivery {
+			t.Errorf("%s with %q: delivery %q", c.environment, c.delivery, cfg.NotificationDelivery)
+		}
+	}
+}

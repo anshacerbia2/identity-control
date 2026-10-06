@@ -2,6 +2,7 @@ package kernelevents
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -186,5 +187,40 @@ func TestAnEventWithoutAnIdentifierStopsTheSweep(t *testing.T) {
 	h.store.Record(login("", "kc-1", h.now.Add(-time.Minute)))
 	if _, err := h.sweeper.Sweep(context.Background()); err == nil || !strings.Contains(err.Error(), "no id") {
 		t.Errorf("an event without an id answered %v", err)
+	}
+}
+
+// The recorded hook sees each event once, when it is first recorded, inside the sweep's transaction
+// (TDD-identity-control-008 §Component Design): a second sweep that reads it again in the overlap does
+// not call it, and a hook that fails rolls the sweep back with it.
+func TestTheRecordedHookSeesEachEventOnce(t *testing.T) {
+	h := newHarness(t)
+	var seen []string
+	h.sweeper.OnRecorded(func(_ context.Context, _ db.Tx, realm keycloak.Realm, e keycloak.KernelEvent) error {
+		if realm != h.realm {
+			t.Errorf("the hook was called for realm %s", realm)
+		}
+		seen = append(seen, e.ID)
+		return nil
+	})
+	h.store.Record(login("h1", "kc-1", h.now.Add(-time.Minute)))
+	h.sweep(t)
+	h.now = h.now.Add(time.Hour)
+	h.store.Record(login("h2", "kc-1", h.now.Add(-time.Second)))
+	h.sweep(t)
+	if len(seen) != 2 || seen[0] != "h1" || seen[1] != "h2" {
+		t.Errorf("the hook saw %v; want h1 then h2, each once", seen)
+	}
+
+	h.now = h.now.Add(time.Hour)
+	h.store.Record(login("h3", "kc-1", h.now.Add(-time.Second)))
+	h.sweeper.OnRecorded(func(context.Context, db.Tx, keycloak.Realm, keycloak.KernelEvent) error {
+		return errors.New("the request could not be recorded")
+	})
+	if _, err := h.sweeper.Sweep(context.Background()); err == nil {
+		t.Fatal("a failing hook did not fail the sweep")
+	}
+	if n := h.count(t, `SELECT count(*) FROM identity.kernel_event WHERE realm = $1 AND kc_event_id = 'h3'`, string(h.realm)); n != 0 {
+		t.Error("the event was recorded although its hook failed; the two must commit together")
 	}
 }

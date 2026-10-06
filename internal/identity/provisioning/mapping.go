@@ -180,8 +180,23 @@ func (Repository) InsertPending(ctx context.Context, tx db.Tx, m Mapping) error 
 	if tag.RowsAffected() == 0 {
 		return ErrIdentifierTaken
 	}
+	// The email a person is created with is their first notification address, written with the
+	// mapping so no person exists without one (ADR-IAM-007 §5.2, TDD-identity-control-008).
+	if m.Email != "" && m.SubjectType == keycloak.SubjectHuman {
+		addressID, err := id.NewV7()
+		if err != nil {
+			return fmt.Errorf("provisioning: notification address identifier: %w", err)
+		}
+		if _, err := tx.Exec(ctx, insertCreationAddressStatement, addressID.String(), m.PrincipalID.String(), m.Email); err != nil {
+			return fmt.Errorf("provisioning: insert the creation notification address: %w", err)
+		}
+	}
 	return nil
 }
+
+const insertCreationAddressStatement = `INSERT INTO identity.notification_address
+    (address_id, principal_id, channel, address, origin, state)
+VALUES ($1, $2, 'email', $3, 'creation', 'active')`
 
 const activateStatement = `UPDATE identity.principal_mapping
 SET keycloak_user_id = $2,

@@ -41,6 +41,7 @@ import (
 	"github.com/anshacerbia2/identity-control/internal/providerauthority"
 	"github.com/anshacerbia2/identity-control/internal/reconcile"
 	"github.com/anshacerbia2/identity-control/internal/registration"
+	"github.com/anshacerbia2/identity-control/internal/securitynotify"
 	"github.com/anshacerbia2/identity-control/internal/securityref"
 	"github.com/anshacerbia2/identity-control/internal/securitystate"
 	"github.com/anshacerbia2/identity-control/internal/tenantcontext"
@@ -296,6 +297,9 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("kernel event sweep: %w", err)
 	}
+	// Each kernel event recorded for the first time that ADR-IAM-007 notifies requests its notification
+	// in the same transaction (TDD-identity-control-008).
+	kernelEvents.OnRecorded(securitynotify.NewRequester(logger).FromKernelEvent)
 
 	routesConfig := httpapi.RoutesConfig{
 		KernelEvents:  kernelEvents,
@@ -479,6 +483,16 @@ func run() error {
 	}
 	go scheduleTenantSweeps(ctx, tenantSweep, cfg.ProjectionReconcileInterval, logger)
 	go scheduleKernelEventSweeps(ctx, kernelEvents, cfg.KernelEventInterval, logger)
+	// The dispatcher hands requested notifications to the delivery adapter. With none configured the
+	// requests are recorded and wait for the Notification Platform (TDD-identity-control-008).
+	if cfg.NotificationDelivery == "standin" {
+		dispatcher, err := securitynotify.NewDispatcher(pool, securitynotify.StandIn{Logger: logger}, logger)
+		if err != nil {
+			return fmt.Errorf("security notification dispatcher: %w", err)
+		}
+		logger.Warn("IDENTITY_NOTIFICATION_DELIVERY=standin: account security notifications are accepted and not delivered")
+		go scheduleNotificationDispatch(ctx, dispatcher, logger)
+	}
 	go scheduleSweeps(ctx, provisioner, registrar, workloads, reconciler, providers, cfg.RegistrationReconcileInterval, logger)
 	if freshness != nil {
 		go freshness.Poll(ctx, projection, frontier, providerauthority.PollInterval, logger)
@@ -661,6 +675,23 @@ func scheduleTenantSweeps(ctx context.Context, sweep *tenantcontext.Reconciler, 
 	for {
 		if _, err := sweep.Sweep(ctx); err != nil && ctx.Err() == nil {
 			logger.Error("tenant context sweep failed", slog.String("error", err.Error()))
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// scheduleNotificationDispatch hands due account security notifications to the adapter every
+// interval, the first at once (TDD-identity-control-008 §Dispatch).
+func scheduleNotificationDispatch(ctx context.Context, dispatcher *securitynotify.Dispatcher, logger *slog.Logger) {
+	ticker := time.NewTicker(securitynotify.DispatchInterval)
+	defer ticker.Stop()
+	for {
+		if _, err := dispatcher.Dispatch(ctx); err != nil && ctx.Err() == nil {
+			logger.Error("security notification dispatch failed", slog.String("error", err.Error()))
 		}
 		select {
 		case <-ctx.Done():
