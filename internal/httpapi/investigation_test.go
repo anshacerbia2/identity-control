@@ -79,6 +79,20 @@ func (s *stubInvestigator) Events(_ context.Context, actor investigation.Actor, 
 	return []investigation.Event{}, nil
 }
 
+func (s *stubInvestigator) NotificationAddresses(_ context.Context, actor investigation.Actor, subject id.UUID) ([]investigation.NotificationAddress, error) {
+	if err := s.seen(actor, subject); err != nil {
+		return nil, err
+	}
+	return []investigation.NotificationAddress{{Channel: "email", Address: "alice@example.com", Origin: "creation", State: "active"}}, nil
+}
+
+func (s *stubInvestigator) SecurityNotifications(_ context.Context, actor investigation.Actor, subject id.UUID) ([]investigation.SecurityNotification, error) {
+	if err := s.seen(actor, subject); err != nil {
+		return nil, err
+	}
+	return []investigation.SecurityNotification{{Event: "authenticator_bound", Recipients: 1, State: "submitted"}}, nil
+}
+
 func investigationHandler(t *testing.T, stub *stubInvestigator) http.Handler {
 	t.Helper()
 	investigations, err := httpapi.NewInvestigation(stub)

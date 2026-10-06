@@ -10,6 +10,7 @@ package investigation
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -489,4 +490,125 @@ func (s *Service) Events(ctx context.Context, actor Actor, principalID id.UUID) 
 		return s.record(ctx, tx, actor, &principalID, "read.events", nil, len(events))
 	})
 	return events, err
+}
+
+// NotificationAddress is one of a Principal's notification addresses (ADR-IAM-007 §5.2,
+// TDD-identity-control-008). It is shown to a provider, who needs it for assisted recovery, and never
+// logged.
+type NotificationAddress struct {
+	AddressID  id.UUID    `json:"address_id"`
+	Channel    string     `json:"channel"`
+	Address    string     `json:"address"`
+	Origin     string     `json:"origin"`
+	State      string     `json:"state"`
+	AddedAt    time.Time  `json:"added_at"`
+	VerifiedAt *time.Time `json:"verified_at,omitempty"`
+	RemovedAt  *time.Time `json:"removed_at,omitempty"`
+}
+
+const notificationAddressesStatement = `SELECT address_id::text, channel, address, origin, state, added_at, verified_at, removed_at
+FROM identity.notification_address
+WHERE principal_id = $1
+ORDER BY added_at, address_id`
+
+// NotificationAddresses reads every notification address the Principal holds or held.
+func (s *Service) NotificationAddresses(ctx context.Context, actor Actor, principalID id.UUID) ([]NotificationAddress, error) {
+	var addresses []NotificationAddress
+	err := s.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		if _, _, err := s.readPrincipal(ctx, tx, principalID); err != nil {
+			return err
+		}
+		rows, err := tx.Query(ctx, notificationAddressesStatement, principalID.String())
+		if err != nil {
+			return fmt.Errorf("investigation: read the notification addresses: %w", err)
+		}
+		addresses = []NotificationAddress{}
+		for rows.Next() {
+			var (
+				a       NotificationAddress
+				address string
+			)
+			if err := rows.Scan(&address, &a.Channel, &a.Address, &a.Origin, &a.State, &a.AddedAt, &a.VerifiedAt,
+				&a.RemovedAt); err != nil {
+				rows.Close()
+				return err
+			}
+			if a.AddressID, err = id.Parse(address); err != nil {
+				rows.Close()
+				return err
+			}
+			a.AddedAt = a.AddedAt.UTC()
+			addresses = append(addresses, a)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		return s.record(ctx, tx, actor, &principalID, "read.notification_addresses", nil, len(addresses))
+	})
+	return addresses, err
+}
+
+// SecurityNotification is one account security notification requested for the Principal
+// (TDD-identity-control-008): what happened, how many addresses it went to, and where its delivery
+// stands. The addresses themselves are the other read's.
+type SecurityNotification struct {
+	NotificationID id.UUID           `json:"notification_id"`
+	Event          string            `json:"event"`
+	OccurredAt     time.Time         `json:"occurred_at"`
+	Details        map[string]string `json:"details"`
+	Recipients     int               `json:"recipients"`
+	State          string            `json:"state"`
+	Attempts       int               `json:"attempts"`
+	RequestedAt    time.Time         `json:"requested_at"`
+	SubmittedAt    *time.Time        `json:"submitted_at,omitempty"`
+}
+
+const securityNotificationsStatement = `SELECT notification_id::text, event, occurred_at, details::text, cardinality(recipients),
+       state, attempts, requested_at, submitted_at
+FROM identity.security_notification
+WHERE principal_id = $1
+ORDER BY occurred_at DESC, notification_id DESC
+LIMIT 100`
+
+// SecurityNotifications reads the Principal's hundred most recent notifications, newest first.
+func (s *Service) SecurityNotifications(ctx context.Context, actor Actor, principalID id.UUID) ([]SecurityNotification, error) {
+	var notifications []SecurityNotification
+	err := s.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		if _, _, err := s.readPrincipal(ctx, tx, principalID); err != nil {
+			return err
+		}
+		rows, err := tx.Query(ctx, securityNotificationsStatement, principalID.String())
+		if err != nil {
+			return fmt.Errorf("investigation: read the security notifications: %w", err)
+		}
+		notifications = []SecurityNotification{}
+		for rows.Next() {
+			var (
+				n                   SecurityNotification
+				notificationID, raw string
+			)
+			if err := rows.Scan(&notificationID, &n.Event, &n.OccurredAt, &raw, &n.Recipients, &n.State, &n.Attempts,
+				&n.RequestedAt, &n.SubmittedAt); err != nil {
+				rows.Close()
+				return err
+			}
+			if n.NotificationID, err = id.Parse(notificationID); err != nil {
+				rows.Close()
+				return err
+			}
+			if err := json.Unmarshal([]byte(raw), &n.Details); err != nil {
+				rows.Close()
+				return err
+			}
+			n.OccurredAt, n.RequestedAt = n.OccurredAt.UTC(), n.RequestedAt.UTC()
+			notifications = append(notifications, n)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		return s.record(ctx, tx, actor, &principalID, "read.security_notifications", nil, len(notifications))
+	})
+	return notifications, err
 }

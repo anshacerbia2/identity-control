@@ -16,6 +16,8 @@ Week numbers are relative to the first build week, not calendar dates.
 | `TDD-identity-control-004` | Workload and bounded agent identity | approved |
 | `TDD-identity-control-005` | Account-security and investigation API mediation | approved |
 | `TDD-identity-control-006` | Provider authority from Organization's records: delivery intake, local projection, freshness, the per-request decision that replaces `provider_scope`, and the ceremony grant | built: intake and projection, bootstrap and freshness (`cmd/identity-provider-bootstrap`, the frontier poll), the per-request decision (`providerauthority.Decider`; `provider_scope` refused) and the ceremony grant with its insert-only retirement. The kernel's `provider_scope` mapper is removed in identity-kernel. Emergency grant validation (1.3.0, ADR-ORG-002 §5.2): each request a projected emergency grant authorizes records its use, and one unused for 90 days is overdue on `GET /v1/provider-grants:emergency-validation` and logged at WARN by the scheduled pass |
+| `TDD-identity-control-007` | The kernel event record and its completeness | built (item 8 below) |
+| `TDD-identity-control-008` | Account security notifications: addresses, requests from the kernel event record, dispatch | built in slices; the first is item 10 below |
 
 Three documents were inherited from the former monorepo. All three are gone from `docs/designs`,
 and their content lives here:
@@ -668,6 +670,23 @@ slice:
    most recent: kind, role, type, outcome, client and resource type, and no IP address, session,
    kernel identifier or resource path. A provider route at `aal2`, recorded as `read.events`. It is
    what replaces the kernel's Admin Console for seeing who signed in and failed (ADR-IAM-001 §5.8).
+10. ✅ **Account security notifications, first slice** (`TDD-identity-control-008`, ADR-IAM-007,
+   STD-IAM-001 §3.1 2.6.0).
+   - A person's creation email is their first notification address, written with the mapping and
+     backfilled for those created before.
+   - Each kernel event ADR-IAM-007 notifies requests its notification in the sweep's transaction,
+     once per event, to the addresses held at that instant: a TOTP or security key bound, recovery
+     codes issued, a recovery code used, and an authenticator removed through the Admin API. The
+     kernel marks are the ones identity-kernel's `compat/notified_events_test.go` proves.
+   - A dispatcher hands each request to the delivery adapter, retries with backoff and fails it at
+     ten attempts. On a development server the adapter is a stand-in that delivers nothing, and
+     production refuses it.
+   - A provider reads a Principal's addresses and notifications. `deploy-dev` proves the bootstrap
+     operator's TOTP enrolment reaches the stand-in.
+   - Not yet: adding and proving addresses at aal2 with the Identity Experience; notifications from
+     this service's own commands; a self-removed authenticator and a changed password, which the
+     kernel suite does not yet prove; and the Notification Platform client, which waits on that
+     platform. Until both sides are in production, this remains a production gate.
 
 ## Waiting on the Keycloak proof-of-concept
 

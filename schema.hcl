@@ -2556,3 +2556,169 @@ table "kernel_event_mark" {
   }
 }
 
+
+table "notification_address" {
+  schema  = schema.identity
+  comment = "A Principal's notification addresses: the creation email first, others proven. ADR-IAM-007 §5.2, TDD-identity-control-008."
+
+  column "address_id" {
+    null = false
+    type = uuid
+  }
+  column "principal_id" {
+    null = false
+    type = uuid
+  }
+  column "channel" {
+    null = false
+    type = text
+  }
+  column "address" {
+    null = false
+    type = text
+  }
+  column "origin" {
+    null = false
+    type = text
+  }
+  column "state" {
+    null = false
+    type = text
+  }
+  column "added_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+  column "verified_at" {
+    null = true
+    type = timestamptz
+  }
+  column "removed_at" {
+    null = true
+    type = timestamptz
+  }
+
+  primary_key {
+    columns = [column.address_id]
+  }
+
+  // One held address per Principal, whatever its case.
+  index "notification_address_held" {
+    unique = true
+    on {
+      column = column.principal_id
+    }
+    on {
+      expr = "lower(address)"
+    }
+    where = "state <> 'removed'"
+  }
+
+  check "notification_address_channel_check" {
+    expr = "channel = 'email'"
+  }
+  check "notification_address_origin_check" {
+    expr = "origin IN ('creation', 'added')"
+  }
+  check "notification_address_state_check" {
+    expr = "state IN ('pending', 'active', 'removed')"
+  }
+  check "notification_address_removed_check" {
+    expr = "(state = 'removed') = (removed_at IS NOT NULL)"
+  }
+}
+
+table "security_notification" {
+  schema  = schema.identity
+  comment = "Each account security notification requested, once per event, with its recipients at the event. ADR-IAM-007, TDD-identity-control-008."
+
+  column "notification_id" {
+    null = false
+    type = uuid
+  }
+  column "principal_id" {
+    null = false
+    type = uuid
+  }
+  column "event" {
+    null = false
+    type = text
+  }
+  column "source_key" {
+    null = false
+    type = text
+  }
+  column "occurred_at" {
+    null = false
+    type = timestamptz
+  }
+  column "details" {
+    null    = false
+    type    = jsonb
+    default = sql("'{}'::jsonb")
+  }
+  column "recipients" {
+    null = false
+    type = sql("uuid[]")
+  }
+  column "state" {
+    null = false
+    type = text
+  }
+  column "attempts" {
+    null    = false
+    type    = integer
+    default = 0
+  }
+  column "next_attempt_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+  column "platform_ref" {
+    null = true
+    type = text
+  }
+  column "last_error" {
+    null = true
+    type = text
+  }
+  column "requested_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+  column "submitted_at" {
+    null = true
+    type = timestamptz
+  }
+
+  primary_key {
+    columns = [column.notification_id]
+  }
+
+  index "security_notification_source" {
+    unique  = true
+    columns = [column.source_key]
+  }
+  // The dispatcher's read: due requests, oldest first.
+  index "security_notification_due" {
+    columns = [column.next_attempt_at]
+    where   = "state = 'requested'"
+  }
+  // A provider's read of a Principal's notifications, newest first.
+  index "security_notification_principal" {
+    columns = [column.principal_id, column.occurred_at]
+  }
+
+  check "security_notification_event_check" {
+    expr = "event IN ('authenticator_bound', 'authenticator_removed', 'recovery_codes_issued', 'account_recovered', 'notification_address_changed')"
+  }
+  check "security_notification_state_check" {
+    expr = "state IN ('requested', 'submitted', 'failed', 'no_address')"
+  }
+  check "security_notification_submitted_check" {
+    expr = "(state = 'submitted') = (submitted_at IS NOT NULL)"
+  }
+}

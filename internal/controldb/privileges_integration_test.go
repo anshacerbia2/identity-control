@@ -609,3 +609,21 @@ func TestTheKernelEventRecordIsInsertOnly(t *testing.T) {
 		}
 	}
 }
+
+// Account security notifications are evidence (ADR-IAM-007, TDD-identity-control-008): the runtime
+// records and moves them forward, and deletes neither an address nor a request.
+func TestNotificationRecordsAreNeverDeleted(t *testing.T) {
+	pool, ctx := openPool(t)
+	for _, table := range []string{"identity.notification_address", "identity.security_notification"} {
+		for _, privilege := range []string{"SELECT", "INSERT", "UPDATE"} {
+			if !queryBool(t, pool, ctx, `SELECT has_table_privilege($1, $2, $3)`, runtimeRole, table, privilege) {
+				t.Errorf("%s lacks %s on %s", runtimeRole, privilege, table)
+			}
+		}
+		for _, privilege := range []string{"DELETE", "TRUNCATE"} {
+			if queryBool(t, pool, ctx, `SELECT has_table_privilege($1, $2, $3)`, runtimeRole, table, privilege) {
+				t.Errorf("%s holds %s on %s; the evidence could be removed", runtimeRole, privilege, table)
+			}
+		}
+	}
+}

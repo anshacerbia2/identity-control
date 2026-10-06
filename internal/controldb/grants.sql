@@ -59,6 +59,8 @@ BEGIN
               ('identity.projection_finding'),
               ('identity.kernel_event'),
               ('identity.kernel_event_mark'),
+              ('identity.notification_address'),
+              ('identity.security_notification'),
               ('platform.outbox'),
               ('platform.processed_event'),
               ('platform.dead_letter'),
@@ -194,6 +196,11 @@ REVOKE UPDATE, DELETE, TRUNCATE ON identity.projection_finding FROM identity_run
 -- never edited, and kept until Audit & Evidence has it. The mark moves; nothing deletes it.
 REVOKE UPDATE, DELETE, TRUNCATE ON identity.kernel_event FROM identity_runtime;
 REVOKE DELETE, TRUNCATE ON identity.kernel_event_mark FROM identity_runtime;
+-- Account security notifications (ADR-IAM-007, TDD-identity-control-008). An address is removed by
+-- its state, never deleted, so the record of where a person was told survives. A request is evidence
+-- that the person was told, or that they could not be: its state moves forward and nothing deletes one.
+REVOKE DELETE, TRUNCATE ON identity.notification_address FROM identity_runtime;
+REVOKE DELETE, TRUNCATE ON identity.security_notification FROM identity_runtime;
 -- The ceremony grant ends once, by an insert, and is never revived: insert-only like the ceremony
 -- row it retires (TDD-identity-control-006 §The Ceremony's Grant).
 REVOKE UPDATE, DELETE, TRUNCATE ON identity.ceremony_grant_retirement FROM identity_runtime;

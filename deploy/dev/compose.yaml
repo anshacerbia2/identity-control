@@ -124,6 +124,10 @@ services:
       # either in .env and recreate the service. compose passes a container only what is listed here,
       # so a setting missing from this list is a setting .env cannot reach.
       IDENTITY_UNMANAGED_CLIENTS: ${IDENTITY_UNMANAGED_CLIENTS:-report}
+      # Account security notifications (TDD-identity-control-008): standin on a development server
+      # accepts them and delivers none, until the Notification Platform exists. Empty records and
+      # waits.
+      IDENTITY_NOTIFICATION_DELIVERY: ${IDENTITY_NOTIFICATION_DELIVERY:-}
       IDENTITY_TOKEN_TYPE: ${IDENTITY_TOKEN_TYPE:-report}
       # Provider routes require acr aal2 (ADR-IAM-004). report serves a lower token and logs it, for a
       # server whose kernel does not yet map the levels; deploy identity-kernel first and keep enforce.

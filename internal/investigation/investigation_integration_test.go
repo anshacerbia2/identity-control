@@ -320,3 +320,67 @@ func TestAProviderReadsAPrincipalsEvents(t *testing.T) {
 		t.Errorf("the read was recorded as %+v; want one read.events about the Principal", records)
 	}
 }
+
+// A provider reads a Principal's notification addresses and its account security notifications
+// (TDD-identity-control-008), each read recorded with its reason.
+func TestAProviderReadsAPrincipalsNotifications(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	alice, _ := h.principal("alice.notify", "alice.notify@example.com", true)
+	addressID, _ := id.NewV7()
+	removedID, _ := id.NewV7()
+	notificationID, _ := id.NewV7()
+	occurred := time.Now().UTC().Truncate(time.Millisecond)
+	if err := h.pool.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		if _, err := tx.Exec(ctx, `INSERT INTO identity.notification_address
+		    (address_id, principal_id, channel, address, origin, state, removed_at)
+		    VALUES ($1, $2, 'email', 'alice.notify@example.com', 'creation', 'active', NULL),
+		           ($3, $2, 'email', 'old@example.com', 'added', 'removed', now())`,
+			addressID.String(), alice.String(), removedID.String()); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `INSERT INTO identity.security_notification
+		    (notification_id, principal_id, event, source_key, occurred_at, details, recipients, state, submitted_at)
+		    VALUES ($1, $2, 'authenticator_bound', $3, $4, '{"authenticator":"otp","actor":"self"}', ARRAY[$5::uuid], 'submitted', now())`,
+			notificationID.String(), alice.String(), "kernel:test:user:"+notificationID.String(), occurred, addressID.String())
+		return err
+	}); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+
+	addresses, err := h.service.NotificationAddresses(ctx, h.actor, alice)
+	if err != nil || len(addresses) != 2 {
+		t.Fatalf("NotificationAddresses: %+v, %v", addresses, err)
+	}
+	if addresses[0].Address != "alice.notify@example.com" || addresses[0].Origin != "creation" || addresses[0].State != "active" ||
+		addresses[1].State != "removed" || addresses[1].RemovedAt == nil {
+		t.Errorf("addresses read as %+v; want the creation address, then the removed one", addresses)
+	}
+
+	notifications, err := h.service.SecurityNotifications(ctx, h.actor, alice)
+	if err != nil || len(notifications) != 1 {
+		t.Fatalf("SecurityNotifications: %+v, %v", notifications, err)
+	}
+	n := notifications[0]
+	if n.NotificationID != notificationID || n.Event != "authenticator_bound" || n.Recipients != 1 || n.State != "submitted" ||
+		n.Details["authenticator"] != "otp" || n.SubmittedAt == nil || !n.OccurredAt.Equal(occurred) {
+		t.Errorf("the notification read as %+v", n)
+	}
+	encoded, _ := json.Marshal(notifications)
+	if strings.Contains(string(encoded), "alice.notify@example.com") {
+		t.Errorf("the notifications disclose an address; that is the other read's: %s", encoded)
+	}
+
+	records := h.evidence()
+	if len(records) != 2 || records[0].action != "read.notification_addresses" || records[1].action != "read.security_notifications" {
+		t.Errorf("the reads were recorded as %+v", records)
+	}
+
+	missing, _ := id.NewV7()
+	if _, err := h.service.NotificationAddresses(ctx, h.actor, missing); !errors.Is(err, ErrNotFound) {
+		t.Errorf("an unknown Principal's addresses answered %v; want ErrNotFound", err)
+	}
+	if _, err := h.service.SecurityNotifications(ctx, h.actor, missing); !errors.Is(err, ErrNotFound) {
+		t.Errorf("an unknown Principal's notifications answered %v; want ErrNotFound", err)
+	}
+}
