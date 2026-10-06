@@ -15,6 +15,10 @@ const (
 	EventAuthenticatorRemoved = "authenticator_removed"
 	EventRecoveryCodesIssued  = "recovery_codes_issued"
 	EventAccountRecovered     = "account_recovered"
+	// EventAddressChanged and EventAddressProof come from this service's own commands
+	// (TDD-identity-control-008 1.2.0): an address added or removed, and a new address's proof code.
+	EventAddressChanged = "notification_address_changed"
+	EventAddressProof   = "notification_address_proof"
 )
 
 // Who acted on the account.

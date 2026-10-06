@@ -37,6 +37,8 @@ type Me struct {
 	now          func() time.Time
 	// assurance is the routes' policy, which Routes hands it.
 	assurance AssurancePolicy
+	// addresses serves the person's own notification addresses; nil, their routes are not mounted.
+	addresses AddressService
 }
 
 // NewMe constructs the handler. stepUpMaxAge is IDENTITY_STEP_UP_MAX_AGE.

@@ -2598,6 +2598,21 @@ table "notification_address" {
     null = true
     type = timestamptz
   }
+  // A pending address's proof: the SHA-256 of its code, bound to the address, when it expires, and
+  // how many attempts were made (TDD-identity-control-008 1.2.0).
+  column "proof_hash" {
+    null = true
+    type = text
+  }
+  column "proof_expires_at" {
+    null = true
+    type = timestamptz
+  }
+  column "proof_attempts" {
+    null    = false
+    type    = integer
+    default = 0
+  }
 
   primary_key {
     columns = [column.address_id]
@@ -2626,6 +2641,9 @@ table "notification_address" {
   }
   check "notification_address_removed_check" {
     expr = "(state = 'removed') = (removed_at IS NOT NULL)"
+  }
+  check "notification_address_proof_check" {
+    expr = "(state <> 'pending') OR (proof_hash IS NOT NULL AND proof_expires_at IS NOT NULL)"
   }
 }
 
@@ -2684,6 +2702,12 @@ table "security_notification" {
     null = true
     type = text
   }
+  // A proof request's code, sealed under the securityref key ring until it is handed over, then
+  // cleared (TDD-identity-control-008 1.2.0).
+  column "sealed_secret" {
+    null = true
+    type = text
+  }
   column "requested_at" {
     null    = false
     type    = timestamptz
@@ -2713,12 +2737,15 @@ table "security_notification" {
   }
 
   check "security_notification_event_check" {
-    expr = "event IN ('authenticator_bound', 'authenticator_removed', 'recovery_codes_issued', 'account_recovered', 'notification_address_changed')"
+    expr = "event IN ('authenticator_bound', 'authenticator_removed', 'recovery_codes_issued', 'account_recovered', 'notification_address_changed', 'notification_address_proof')"
   }
   check "security_notification_state_check" {
     expr = "state IN ('requested', 'submitted', 'failed', 'no_address')"
   }
   check "security_notification_submitted_check" {
     expr = "(state = 'submitted') = (submitted_at IS NOT NULL)"
+  }
+  check "security_notification_secret_check" {
+    expr = "(sealed_secret IS NULL) OR (event = 'notification_address_proof' AND state = 'requested')"
   }
 }

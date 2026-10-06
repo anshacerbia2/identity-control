@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-008
   title: Account Security Notifications
   owner: Core Platform Team
-  version: 1.1.0
+  version: 1.2.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -23,7 +23,7 @@ hands it to the Notification Platform (`PAD-PLT-005`) to deliver. The kernel sen
 
 ## Scope
 
-**In scope (1.1.0)**
+**In scope (1.2.0)**
 
 - **Notification addresses.** The address a Principal was created with is its first. The record
   holds more.
@@ -35,15 +35,15 @@ hands it to the Notification Platform (`PAD-PLT-005`) to deliver. The kernel sen
   hand over.
 - **A development stand-in for the Notification Platform,** which production refuses.
 - **The provider's reads.** A Principal's addresses and its notifications.
+- **A person's own addresses (1.2.0).** Adding one at `aal2` and proving it with a one-time code,
+  and removing one, each notified to the addresses held before (`ADR-IAM-007 §5.2`).
 
 **Not yet**
 
-- **Adding and proving an address, and removing one, at `aal2` through the Identity Experience**
-  (`ADR-IAM-007 §5.2`). Until then, the creation address is each Principal's only one.
+- **The Identity Experience page** that serves these routes. It follows in `identity-experience`.
 - **The Notification Platform client.** It waits on that platform. Until then no notification leaves
   a development server.
-- **Notifications from this service's own commands:** assisted recovery and address changes. Those
-  commands are built with their slices.
+- **Notifications from assisted recovery.** That command is built with its own slice.
 
 ## Technical Context
 
@@ -177,6 +177,43 @@ Both are investigation reads, recorded with their reason like every other read
 (`TDD-identity-control-005` §Evidence). An address is shown to a provider, because assisted recovery
 needs to know where a person is told. It is never written to a log.
 
+### A Person's Own Addresses (1.2.0)
+
+```text
+GET  /v1/me/notification-addresses                      self: held and pending, never removed ones
+POST /v1/me/notification-addresses                      self, aal2 recent: {"address": "..."}
+POST /v1/me/notification-addresses/{address_id}:verify  self: {"code": "..."}
+POST /v1/me/notification-addresses/{address_id}:remove  self, aal2 recent
+```
+
+- **Adding needs `aal2`, recently.** It is the same step-up as removing an authenticator
+  (`IDENTITY_STEP_UP_MAX_AGE`, `ADR-IAM-004 §5.2`). An address changes where the person is told
+  about every later change, so it is protected like an authenticator. An add also needs an
+  `Idempotency-Key`.
+- **An added address is pending until proven.** The service draws a code of 8 digits from the
+  operating system's random source. It keeps the code's SHA-256, bound to the address identifier,
+  and sends the code to that address alone, as a `notification_address_proof` request.
+  - The code is good for the `securityref` lifetime, 10 minutes by default, and five attempts.
+  - A wrong, expired or exhausted code leaves the address pending. The person removes it and adds
+    it again.
+  - A pending address receives nothing else.
+- **The code is sealed while it waits.** The request carries it sealed with AEAD_AES_256_GCM under
+  the `securityref` key ring. The sealing is bound to the Principal and to the purpose
+  `notification-address-proof`.
+  - The dispatcher opens the code only to hand it to the adapter, then clears it from the row.
+  - A request whose seal has expired is failed, not sent.
+  - No code is logged, and the stand-in never sees one in a log line.
+- **Proving an address notifies the others.** The address becomes active, and a
+  `notification_address_changed` request (`change` added) goes to the addresses held before it.
+  The request names the new address only masked, such as `a***@example.com`.
+- **Removing an address notifies every address held before.** That includes the one removed, so an
+  attacker who removes the person's own address still tells them. The last active address cannot
+  be removed: a person who cannot be told is the failure this design exists to prevent.
+- **The list is bounded.** A person holds at most five addresses, active or pending. An address
+  already held, compared without case, is refused.
+- **An address is an email.** It is parsed as one bare addr-spec, with no display name, at most 254
+  characters, and stored as given.
+
 ## Configuration
 
 | Variable | Default | Purpose |
@@ -194,6 +231,14 @@ needs to know where a person is told. It is never written to a log.
 - The dispatcher hands a due request over once, backs off on a refusal, and fails it at ten
   attempts.
 - Startup refuses `standin` in production.
+- A person's own addresses (1.2.0):
+  - Adding needs a recent `aal2`. A malformed, duplicate or sixth address is refused.
+  - The proof request goes to the new address alone, and its code is sealed. Once handed over, the
+    seal is cleared.
+  - The right code activates the address and notifies the others. A wrong code, the sixth attempt
+    and an expired code each leave the address pending.
+  - Removing notifies every address held before, the removed one included, and the last active
+    address cannot be removed.
 - The runtime role cannot delete an address or a request.
 - Against the live kernel in `deploy-dev`: the bootstrap operator's TOTP enrolment requests
   `authenticator_bound` and `recovery_codes_issued` to the creation address, and the stand-in

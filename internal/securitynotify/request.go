@@ -113,4 +113,7 @@ type Request struct {
 	Details        map[string]string
 	// Addresses are the recipients fixed at the event.
 	Addresses []string
+	// Code is a proof request's one-time code, opened from its seal for this hand-over alone. It is
+	// never logged.
+	Code string
 }
