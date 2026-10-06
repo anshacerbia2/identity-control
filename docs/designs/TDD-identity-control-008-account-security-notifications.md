@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-008
   title: Account Security Notifications
   owner: Core Platform Team
-  version: 1.0.0
+  version: 1.1.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -23,7 +23,7 @@ hands it to the Notification Platform (`PAD-PLT-005`) to deliver. The kernel sen
 
 ## Scope
 
-**In scope (1.0.0)**
+**In scope (1.1.0)**
 
 - **Notification addresses.** The address a Principal was created with is its first. The record
   holds more.
@@ -44,8 +44,6 @@ hands it to the Notification Platform (`PAD-PLT-005`) to deliver. The kernel sen
   a development server.
 - **Notifications from this service's own commands:** assisted recovery and address changes. Those
   commands are built with their slices.
-- **A self-removed authenticator and a changed password.** The kernel's compatibility suite does not
-  yet prove how they are recorded, so they are not mapped.
 
 ## Technical Context
 
@@ -59,6 +57,8 @@ every interval. identity-kernel's `compat/notified_events_test.go` records how 2
 | A passkey or security key bound | user `UPDATE_CREDENTIAL`, `credential_type=webauthn` or `webauthn-passwordless` | `authenticator_bound`, `webauthn` |
 | Recovery codes issued or replaced | user `UPDATE_CREDENTIAL`, `credential_type=recovery-authn-codes` | `recovery_codes_issued` |
 | A recovery code used | user `LOGIN`, `credential_type=recovery-authn-codes`, **no** `custom_required_action` | `account_recovered`, `recovery_code` |
+| A password changed | user `UPDATE_CREDENTIAL`, `credential_type=password` | `authenticator_bound`, `password` (1.1.0) |
+| A TOTP, passkey or security key removed by the person | user `REMOVE_CREDENTIAL`, naming the credential type | `authenticator_removed`, by the person (1.1.0) |
 | An authenticator removed through the Admin API | admin `ACTION`, resource `USER`, path `users/{user}/credentials/{credential}` | `authenticator_removed`, by an administrator |
 
 Three facts about those marks shape the mapping:
@@ -66,8 +66,11 @@ Three facts about those marks shape the mapping:
 - **The enrolment's sign-in is not a recovery.** The `LOGIN` that ends enrolment also names
   `recovery-authn-codes`, and it carries `custom_required_action=CONFIGURE_RECOVERY_AUTHN_CODES`.
   A recovery is told apart by the absence of that detail.
-- **Only `UPDATE_CREDENTIAL` maps.** The kernel also writes the legacy `UPDATE_TOTP` beside
-  `UPDATE_CREDENTIAL`, and mapping both would notify one binding twice.
+- **Only `UPDATE_CREDENTIAL` maps.** The kernel also writes the legacy `UPDATE_TOTP` and
+  `UPDATE_PASSWORD` beside `UPDATE_CREDENTIAL`, and mapping both would notify one binding twice.
+- **A removal by the person is preceded by its own sign-in.** The `LOGIN` before
+  `kc_action=delete_credential` names the credential and `custom_required_action=delete_credential`.
+  It is not a recovery, and only the `REMOVE_CREDENTIAL` maps.
 - **A removal through the Admin API names its subject in the path.** In an admin event,
   `kc_user_id` is the actor (`TDD-identity-control-007` §Data Model), so the person whose
   authenticator was removed is the `{user}` in `resource_path`.

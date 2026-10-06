@@ -676,7 +676,8 @@ slice:
      backfilled for those created before.
    - Each kernel event ADR-IAM-007 notifies requests its notification in the sweep's transaction,
      once per event, to the addresses held at that instant: a TOTP or security key bound, recovery
-     codes issued, a recovery code used, and an authenticator removed through the Admin API. The
+     codes issued, a recovery code used, a password changed (1.1.0), and an authenticator removed by
+     the person (1.1.0) or through the Admin API. The
      kernel marks are the ones identity-kernel's `compat/notified_events_test.go` proves.
    - A dispatcher hands each request to the delivery adapter, retries with backoff and fails it at
      ten attempts. On a development server the adapter is a stand-in that delivers nothing, and
@@ -684,9 +685,7 @@ slice:
    - A provider reads a Principal's addresses and notifications. `deploy-dev` proves the bootstrap
      operator's TOTP enrolment reaches the stand-in.
    - Not yet: adding and proving addresses at aal2 with the Identity Experience; notifications from
-     this service's own commands; a self-removed authenticator and a changed password, which the
-     kernel suite does not yet prove; and the Notification Platform client, which waits on that
-     platform. Until both sides are in production, this remains a production gate.
+     this service's own commands; and the Notification Platform client, which waits on that platform. Until both sides are in production, this remains a production gate.
 
 ## Waiting on the Keycloak proof-of-concept
 

@@ -34,6 +34,7 @@ type Notified struct {
 
 // The authenticator types a binding names, as the kernel records them.
 var authenticatorTypes = map[string]string{
+	"password":              "password",
 	"otp":                   "otp",
 	"webauthn":              "webauthn",
 	"webauthn-passwordless": "webauthn",
@@ -42,8 +43,10 @@ var authenticatorTypes = map[string]string{
 // Classify maps one kernel event to the notified event it is, as identity-kernel's
 // compat/notified_events_test.go proves the pinned release records it, or reports none.
 //
-//   - a binding is UPDATE_CREDENTIAL naming the credential type; the legacy UPDATE_TOTP beside it is
-//     not mapped, or one binding would be told twice;
+//   - a binding is UPDATE_CREDENTIAL naming the credential type, a changed password among them; the
+//     legacy UPDATE_TOTP and UPDATE_PASSWORD beside it are not mapped, or one binding would be told
+//     twice;
+//   - a removal by the person is REMOVE_CREDENTIAL naming the credential type;
 //   - recovery codes issued are UPDATE_CREDENTIAL naming recovery-authn-codes;
 //   - a recovery code used is a LOGIN naming recovery-authn-codes with no required action; the LOGIN
 //     ending enrolment names the same type and carries CONFIGURE_RECOVERY_AUTHN_CODES;
@@ -61,6 +64,9 @@ func Classify(e keycloak.KernelEvent) (Notified, bool) {
 				Details: map[string]string{"actor": ActorSelf}}, e.UserID != ""
 		case e.Type == "UPDATE_CREDENTIAL" && authenticatorTypes[credential] != "":
 			return Notified{Event: EventAuthenticatorBound, Subject: e.UserID,
+				Details: map[string]string{"authenticator": authenticatorTypes[credential], "actor": ActorSelf}}, e.UserID != ""
+		case e.Type == "REMOVE_CREDENTIAL" && authenticatorTypes[credential] != "" && credential != "password":
+			return Notified{Event: EventAuthenticatorRemoved, Subject: e.UserID,
 				Details: map[string]string{"authenticator": authenticatorTypes[credential], "actor": ActorSelf}}, e.UserID != ""
 		case e.Type == "LOGIN" && credential == "recovery-authn-codes" && e.Details["custom_required_action"] == "":
 			return Notified{Event: EventAccountRecovered, Subject: e.UserID,
