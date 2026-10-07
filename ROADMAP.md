@@ -568,7 +568,7 @@ Built in the order TDD-005 §Build Order states, one PR per slice:
     - Each carries an Idempotency-Key and no reason or version. It records and advances the subject's `security_version`, and shares one sequence with administrative commands.
     - Only an `active` Principal may command. `:remove` needs step-up and keeps the last first factor.
     - Each final state is evidenced with the actor equal to the subject.
-- **3b · Consents.** `GET /v1/me/consents` and `:withdraw` wait for identity-kernel's compat proof of the consent listing and revocation, and for a registered client that asks for consent.
+- **3b · Consents.** `GET /v1/me/consents` and `:withdraw` wait for a registered client that asks for consent, with a scope shown on the consent screen (TDD-005 2.9.2). identity-kernel's compat proof of the listing and withdrawal is answered (run 37607165522): the Admin API lists them, and a withdrawal ends the refresh tokens issued on it.
 - ✅ **Provider routes at two factors** (ADR-IAM-004; TDD-005 2.4.0 §Step-Up).
   - Every `providerOnly` route requires `acr` `aal2`, reads included, under NIST SP 800-53 IA-2(1). `/v1/me/authenticators/{ref}:remove` requires `aal2` and freshness.
   - A shortfall is answered with RFC 9470's challenge carrying `acr_values="aal2"`, plus `max_age` for a command.
