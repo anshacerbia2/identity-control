@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-005
   title: Account Security and Investigation API Mediation
   owner: Core Platform Team
-  version: 2.9.0
+  version: 2.9.1
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-14
-  last_reviewed: 2026-10-05
+  last_reviewed: 2026-10-07
   parent_sad: SAD-001
 ---
 
@@ -279,6 +279,8 @@ to reach it.
   cannot sign in, whether by a suspension or by a permanent lockout. Its last second factor is then
   revoked. This is the revocation step of assisted recovery (`ADR-IAM-005 §5.5`): suspend, revoke the
   lost factor, restore.
+  - The restore is told to the person as an account recovered, `assisted`, in the transaction that
+    records it applied (2.9.1; `TDD-identity-control-008` 1.3.0).
   - The check is the kernel's own state, read when the revocation runs, not this service's mapping.
     The mapping moves when a command is accepted, so it can show `suspended` before the kernel user
     is disabled.

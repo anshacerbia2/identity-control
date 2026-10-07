@@ -689,8 +689,11 @@ slice:
      proven by an 8-digit code, sent to it alone and sealed under the `securityref` key ring until
      the dispatcher hands it over. Proving and removing are each notified to the addresses held
      before, and the last active address stays.
-   - Not yet: the Identity Experience page for those routes; notifications from assisted recovery;
-     and the Notification Platform client, which waits on that platform. Until both sides are in production, this remains a production gate.
+   - Assisted recovery (1.3.0): a provider's applied restore requests `account_recovered`, method
+     `assisted`, to the Principal's active addresses, in the transaction that records the outcome.
+     The Identity Experience page for a person's own addresses is in `identity-experience`.
+   - Not yet: the Notification Platform client, which waits on that platform. Until it is in
+     production, this remains a production gate.
 
 ## Waiting on the Keycloak proof-of-concept
 

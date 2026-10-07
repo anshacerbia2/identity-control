@@ -486,6 +486,12 @@ func (s *Service) finish(ctx context.Context, c claimed, o outcome) error {
 			Route(c.opType, c.actor == c.subject), c.reason, o.state, c.correlation, c.emergency); err != nil {
 			return fmt.Errorf("securitystate: record the evidence: %w", err)
 		}
+		if o.state == StateApplied && s.applied != nil {
+			if err := s.applied(ctx, tx, Applied{OperationID: c.operationID, Type: c.opType, Subject: c.subject,
+				Actor: c.actor, Self: c.actor == c.subject}); err != nil {
+				return fmt.Errorf("securitystate: the applied hook: %w", err)
+			}
+		}
 		return nil
 	})
 	if err != nil {

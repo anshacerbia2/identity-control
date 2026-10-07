@@ -748,3 +748,46 @@ func TestEnrollingTakesTheAccountsLevel(t *testing.T) {
 		t.Errorf("%d enrollment records", n)
 	}
 }
+
+// The applied hook sees each applied command once, in the transaction that records it: a hook that
+// fails leaves the command unfinished rather than applied without what the hook writes
+// (TDD-identity-control-008 1.3.0).
+func TestTheAppliedHookSeesEachAppliedCommandOnce(t *testing.T) {
+	h := newHarness(t)
+	alice, _ := h.principal("human", "active")
+	ctx := context.Background()
+	var seen []Applied
+	h.service.OnApplied(func(_ context.Context, _ db.Tx, op Applied) error {
+		seen = append(seen, op)
+		return nil
+	})
+	suspended, err := h.service.Submit(ctx, h.command(TypeSuspend, alice, 1))
+	if err != nil || suspended.State != StateApplied {
+		t.Fatalf("suspend: %+v, %v", suspended, err)
+	}
+	restored, err := h.service.Submit(ctx, h.command(TypeRestore, alice, 2))
+	if err != nil || restored.State != StateApplied {
+		t.Fatalf("restore: %+v, %v", restored, err)
+	}
+	want := []Applied{
+		{OperationID: suspended.OperationID, Type: TypeSuspend, Subject: alice, Actor: h.actor},
+		{OperationID: restored.OperationID, Type: TypeRestore, Subject: alice, Actor: h.actor},
+	}
+	if len(seen) != len(want) || seen[0] != want[0] || seen[1] != want[1] {
+		t.Errorf("the hook saw %+v; want %+v", seen, want)
+	}
+
+	bob, _ := h.principal("human", "active")
+	if _, err := h.service.Submit(ctx, h.command(TypeSuspend, bob, 1)); err != nil {
+		t.Fatal(err)
+	}
+	h.service.OnApplied(func(context.Context, db.Tx, Applied) error { return errors.New("no request recorded") })
+	op, _ := h.service.Submit(ctx, h.command(TypeRestore, bob, 2))
+	if op.State == StateApplied || op.AppliedAt != nil {
+		t.Errorf("a restore whose hook failed reads %s; it must not be applied without what the hook writes", op.State)
+	}
+	if n := h.count(`SELECT count(*) FROM identity.privileged_access WHERE subject_principal_id = $1 AND action = $2`,
+		bob.String(), TypeRestore); n != 0 {
+		t.Errorf("%d restore evidence records committed beside a failed hook", n)
+	}
+}

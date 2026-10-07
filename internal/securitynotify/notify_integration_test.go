@@ -194,3 +194,51 @@ func TestTheDispatcherHandsOverOnceAndBacksOffOnRefusal(t *testing.T) {
 		t.Errorf("%d failed after the tenth refusal; want 1", n)
 	}
 }
+
+// An assisted recovery's restore requests account_recovered once, to the active addresses alone
+// (TDD-identity-control-008 1.3.0).
+func TestARestoreRequestsAnAssistedRecoveryOnce(t *testing.T) {
+	p := openPool(t)
+	realm := keycloak.Realm("notify-" + newID(t).String())
+	principal, _ := person(t, p, realm, "first@example.test", "second@example.test")
+	exec(t, p, `INSERT INTO identity.notification_address (address_id, principal_id, channel, address, origin, state)
+	    VALUES ($1, $2, 'email', 'unproven@example.test', 'added', 'pending')`, newID(t).String(), principal.String())
+	operation := newID(t)
+	r := NewRequester(nil)
+	for range 2 { // an attempt finished twice requests once
+		if err := p.InTx(context.Background(), func(ctx context.Context, tx db.Tx) error {
+			return r.FromRestore(ctx, tx, operation, principal)
+		}); err != nil {
+			t.Fatalf("FromRestore: %v", err)
+		}
+	}
+	if n := scalar[int](t, p, `SELECT count(*) FROM identity.security_notification WHERE principal_id = $1`, principal.String()); n != 1 {
+		t.Fatalf("%d requests for one restore; want 1", n)
+	}
+	type row struct {
+		event, method, actor, source, state string
+		recipients                          int
+	}
+	var got row
+	if err := p.InTx(context.Background(), func(ctx context.Context, tx db.Tx) error {
+		return tx.QueryRow(ctx, `SELECT event, details->>'method', details->>'actor', source_key, state, cardinality(recipients)
+		    FROM identity.security_notification WHERE principal_id = $1`, principal.String()).Scan(&got.event, &got.method,
+			&got.actor, &got.source, &got.state, &got.recipients)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	want := row{EventAccountRecovered, "assisted", ActorAdministrator, "command:operation:" + operation.String(), StateRequested, 2}
+	if got != want {
+		t.Errorf("the request reads %+v; want %+v, the pending address left out", got, want)
+	}
+
+	lonely, _ := person(t, p, realm)
+	if err := p.InTx(context.Background(), func(ctx context.Context, tx db.Tx) error {
+		return r.FromRestore(ctx, tx, newID(t), lonely)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if s := scalar[string](t, p, `SELECT state FROM identity.security_notification WHERE principal_id = $1`, lonely.String()); s != StateNoAddress {
+		t.Errorf("a restored Principal with no address: state %q, want no_address", s)
+	}
+}

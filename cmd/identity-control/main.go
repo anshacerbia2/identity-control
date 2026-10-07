@@ -306,7 +306,16 @@ func run() error {
 	}
 	// Each kernel event recorded for the first time that ADR-IAM-007 notifies requests its notification
 	// in the same transaction (TDD-identity-control-008).
-	kernelEvents.OnRecorded(securitynotify.NewRequester(logger).FromKernelEvent)
+	requester := securitynotify.NewRequester(logger)
+	kernelEvents.OnRecorded(requester.FromKernelEvent)
+	// A provider's restore, the last step of assisted recovery, requests account_recovered in the
+	// transaction that records it as applied (TDD-identity-control-008 1.3.0).
+	securityCommands.OnApplied(func(ctx context.Context, tx db.Tx, op securitystate.Applied) error {
+		if op.Type != securitystate.TypeRestore || op.Self {
+			return nil
+		}
+		return requester.FromRestore(ctx, tx, op.OperationID, op.Subject)
+	})
 
 	routesConfig := httpapi.RoutesConfig{
 		KernelEvents:  kernelEvents,

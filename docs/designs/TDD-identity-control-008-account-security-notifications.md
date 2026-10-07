@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-008
   title: Account Security Notifications
   owner: Core Platform Team
-  version: 1.2.0
+  version: 1.3.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-10-06
-  last_reviewed: 2026-10-06
+  last_reviewed: 2026-10-07
   parent_sad: SAD-001
 ---
 
@@ -23,7 +23,7 @@ hands it to the Notification Platform (`PAD-PLT-005`) to deliver. The kernel sen
 
 ## Scope
 
-**In scope (1.2.0)**
+**In scope (1.3.0)**
 
 - **Notification addresses.** The address a Principal was created with is its first. The record
   holds more.
@@ -37,13 +37,14 @@ hands it to the Notification Platform (`PAD-PLT-005`) to deliver. The kernel sen
 - **The provider's reads.** A Principal's addresses and its notifications.
 - **A person's own addresses (1.2.0).** Adding one at `aal2` and proving it with a one-time code,
   and removing one, each notified to the addresses held before (`ADR-IAM-007 §5.2`).
+- **Assisted recovery (1.3.0).** A provider's restore of a suspended Principal is notified as an
+  account recovered (`ADR-IAM-007 §5.1`).
 
 **Not yet**
 
 - **The Identity Experience page** that serves these routes. It follows in `identity-experience`.
 - **The Notification Platform client.** It waits on that platform. Until then no notification leaves
   a development server.
-- **Notifications from assisted recovery.** That command is built with its own slice.
 
 ## Technical Context
 
@@ -133,6 +134,7 @@ CREATE TABLE identity.security_notification (
 | `Dispatcher` | `internal/securitynotify` | Hands due requests to the adapter, retries with backoff, reports failures |
 | `StandIn` | `internal/securitynotify` | Development adapter: accepts each request and logs its event and recipient count |
 | The sweep hook | `internal/kernelevents` | Calls the requester for each event recorded for the first time, in the sweep's transaction |
+| The applied hook (1.3.0) | `internal/securitystate` | Calls the requester for each security command applied, in the transaction that records it |
 
 The sweep calls the hook only for an event it inserted, the same `RowsAffected` it already counts. A
 notification is therefore requested exactly when an event first enters the record. A sweep that fails
@@ -154,6 +156,30 @@ every 15 seconds:
 `SKIP LOCKED` lets two replicas dispatch without handing a request over twice. A request recorded
 with no addresses is `no_address`. It is logged at `ERROR` and is never dispatched: it is a person
 who cannot be told.
+
+### Assisted Recovery (1.3.0)
+
+Assisted recovery is three commands (`TDD-identity-control-005`): suspend, revoke the lost factor,
+restore. The revocation is told already, as the kernel's admin `ACTION` above. The restore is what
+gives the person their account back, so it is the recovery `ADR-IAM-007 §5.1` notifies, as NIST
+SP 800-63B-4 §4.2.3 requires.
+
+```text
+the executor records a restore's applied outcome:
+    in the same transaction, request account_recovered for the restored Principal
+        details   {"method": "assisted", "actor": "administrator"}
+        source    command:operation:{operation_id}
+        recipients the Principal's active addresses at that instant
+```
+
+- **Only an applied restore is told.** A refused, retrying or unresolved restore gave nothing back.
+  Suspension and ending sessions are not in `ADR-IAM-007 §5.1`, and request nothing.
+- **It commits with the outcome.** `securitystate` calls a hook (`OnApplied`) in the transaction
+  that finishes the attempt, so it does not depend on this package (`arch.json`). If the request
+  cannot be recorded, the finish fails as a whole. The attempt is then taken again when its lease
+  ends, so a restore is never recorded as applied without its notification.
+- **One request per operation.** The source key is the operation's, so an attempt finished twice
+  requests once.
 
 ### The Adapter
 
@@ -222,6 +248,10 @@ POST /v1/me/notification-addresses/{address_id}:remove  self, aal2 recent
 
 ## Testing Strategy
 
+- An applied restore requests `account_recovered`, method `assisted`, to the Principal's active
+  addresses, once. A suspension requests nothing, and a hook that fails leaves the restore
+  unfinished (1.3.0).
+
 - Each kernel mark in §Technical Context maps as the table says. The enrolment's `LOGIN`, the legacy
   `UPDATE_TOTP`, and every other event map to nothing.
 - A removal through the Admin API is attributed to the person in its path, not to the actor.
@@ -267,5 +297,6 @@ impossible to lose without losing the event as well.
 | Governed by | ADR-IAM-007, NIST SP 800-63B-4 §4.6 through it |
 | Conforms to | STD-IAM-001 §3.1 (2.6.0) |
 | Consumes | `TDD-identity-control-007`, the kernel event record |
+| Consumes | `TDD-identity-control-005`, the applied restore of assisted recovery (1.3.0) |
 | Proven by | identity-kernel `compat/notified_events_test.go`, the kernel marks |
 | Delivers through | PAD-PLT-005, the Notification Platform, once it exists |
