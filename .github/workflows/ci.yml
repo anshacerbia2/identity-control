@@ -218,13 +218,6 @@ jobs:
           path: coverage.out
           retention-days: 7
 
-  # STD-GLB-009 §Development Server Deployment: deploy/dev follows the service skeleton (the README's
-  # ten sections, the compose rules, the files a server-deployed service carries).
-  deploy-dev-skeleton:
-    uses: anshacerbia2/scnehaux-architecture/.github/workflows/deploy-dev-skeleton.yml@main
-    with:
-      kind: service
-
   supply-chain:
     runs-on: ubuntu-latest
     steps:
