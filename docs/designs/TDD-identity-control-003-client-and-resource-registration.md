@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-003
   title: Protocol Client and Protected-Resource Registration
   owner: Core Platform Team
-  version: 1.30.0
+  version: 1.31.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-11
-  last_reviewed: 2026-10-05
+  last_reviewed: 2026-10-07
   parent_sad: SAD-001
 ---
 
@@ -798,7 +798,7 @@ expiring": once a successor exists, it is the active key. A retiring key beside 
 with its overlap, on purpose, and warns nobody. A retiring key alone, after the active key was
 revoked mid-rotation, is the client's last accepted key, and its overlap end is what counts.
 
-**Two outputs, no new state.** The rule is evaluated where it is read:
+**Three outputs, no new state.** The rule is evaluated where it is read:
 
 - `GET /v1/registrations:expiring-keys` answers `{"warning_days": 14, "critical_days": 3,
   "registrations": [...]}`. Each entry names the registration, its `client_key` and profile, the
@@ -807,8 +807,17 @@ revoked mid-rotation, is the client's last accepted key, and its overlap end is 
   material, only the identifiers already in a registration's own key list.
 - The scheduled pass logs each entry before the sweep, at `WARN` for `warning` and `ERROR` for
   `critical` and `no_key`, naming the `client_key` and the `kid`, so a log alert fires without a
-  metrics pipeline. Exporting it as a metric arrives with this service's OpenTelemetry export, which
-  it does not have yet.
+  metrics pipeline.
+- The gauge `identity.client_key.expiring` (1.31.0) counts the same registrations by `severity`,
+  as STD-GLB-003 1.1.0 §State Metrics asks of a condition an operator is alerted on:
+  - It is an asynchronous gauge. Its callback evaluates the rule when the reader collects, so
+    every replica reports the database's count.
+  - The callback reads under a 5-second timeout. A read that fails observes nothing and is logged
+    at `ERROR`, so an alert on the gauge also fires when it is absent.
+  - `severity` is its only attribute, and each of `no_key`, `critical` and `warning` is observed,
+    zero included. Which client it is stays in the log and the API: a `client_key` is an
+    identifier, not an attribute.
+  - Alert on `critical` or `no_key` above zero, and on `warning` above zero for a day.
 
 The thresholds are constants, as §Operational Notes states them. A `workload`'s key is included: its
 owner rotates it like any other.
@@ -1516,6 +1525,8 @@ two creates nothing.
   active one, a key of a suspended or retired registration, and a `public` or `resource`
   registration are not reported; a retiring key alone is reported by its overlap end.
 - After a rotation, the registration is no longer reported, because its active key is new.
+- The gauge observes `no_key`, `critical` and `warning` with the counts the report holds, zero
+  included, and observes nothing when the read fails (1.31.0).
 - A client built again by recovery or by an operator holds exactly its active and retiring keys.
 - The registration credential cannot create, modify, or disable a user, and the Principal path's
   credential cannot create or modify a client. Both are asserted against a live kernel.
@@ -1748,6 +1759,7 @@ compromised client key, expired client key recovery, and registration drift repa
 | Enterprise constraint | EAD-002 §8 — registration continues on cached or manually recorded metadata |
 | Related design | `TDD-identity-control-001` — the same pending-state recovery pattern |
 | Consumed by | `TDD-identity-control-004` — a workload's client registration is created here |
+| Conforms to | STD-GLB-003 §State Metrics (1.1.0) — the key expiry gauge (1.31.0) |
 
 ### Open Questions
 

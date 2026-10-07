@@ -60,6 +60,9 @@ func newInstruments(meter metric.Meter, tx Transactor) (instruments, error) {
 	if _, err = meter.Int64ObservableGauge("identity.security_operation.unresolved",
 		metric.WithDescription("Operations parked as unresolved; any is critical"),
 		metric.WithInt64Callback(func(ctx context.Context, o metric.Int64Observer) error {
+			// Bounded, as STD-GLB-003 1.1.0 §State Metrics asks; a failed read observes nothing.
+			ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel()
 			var count int64
 			err := tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
 				return tx.QueryRow(ctx, `SELECT count(*) FROM identity.security_operation WHERE state = 'unresolved'`).Scan(&count)

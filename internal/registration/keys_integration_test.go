@@ -473,3 +473,20 @@ func TestAnExpiringActiveKeyIsReportedUntilItIsRotated(t *testing.T) {
 		t.Errorf("a suspended client is reported %q", severity)
 	}
 }
+
+// The key expiry gauge counts what the warning reports, by severity, with every severity observed and
+// zero included (TDD-identity-control-003 1.31.0, STD-GLB-003 1.1.0 §State Metrics).
+func TestTheExpiryGaugeCountsEachSeverity(t *testing.T) {
+	h := newHarness(t)
+	if values, reported := expiringGauge(t, h.service); !reported || len(values) != 3 ||
+		values[SeverityNoKey] != 0 || values[SeverityCritical] != 0 || values[SeverityWarning] != 0 {
+		t.Errorf("with nothing expiring the gauge reads %v (reported %t); want all three severities at 0", values, reported)
+	}
+	h.registerConfidential("gauge-warned", testKey(t))
+	start := time.Now().UTC()
+	h.service.now = func() time.Time { return start.Add(DefaultKeyLifetime - 10*24*time.Hour) }
+	values, _ := expiringGauge(t, h.service)
+	if values[SeverityWarning] != 1 || values[SeverityCritical] != 0 || values[SeverityNoKey] != 0 {
+		t.Errorf("ten days before expiry the gauge reads %v; want warning 1, critical 0, no_key 0", values)
+	}
+}
