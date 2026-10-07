@@ -230,6 +230,11 @@ func run() error {
 	var meter metric.Meter
 	if exported != nil {
 		meter = exported.MeterProvider.Meter("github.com/anshacerbia2/identity-control/internal/securitystate")
+		// The key expiry gauge (TDD-identity-control-003 1.31.0), under its own package's scope.
+		if err := registrar.Instrument(exported.MeterProvider.Meter(
+			"github.com/anshacerbia2/identity-control/internal/registration")); err != nil {
+			return fmt.Errorf("key expiry gauge: %w", err)
+		}
 	}
 
 	// A provider's reads of another Principal (TDD-identity-control-005). The kernel's security
