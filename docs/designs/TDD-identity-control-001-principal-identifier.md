@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-001
   title: Canonical Principal Identifier and Creation Path
   owner: Core Platform Team
-  version: 1.12.0
+  version: 1.13.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-10
-  last_reviewed: 2026-09-30
+  last_reviewed: 2026-10-07
   parent_sad: SAD-001
 ---
 
@@ -85,7 +85,7 @@ Three constraints shape the component design:
 | `PrincipalProvisioner` | `internal/identity/provisioning` | Mints the identifier, performs the create call, owns idempotency |
 | `KeycloakAdminClient` | `internal/identity/keycloak` | Typed wrapper over the supported Admin REST API |
 | `PrincipalMappingRepository` | `internal/identity/provisioning` | Persists and enforces uniqueness of the mapping |
-| `PrincipalReconciler` | `internal/identity/reconcile` | Periodic sweep for unmapped, duplicate, and orphaned Principals |
+| `PrincipalReconciler` | `internal/identity/provisioning` (`sweep.go`) | Periodic sweep for unmapped, orphan, duplicate and dangling Principals (1.13.0) |
 | Realm protocol mapper | Keycloak configuration | Projects the user attribute into the `principal_id` token claim |
 
 ### Creation Path
@@ -319,20 +319,36 @@ CREATE TABLE identity.principal_relink (
 );
 
 CREATE TABLE identity.principal_finding (
-    finding_id       UUID        PRIMARY KEY,
-    principal_id     UUID        NOT NULL REFERENCES identity.principal_mapping(principal_id),
-    finding_class    TEXT        NOT NULL CHECK (finding_class IN ('dangling')),
-    keycloak_user_id TEXT        NOT NULL,
-    detected_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    resolved_at      TIMESTAMPTZ,
-    resolution       TEXT,
+    finding_id           UUID        PRIMARY KEY,
+    principal_id         UUID        REFERENCES identity.principal_mapping(principal_id),
+    finding_class        TEXT        NOT NULL
+        CHECK (finding_class IN ('dangling', 'unmapped', 'orphan', 'duplicate')),
+    keycloak_user_id     TEXT        NOT NULL,
+    claimed_principal_id TEXT,                    -- orphan: the identifier the user carries
+    username             TEXT,                    -- the kernel user's username, for triage
+    user_disabled        BOOLEAN     NOT NULL DEFAULT false,
+    detected_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    resolved_at          TIMESTAMPTZ,
+    resolution           TEXT,
     CHECK ((resolved_at IS NULL) = (resolution IS NULL)
-        AND (resolution IS NULL OR resolution IN ('relinked', 'user_present')))
+        AND (resolution IS NULL OR resolution IN ('relinked', 'user_present', 'user_absent'))),
+    CONSTRAINT principal_finding_subject_check CHECK (
+        (finding_class IN ('dangling', 'duplicate') AND principal_id IS NOT NULL AND claimed_principal_id IS NULL)
+     OR (finding_class = 'unmapped' AND principal_id IS NULL AND claimed_principal_id IS NULL)
+     OR (finding_class = 'orphan' AND principal_id IS NULL AND claimed_principal_id IS NOT NULL))
 );
 
-CREATE UNIQUE INDEX principal_finding_open ON identity.principal_finding (principal_id)
-    WHERE resolved_at IS NULL;
+CREATE UNIQUE INDEX principal_finding_open_user
+    ON identity.principal_finding (finding_class, keycloak_user_id) WHERE resolved_at IS NULL;
 ```
+
+**1.13.0 widens the finding to the sweep's other three branches.** An `unmapped` or `orphan`
+finding names a kernel user no mapping accounts for, so it has no `principal_id`; an orphan
+records the identifier the user carries, which no mapping holds and which may not even parse.
+`username` is recorded so whoever triages the finding can find the user: `keycloak_user_id` never
+leaves this module. `user_disabled` says whether the sweep disabled the user, which it does only
+under `IDENTITY_UNMAPPED_USERS=disable` (§Reconciliation Sweep). One open finding per class and
+kernel user replaces one per Principal, because a duplicate is one finding per extra user.
 
 `principal_relink` is insert-only for the runtime role: a Principal's move to a new
 Keycloak user is exactly the change whose record must not be rewritable by the process
@@ -462,6 +478,15 @@ GET    /v1/principals:dangling
 POST   /v1/principals:reconcile
 ```
 
+`GET /v1/principals:unmapped` (1.13.0) lists the open `unmapped`, `orphan` and `duplicate`
+findings, oldest first: `{"unmapped": [{"finding_id", "finding_class", "principal_id",
+"claimed_principal_id", "username", "user_disabled", "detected_at"}]}`, the identifiers present only
+for the classes that have them. `GET /v1/principals:dangling` keeps its shape and lists `dangling`
+findings only. `POST /v1/principals:reconcile` answers what the sweep it ran found:
+`{"recovered", "dangling", "unmapped", "orphan", "duplicate"}`. All three are a provider's.
+`:quarantine` and `:retire` for a human are not built: quarantine is the reconciler's hold, which
+no administrator sets (§Data Model).
+
 `:relink` requires `X-Administrative-Reason`. It refuses a mapping that is not
 `active`, and it refuses with `409` while the mapped Keycloak user still exists:
 relinking a live user would only find that same user again, and it would hide
@@ -547,27 +572,32 @@ A repeated request carrying the same `Idempotency-Key` returns the original
 The reconciler runs on a schedule and enumerates Keycloak users per realm:
 
 ```text
-For each Keycloak user:
+enumerate the realm's users, page by page          -- a failure part way records nothing
+read the mappings, and the principal_id every pending workload holds, after the enumeration
+
+For each user the enumeration returned:
     attribute := scnehaux_principal_id
 
     if attribute is absent:
-        disable the user
-        record an unmapped-principal finding
-        emit identity.principal.unmapped_detected
+        if the user is a client's service-account user: skip     -- (1.13.0) its client's, below
+        record an unmapped finding, raise an alert
+        disable the user when IDENTITY_UNMAPPED_USERS is disable
 
-    else if no mapping row exists for attribute:
-        disable the user
-        record an orphan finding
-        emit identity.principal.orphan_detected
+    else if no mapping row and no pending workload holds attribute:
+        record an orphan finding, raise an alert
+        disable the user when IDENTITY_UNMAPPED_USERS is disable
+
+    else if the mapping is pending: skip                          -- (1.13.0) recovery's, below
 
     else if the mapping row points at a different keycloak_user_id:
+        read the mapping's own user; if the kernel no longer holds it: skip   -- (1.13.0) below
         disable both users
-        transition the mapping to quarantined
-        emit identity.principal.duplicate_detected
+        transition the mapping to quarantined when it is active or suspended
+        record a duplicate finding, raise an alert
 
-For each active mapping whose keycloak_user_id no Keycloak user holds:
-    record a dangling-mapping finding
-    raise an alert
+For each active mapping whose keycloak_user_id the enumeration did not return:
+    read the user; if the kernel holds it, it is present         -- (1.13.0) below
+    otherwise record a dangling-mapping finding, raise an alert
 ```
 
 A dangling mapping is reported, never relinked by the sweep. A Keycloak user can be
@@ -582,11 +612,51 @@ already read. An enumeration that fails part way records nothing, because an unr
 is not a missing user. When a later sweep finds the user present again, the open finding
 is resolved as `user_present`.
 
-**Built so far.** Pending recovery and the dangling-mapping sweep run on the registration
-reconcile schedule (TDD-identity-control-003), and on `POST /v1/principals:reconcile`.
-Before that schedule existed, nothing ran pending recovery: a creation interrupted after
-its checkpoint stayed pending until someone noticed. The unmapped, orphan and duplicate
-branches above are not built.
+**Built.** Pending recovery and every branch above run on the registration reconcile schedule
+(TDD-identity-control-003), and on `POST /v1/principals:reconcile`. Before that schedule existed,
+nothing ran pending recovery: a creation interrupted after its checkpoint stayed pending until
+someone noticed. The unmapped, orphan and duplicate branches were built in 1.13.0, which settles
+what the pseudocode above left open:
+
+- **A service-account user is its client's, not a stray Principal.** Keycloak creates a user for
+  every client with service accounts enabled, and marks it with the client it belongs to
+  (`serviceAccountClientLink` in the Admin API's user representation, `ADR-IAM-001` [R23]). A
+  workload's carries its `principal_id` and is checked like any user. One without the attribute is
+  this service's own Admin API client's, or a registered confidential client's, or an unmanaged
+  client's, and the registration sweep already accounts for every client
+  (`TDD-identity-control-003` §Drift Reconciliation). Disabling it here would cut this service off
+  from the kernel the first time it ran, so it is never an unmapped finding.
+- **The enumeration may not return a service-account user,** so an active mapping whose user it did
+  not return is read directly before it is reported dangling. A workload's user is a
+  service-account user, and reporting every workload dangling would be the sweep's whole output.
+- **An identifier a pending workload holds is not an orphan.** A workload's identity is written on
+  its service-account user before its mapping, because the mapping is written only once that user
+  exists (`TDD-identity-control-004` §Creation). Between the two, the user carries an identifier no
+  mapping holds yet, and workload recovery is what finishes it.
+- **A pending mapping is recovery's.** A user carrying a pending mapping's identifier is the one
+  recovery adopts, and recovery's own many-match branch already quarantines a duplicate.
+- **A duplicate needs two users that exist.** A mapping whose own user is gone, while another user
+  carries its identifier, is a dangling mapping or a rebind in flight: `:relink`'s recovery, or a
+  workload's client rebuilt with a new service-account user (`TDD-identity-control-004` 1.5.0).
+  Quarantining it would turn an operator's repair into an incident. Both users of a real duplicate
+  are disabled whatever `IDENTITY_UNMAPPED_USERS` says: either one's token asserts the same
+  `principal_id`. A quarantined or retired mapping keeps its state; only the users are disabled.
+- **Disabling is a setting, for the rollout.** `IDENTITY_UNMAPPED_USERS` is `report` or `disable`,
+  as `IDENTITY_UNMANAGED_CLIENTS` is for clients and for the same reason: an estate whose users
+  predate this service would lose all of them to the first sweep, and the first sweep runs at
+  startup. It is the observe-first rollout Crossplane's `Observe` management policy gives an import
+  (`ADR-IAM-001` [R5]). Unlike clients, the default follows `IDENTITY_ENVIRONMENT`: `disable` in
+  production, `report` elsewhere, so the control a production estate depends on is not one it has
+  to remember to switch on.
+- **A finding resolves only by what the sweep sees.** A dangling finding resolves as `user_present`
+  when its user is read again, or as `relinked` by `:relink`. An unmapped, orphan or duplicate
+  finding resolves as `user_absent` once a complete enumeration no longer returns its user: deleting
+  a user that came from outside the authorized path is the triage decision, and a user disabled and
+  left in place is still evidence.
+- **No event is emitted yet.** `identity.principal.*_detected` belongs to the canonical
+  `identity.*` events, which follow when Audit & Evidence consumes them
+  (`TDD-identity-control-007` §Scope). Until then the finding is the record and an `ERROR` log line
+  is the alert §Operational Notes classes as critical.
 
 Disabling rather than deleting is deliberate: a false positive caused by a
 reconciler defect is recoverable, while deletion of a Principal is not.
@@ -651,6 +721,10 @@ outcome is pre-decided so a partial result requires no unplanned amendment:
 | `IDENTITY_PENDING_RECOVERY_AFTER` | `60s` | Age at which a pending mapping enters recovery |
 | `IDENTITY_RECONCILE_INTERVAL` | `15m` | Sweep cadence |
 | `IDENTITY_RECONCILE_PAGE_SIZE` | `200` | Admin API pagination size |
+| `IDENTITY_UNMAPPED_USERS` | `disable` in production, `report` elsewhere | Whether the sweep disables an unmapped or orphan user, or only records it (1.13.0) |
+
+The Principal sweep runs on `IDENTITY_REGISTRATION_RECONCILE_INTERVAL` with the registration sweep;
+`IDENTITY_RECONCILE_INTERVAL` is not read.
 
 The administration client credential is a private key (`ADR-IAM-001 §5.12`). It is sourced from
 the approved secret manager as a file, and is never present in application configuration or
@@ -689,9 +763,14 @@ Executed against a Keycloak instance pinned to the release under evaluation:
   second one.
 - Admin API timeout followed by retry produces exactly one Keycloak user.
 - A user created directly through the Admin Console is disabled by the next sweep and
-  produces an `unmapped` finding.
+  produces an `unmapped` finding; under `report` it produces the finding and stays enabled.
+- A user carrying an identifier no mapping holds produces an `orphan` finding naming it.
 - Two Keycloak users carrying the same attribute value are both disabled and the
   mapping is quarantined.
+- A client's service-account user is never an `unmapped` finding, a workload is never reported
+  dangling, a pending workload's identifier is never an orphan, and a mapping whose own user is gone
+  is never quarantined as a duplicate.
+- An enumeration that fails part way changes nothing.
 
 ### Portability
 
