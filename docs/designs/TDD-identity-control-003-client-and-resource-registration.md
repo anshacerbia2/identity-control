@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-003
   title: Protocol Client and Protected-Resource Registration
   owner: Core Platform Team
-  version: 1.31.0
+  version: 1.32.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -153,7 +153,8 @@ CREATE TABLE identity.client_registration (
         CHECK (audience_class IN ('internal', 'privileged', 'workload', 'external')),
     CONSTRAINT client_privileged_form_check
         CHECK ((audience_class = 'privileged') = (privileged_form IS NOT NULL)
-           AND (privileged_form IS NULL OR privileged_form IN ('provider-scope', 'tenant-scoped'))),
+           AND (privileged_form IS NULL
+                OR privileged_form IN ('provider-scope', 'tenant-scoped', 'per-sign-in'))),
     CONSTRAINT client_signing_algorithm_check
         CHECK (signing_algorithm IN ('PS256', 'RS256')),
     CONSTRAINT client_algorithm_profile_check
@@ -197,6 +198,7 @@ client scope, by `identity-kernel`'s names (`realm/client-scopes.json`):
 | `internal` | `scnehaux-internal` |
 | `privileged`, `privileged_form` `provider-scope` | `scnehaux-provider` |
 | `privileged`, `privileged_form` `tenant-scoped` (1.29.0) | `scnehaux-privileged` |
+| `privileged`, `privileged_form` `per-sign-in` (1.32.0) | none as a default; `scnehaux-provider` and `scnehaux-privileged` are both optional |
 | `external` | `scnehaux-external` |
 | `workload` | `scnehaux-workload` |
 
@@ -209,22 +211,39 @@ tokens take, because each form is a different claim surface:
   Organization Control (`ADR-ORG-003 §5.3`). It takes `scnehaux-privileged`, which identity-kernel
   declares from 1.14.0 of its TDD-001, and the `organization` scope as optional, so a sign-in asks
   for its Tenant with `organization:<tenant_id>`.
+- **`per-sign-in`** (1.32.0, `ADR-IAM-008 §5.1`, STD-IAM-002 1.7.0 §3.1.1) is one client that
+  obtains either form, one per sign-in. It holds no form scope as a default: `scnehaux-provider`,
+  `scnehaux-privileged` and `organization` are optional scopes, beside `scnehaux-profile` (§Profiles).
+  A token therefore carries a form only when the authorization request names one, and a request that
+  names neither gets a token without `principal_id`, which every resource refuses (STD-IAM-002
+  §3.5). Each sign-in names exactly one form, and the client checks on its callback that it got the
+  form it asked for (`ADR-IAM-008 §5.2`, §5.3). The kernel does not enforce one form per request; a
+  resource refuses a token carrying both a Tenant and a provider authority (STD-IAM-002 §3.5 step 9).
 
-A client holds exactly one audience profile scope (STD-IAM-002 §3.2.1), so the form is fixed for the
-registration's life, like its class. A console that is both a provider's and a Tenant
-administrator's is two registrations.
+A client holds at most one audience profile scope as a default (STD-IAM-002 §3.2.1), so the form is
+fixed for the registration's life, like its class. A console that is both a provider's and a Tenant
+administrator's, such as Organization Experience, registers `per-sign-in` (1.32.0); before, it was
+two registrations.
+
+**Only a `confidential` client may name `per-sign-in` (1.32.0).** It is a backend that holds its
+tokens server-side (`SAD-012 §4.4`, `TDD-identity-experience-001`), and its requests are code that its
+own callback checks. A `public`, `workload` or `resource` registration naming it is refused.
 
 A `privileged` resource, such as `organization-control-api`, takes a form as well, because the
 column is set exactly when the class is `privileged`; the form selects only the scope it holds, and a
-resource is issued no token. The resource accepts whichever form its callers' tokens take, and decides
-what each may do from its own records.
+resource is issued no token. It names `provider-scope` or `tenant-scoped`. The resource accepts
+whichever form its callers' tokens take, and decides what each may do from its own records.
 
 The column is set exactly when the class is `privileged`. A request that names no form for a
 `privileged` registration is `provider-scope`, which is what every `privileged` registration was
 before 1.29.0, and the migration records that for them. A form named for any other class is refused.
 
 A registration whose class and form have no declared scope is refused, never created without its
-claim surface. `signing_algorithm` is desired state, not an observation copied
+claim surface. A `per-sign-in` registration is refused unless the realm declares both
+`scnehaux-provider` and `scnehaux-privileged` (1.32.0): convergence skips an undeclared scope, so the
+client would otherwise be created able to obtain only one of the forms. Where a single declared scope
+is resolved for it, at creation, recovery, recreation and adoption, `scnehaux-provider` stands in;
+convergence then attaches its sets by name, and attaches neither form scope as a default. `signing_algorithm` is desired state, not an observation copied
 from Keycloak. PS256 is the baseline. RS256 is representable only for an external
 compatibility exception with a named owner, reason, and expiry; the database rejects
 every other combination. This is the persistence boundary for STD-IAM-002 section
@@ -577,15 +596,17 @@ of scopes** (STD-IAM-002 §3.2, §3.2.1):
 | :-- | :-- | :-- |
 | `access.token.header.type.rfc9068` attribute | `true`, so its access tokens carry `typ` `at+jwt` | `true` |
 | `client_id` mapper | a hardcoded claim naming its `client_key`, in access tokens | the same |
-| Default client scopes | exactly `basic`, `acr`, and its managed audience scope | exactly `basic`, `service_account`, and its managed audience scope |
-| Optional client scopes | `scnehaux-profile` for a confidential client; `organization` for an `internal` client (1.28.0) and a `tenant-scoped` `privileged` one (1.29.0) | `organization` (1.28.0) |
+| Default client scopes | exactly `basic`, `acr`, and its managed audience scope; a `per-sign-in` `privileged` client, exactly `basic` and `acr` (1.32.0) | exactly `basic`, `service_account`, and its managed audience scope |
+| Optional client scopes | `scnehaux-profile` for a confidential client; `organization` for an `internal` client (1.28.0), a `tenant-scoped` `privileged` one (1.29.0) and a `per-sign-in` one (1.32.0); `scnehaux-provider` and `scnehaux-privileged` for a `per-sign-in` one (1.32.0) | `organization` (1.28.0) |
 
 **`organization` (1.28.0).** It is the kernel's scope through which a client asks for one Tenant with
 `organization:<tenant_id>`. It is the only path by which `tenant_id` reaches a token (`ADR-IAM-006
 §5.2`, §5.3).
 - **Who holds it.** A client of an audience class that may carry `tenant_id` (STD-IAM-002 §3.2) holds
-  it as an optional scope: `internal`; `privileged` in the `tenant-scoped` form (1.29.0); and
-  `workload`, which is tenant-scoped once its service-account user is a member.
+  it as an optional scope: `internal`; `privileged` in the `tenant-scoped` form (1.29.0); `privileged`
+  in the `per-sign-in` form (1.32.0), which asks for it only with `scnehaux-privileged`
+  (`ADR-IAM-008 §5.2`); and `workload`, which is tenant-scoped once its service-account user is a
+  member.
 - **Who never does.** `privileged` in the `provider-scope` form carries no Tenant, and `external`
   carries no enterprise claim. Neither ever holds it.
 - **Existing clients.** A client registered before 1.28.0 lacks it. The reconciler reads that as a
@@ -599,8 +620,8 @@ access token, and `acr` puts `acr=1` into a client credentials token. A workload
 `service_account`: the kernel attaches it again on every update of a client with service accounts
 (identity-control#30 found a detachment undone by the next key rotation), and `identity-kernel`
 declares it with its `client_id` mapper alone, so it writes no network address. A scope outside the set is detached; a missing one is attached. A scope
-the realm does not declare is skipped, except the managed audience scope, whose absence refuses the
-registration. The sets are applied wherever the managed scope is attached: creation, pending
+the realm does not declare is skipped, except the managed audience scope, or either form scope of a
+`per-sign-in` client (1.32.0), whose absence refuses the registration. The sets are applied wherever the managed scope is attached: creation, pending
 recovery, recreation, and adoption.
 
 A `workload` registration is made by the workload path (`TDD-identity-control-004`), which reserves
@@ -622,8 +643,9 @@ register(request):
     reject if the profile is unknown
     reject if the audience class is unknown
     reject a privileged_form named for a class other than 'privileged'
-    reject a privileged_form other than 'provider-scope' or 'tenant-scoped'
+    reject a privileged_form other than 'provider-scope', 'tenant-scoped' or 'per-sign-in'
     (a 'privileged' request naming no form is 'provider-scope')
+    reject privileged_form = 'per-sign-in' unless profile = 'confidential' (1.32.0)
     reject if profile = 'workload' and audience class != 'workload'
     reject if algorithm != 'PS256' and no valid external RS256 exception exists
     reject if the requested algorithm is absent from the audience-class allowlist
@@ -641,6 +663,7 @@ register(request):
     reject a client_key already active in this realm
     reject a client_key a Keycloak client already holds
     reject an audience class and form whose managed scope the realm does not declare
+    reject 'per-sign-in' unless the realm declares both scnehaux-provider and scnehaux-privileged
 ```
 
 **Built so far.** All four profiles. A `workload` registers the `workload` audience class, whose
@@ -723,7 +746,9 @@ it was adopted, the registration. The first declared key is recorded `active` an
   the wrong `audience_class` or `privileged_form`, not that the client drifted, so it is not
   converged: converging it would rewrite every token the client is issued. A client holding none,
   or another one, is refused, and the refusal names `audience_profile`. The other scopes still
-  converge under `audience_scope` when named. ADR-IAM-001 [R40] and [R41] give the sources:
+  converge under `audience_scope` when named. A `per-sign-in` client holds no audience profile scope
+  as a default (1.32.0), so one holding either form's scope as a default is refused the same way:
+  every token it is issued would carry that form whatever the sign-in asked for. ADR-IAM-001 [R40] and [R41] give the sources:
   Kubernetes Server-Side Apply refuses a change to a field another manager owns unless forced, and
   Terraform's import answers an unexpected change by fixing the configuration. The case that found
   it: `deploy/dev/README.md` declared the BFF `internal`, and converging `audience_scope` would
@@ -1484,6 +1509,10 @@ two creates nothing.
   naming `tenant-scoped` holds `scnehaux-privileged`, with `organization` optional (1.29.0). A form
   named for another class, or an unknown form, is refused by the API and by the database constraint,
   and a `privileged` row without a form is refused by the constraint.
+- A confidential `per-sign-in` registration holds `basic` and `acr` as its defaults, and
+  `scnehaux-provider`, `scnehaux-privileged`, `organization` and `scnehaux-profile` as optional
+  scopes. A `public` one is refused, and so is one whose realm does not declare
+  `scnehaux-privileged`, before any client is created (1.32.0).
 - A registered client holds exactly its default and optional scope sets of §Profiles after
   creation, recovery, and recreation alike: a built-in `profile`, `email`, `roles` or `web-origins`
   scope is detached, a workload holds `service_account` and not `acr`, and only a confidential
@@ -1560,6 +1589,8 @@ two creates nothing.
 - A client whose default or optional scopes differ from the sets, or that lacks the at+jwt attribute
   or its `client_id` mapper, is found differing in `audience_scope` or `token_format`; attributed,
   it is repaired to the sets; unattributed, an operator's reconcile applies them.
+- A `per-sign-in` client given `scnehaux-provider` as a default in the console is repaired to its
+  sets, the form scope optional again (1.32.0).
 
 ### Adoption
 
@@ -1568,7 +1599,8 @@ two creates nothing.
 - A client whose redirect URIs or keys differ from the declaration is refused, and so is one that
   authenticates with a secret or a JWKS URL, and the refusal carries the plan.
 - A client whose audience profile scope is not the declaration's, or that holds none, is refused
-  even with `audience_scope` named in `converge` (1.30.0).
+  even with `audience_scope` named in `converge` (1.30.0). A `per-sign-in` client holding its sets
+  is adoptable as it is, and one holding `scnehaux-provider` as a default is refused (1.32.0).
 - A repairable difference is refused unless named, and converged when named.
 - A client that does not exist, a client_key already registered, a profile other than
   `confidential`, and a declared key already registered are refused.
@@ -1760,6 +1792,8 @@ compromised client key, expired client key recovery, and registration drift repa
 | Related design | `TDD-identity-control-001` — the same pending-state recovery pattern |
 | Consumed by | `TDD-identity-control-004` — a workload's client registration is created here |
 | Conforms to | STD-GLB-003 §State Metrics (1.1.0) — the key expiry gauge (1.31.0) |
+| Governed by | ADR-IAM-008 §5.1 — the `per-sign-in` privileged form, confidential only, with no form scope as a default (1.32.0) |
+| Conforms to | STD-IAM-002 1.7.0 §3.1.1 — a `privileged` registration names `provider-scope`, `tenant-scoped` or `per-sign-in` (1.32.0) |
 
 ### Open Questions
 

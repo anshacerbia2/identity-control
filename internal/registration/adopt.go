@@ -168,13 +168,7 @@ func (s *Service) Adopt(ctx context.Context, req AdoptRequest) (AdoptResult, err
 		}
 	}
 
-	scopeName := ManagedScope(req.AudienceClass, req.PrivilegedForm)
-	scopeID, err := call(ctx, s.cfg.CallTimeout, func(ctx context.Context) (string, error) {
-		return s.kernel.ClientScopeID(ctx, s.cfg.Realm, scopeName)
-	})
-	if errors.Is(err, keycloak.ErrNotFound) {
-		return AdoptResult{}, fmt.Errorf("%w: %s", ErrScopeUndeclared, scopeName)
-	}
+	scopeID, err := s.managedScopeID(ctx, req.AudienceClass, req.PrivilegedForm)
 	if err != nil {
 		return AdoptResult{}, err
 	}
@@ -204,7 +198,7 @@ func (s *Service) Adopt(ctx context.Context, req AdoptRequest) (AdoptResult, err
 		return AdoptResult{}, err
 	}
 
-	plan := planAdoption(req, client, scopes, scopeName, lifespan, declaredKeys)
+	plan := planAdoption(req, client, scopes, lifespan, declaredKeys)
 	if req.DryRun {
 		return AdoptResult{Plan: plan}, nil
 	}
@@ -324,8 +318,7 @@ func (s *Service) checkAdoptable(ctx context.Context, req Request, keys []Public
 }
 
 // planAdoption compares the client with the declaration, per field class.
-func planAdoption(req AdoptRequest, client keycloak.Client, scopes ScopeSets, scopeName string, lifespan int,
-	keys []keycloak.JWK) Plan {
+func planAdoption(req AdoptRequest, client keycloak.Client, scopes ScopeSets, lifespan int, keys []keycloak.JWK) Plan {
 	desiredScopes, _ := DesiredScopes(req.Profile, req.AudienceClass, req.PrivilegedForm)
 	sortedSets := func(sets ScopeSets) ScopeSets {
 		return ScopeSets{Default: sortedStrings(sets.Default), Optional: sortedStrings(sets.Optional)}
@@ -339,7 +332,9 @@ func planAdoption(req AdoptRequest, client keycloak.Client, scopes ScopeSets, sc
 		return out
 	}
 	desiredURIs, observedURIs := sortedStrings(req.RedirectURIs), sortedStrings(client.RedirectURIs)
-	desiredProfile, observedProfile := []string{scopeName}, heldProfiles(scopes)
+	// The profile scopes among the desired defaults: the managed scope, or none for per-sign-in, which
+	// holds both forms' scopes as optional ones.
+	desiredProfile, observedProfile := heldProfiles(desiredScopes), heldProfiles(scopes)
 	plan := Plan{ClientKey: req.ClientKey, profile: req.Profile, audienceClass: req.AudienceClass,
 		privilegedForm: req.PrivilegedForm, Differences: []Difference{
 			{FieldClass: ClassTokenLifespan, Policy: PolicyRepair, Desired: lifespan, Observed: client.AccessTokenLifespan,

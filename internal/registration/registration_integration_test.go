@@ -242,27 +242,28 @@ func TestTheValidationRulesRefuse(t *testing.T) {
 		change func(*Request)
 		want   error
 	}{
-		"a wildcard redirect":           {func(r *Request) { r.RedirectURIs = []string{"https://*.example.com/cb"} }, ErrInvalid},
-		"plain http off loopback":       {func(r *Request) { r.RedirectURIs = []string{"http://app.example.com/cb"} }, ErrInvalid},
-		"a fragment":                    {func(r *Request) { r.RedirectURIs = []string{"https://app.example.com/cb#x"} }, ErrInvalid},
-		"a traversal":                   {func(r *Request) { r.RedirectURIs = []string{"https://app.example.com/a/../cb"} }, ErrInvalid},
-		"credentials in the URI":        {func(r *Request) { r.RedirectURIs = []string{"https://u:p@app.example.com/cb"} }, ErrInvalid},
-		"a relative redirect":           {func(r *Request) { r.RedirectURIs = []string{"/callback"} }, ErrInvalid},
-		"no redirect":                   {func(r *Request) { r.RedirectURIs = nil }, ErrInvalid},
-		"no Application reference":      {func(r *Request) { r.ApplicationRef = " " }, ErrInvalid},
-		"a confidential client, no key": {func(r *Request) { r.Profile = ProfileConfidential }, ErrInvalid},
-		"a public client with a key":    {func(r *Request) { r.PublicKey = testKey(h.t).public }, ErrInvalid},
-		"a workload in another class":   {func(r *Request) { r.Profile, r.RedirectURIs, r.PublicKey = ProfileWorkload, nil, testKey(h.t).public }, ErrInvalid},
-		"an unknown profile":            {func(r *Request) { r.Profile = "native" }, ErrInvalid},
-		"a declared client lifetime":    {func(r *Request) { r.LifetimeClass = "L2" }, ErrInvalid},
-		"an unknown audience class":     {func(r *Request) { r.AudienceClass = "everyone" }, ErrInvalid},
-		"a form for another class":      {func(r *Request) { r.PrivilegedForm = FormTenantScoped }, ErrInvalid},
-		"an unknown privileged form":    {func(r *Request) { r.AudienceClass, r.PrivilegedForm = "privileged", "everyone" }, ErrInvalid},
-		"an undeclared scope":           {func(r *Request) { r.AudienceClass = "workload" }, ErrScopeUndeclared},
-		"a malformed client_key":        {func(r *Request) { r.ClientKey = "Web App" }, ErrInvalid},
-		"an unregistered audience":      {func(r *Request) { r.Audience = []string{"orders", "nobody"} }, ErrInvalid},
-		"no caller":                     {func(r *Request) { r.RegisteredBy = id.UUID{} }, ErrInvalid},
-		"no Idempotency-Key":            {func(r *Request) { r.IdempotencyKey = "" }, ErrInvalid},
+		"a wildcard redirect":            {func(r *Request) { r.RedirectURIs = []string{"https://*.example.com/cb"} }, ErrInvalid},
+		"plain http off loopback":        {func(r *Request) { r.RedirectURIs = []string{"http://app.example.com/cb"} }, ErrInvalid},
+		"a fragment":                     {func(r *Request) { r.RedirectURIs = []string{"https://app.example.com/cb#x"} }, ErrInvalid},
+		"a traversal":                    {func(r *Request) { r.RedirectURIs = []string{"https://app.example.com/a/../cb"} }, ErrInvalid},
+		"credentials in the URI":         {func(r *Request) { r.RedirectURIs = []string{"https://u:p@app.example.com/cb"} }, ErrInvalid},
+		"a relative redirect":            {func(r *Request) { r.RedirectURIs = []string{"/callback"} }, ErrInvalid},
+		"no redirect":                    {func(r *Request) { r.RedirectURIs = nil }, ErrInvalid},
+		"no Application reference":       {func(r *Request) { r.ApplicationRef = " " }, ErrInvalid},
+		"a confidential client, no key":  {func(r *Request) { r.Profile = ProfileConfidential }, ErrInvalid},
+		"a public client with a key":     {func(r *Request) { r.PublicKey = testKey(h.t).public }, ErrInvalid},
+		"a workload in another class":    {func(r *Request) { r.Profile, r.RedirectURIs, r.PublicKey = ProfileWorkload, nil, testKey(h.t).public }, ErrInvalid},
+		"an unknown profile":             {func(r *Request) { r.Profile = "native" }, ErrInvalid},
+		"a declared client lifetime":     {func(r *Request) { r.LifetimeClass = "L2" }, ErrInvalid},
+		"an unknown audience class":      {func(r *Request) { r.AudienceClass = "everyone" }, ErrInvalid},
+		"a form for another class":       {func(r *Request) { r.PrivilegedForm = FormTenantScoped }, ErrInvalid},
+		"an unknown privileged form":     {func(r *Request) { r.AudienceClass, r.PrivilegedForm = "privileged", "everyone" }, ErrInvalid},
+		"per-sign-in on a public client": {func(r *Request) { r.AudienceClass, r.PrivilegedForm = "privileged", FormPerSignIn }, ErrInvalid},
+		"an undeclared scope":            {func(r *Request) { r.AudienceClass = "workload" }, ErrScopeUndeclared},
+		"a malformed client_key":         {func(r *Request) { r.ClientKey = "Web App" }, ErrInvalid},
+		"an unregistered audience":       {func(r *Request) { r.Audience = []string{"orders", "nobody"} }, ErrInvalid},
+		"no caller":                      {func(r *Request) { r.RegisteredBy = id.UUID{} }, ErrInvalid},
+		"no Idempotency-Key":             {func(r *Request) { r.IdempotencyKey = "" }, ErrInvalid},
 	} {
 		req := h.request("checked", ProfilePublic)
 		c.change(&req)
@@ -428,15 +429,20 @@ func sameIDs(got []string, want ...string) bool {
 
 // A privileged registration names its form (TDD-identity-control-003 1.29.0). Naming none is the
 // provider-scope form, as every privileged registration was before; tenant-scoped takes
-// scnehaux-privileged and holds organization, so a sign-in asks for its Tenant.
+// scnehaux-privileged and holds organization, so a sign-in asks for its Tenant. per-sign-in (1.32.0,
+// ADR-IAM-008) holds neither form's scope as a default and both as optional ones, beside organization.
 func TestAPrivilegedRegistrationTakesItsFormsScope(t *testing.T) {
 	h := newHarness(t)
 	for _, c := range []struct {
-		key, form, wantForm, scope string
-		optional                   []string
+		key, form, wantForm string
+		defaults, optional  []string
 	}{
-		{"provider-console", "", FormProviderScope, "scope-provider", []string{"scope-sign-in"}},
-		{"tenant-console", FormTenantScoped, FormTenantScoped, "scope-privileged", []string{"scope-organization", "scope-sign-in"}},
+		{"provider-console", "", FormProviderScope, []string{"scope-acr", "scope-basic", "scope-provider"},
+			[]string{"scope-sign-in"}},
+		{"tenant-console", FormTenantScoped, FormTenantScoped, []string{"scope-acr", "scope-basic", "scope-privileged"},
+			[]string{"scope-organization", "scope-sign-in"}},
+		{"either-console", FormPerSignIn, FormPerSignIn, []string{"scope-acr", "scope-basic"},
+			[]string{"scope-organization", "scope-privileged", "scope-provider", "scope-sign-in"}},
 	} {
 		req := h.request(c.key, ProfileConfidential)
 		req.AudienceClass, req.PrivilegedForm = "privileged", c.form
@@ -454,10 +460,9 @@ func TestAPrivilegedRegistrationTakesItsFormsScope(t *testing.T) {
 		if !ok {
 			t.Fatalf("%s: no client was created", c.key)
 		}
-		if !sameIDs(scopes, "scope-acr", "scope-basic", c.scope) ||
-			!sameIDs(h.kernel.OptionalScopes(keycloak.ClientUUID(client)), c.optional...) {
-			t.Errorf("%s: default scopes %v, optional %v; want basic, acr and %s, and %v optional", c.key, scopes,
-				h.kernel.OptionalScopes(keycloak.ClientUUID(client)), c.scope, c.optional)
+		if !sameIDs(scopes, c.defaults...) || !sameIDs(h.kernel.OptionalScopes(keycloak.ClientUUID(client)), c.optional...) {
+			t.Errorf("%s: default scopes %v, optional %v; want %v, and %v optional", c.key, scopes,
+				h.kernel.OptionalScopes(keycloak.ClientUUID(client)), c.defaults, c.optional)
 		}
 		read, err := h.service.Get(context.Background(), registration.ID)
 		if err != nil || read.PrivilegedForm != c.wantForm {
@@ -479,5 +484,19 @@ func TestAPrivilegedRegistrationTakesItsFormsScope(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "client_privileged_form_check") {
 			t.Errorf("%s: %v, want client_privileged_form_check to refuse it", name, err)
 		}
+	}
+
+	// Convergence skips a scope the realm does not declare, so a per-sign-in registration is refused
+	// unless both forms' scopes are declared, not registered holding only one of them.
+	delete(h.kernel.Scopes, "scnehaux-privileged")
+	req := h.request("half-console", ProfileConfidential)
+	req.AudienceClass, req.PrivilegedForm = "privileged", FormPerSignIn
+	req.RedirectURIs = []string{"https://half-console.example.com/callback"}
+	req.PublicKey = testKey(t).public
+	if _, err := h.service.Register(context.Background(), req); !errors.Is(err, ErrScopeUndeclared) {
+		t.Errorf("a per-sign-in registration without scnehaux-privileged answered %v, want ErrScopeUndeclared", err)
+	}
+	if n := len(h.clientsNamed("half-console")); n != 0 {
+		t.Errorf("a refused per-sign-in registration created %d client(s)", n)
 	}
 }

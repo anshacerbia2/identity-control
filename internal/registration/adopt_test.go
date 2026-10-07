@@ -35,7 +35,7 @@ func differs(plan Plan, class string) bool {
 
 // A client that already runs as declared is adoptable with nothing to converge.
 func TestAMatchingClientIsAdoptable(t *testing.T) {
-	plan := planAdoption(adoptable(), runningBFF(), bffScopes(), "scnehaux-internal", 240,
+	plan := planAdoption(adoptable(), runningBFF(), bffScopes(), 240,
 		[]keycloak.JWK{bffKey})
 	if !plan.Adoptable || plan.Refusal != "" {
 		t.Errorf("plan = %+v", plan)
@@ -69,7 +69,7 @@ func TestThePlanRefusesWhatTheDeclarationDoesNotMatch(t *testing.T) {
 	} {
 		client := runningBFF()
 		c.change(&client)
-		plan := planAdoption(adoptable(c.converge...), client, bffScopes(), "scnehaux-internal", 240,
+		plan := planAdoption(adoptable(c.converge...), client, bffScopes(), 240,
 			[]keycloak.JWK{bffKey})
 		if plan.Adoptable != c.adoptable || !differs(plan, c.class) {
 			t.Errorf("%s: adoptable %v, %s differs %v; plan %+v", name, plan.Adoptable, c.class, differs(plan, c.class), plan)
@@ -85,7 +85,7 @@ func TestThePlanRefusesWhatTheDeclarationDoesNotMatch(t *testing.T) {
 		"holding email as optional":   {Default: []string{"acr", "basic", "scnehaux-internal"}, Optional: []string{"email", "scnehaux-profile"}},
 		"without its sign-in profile": {Default: []string{"acr", "basic", "scnehaux-internal"}, Optional: []string{}},
 	} {
-		plan := planAdoption(adoptable(), runningBFF(), scopes, "scnehaux-internal", 240, []keycloak.JWK{bffKey})
+		plan := planAdoption(adoptable(), runningBFF(), scopes, 240, []keycloak.JWK{bffKey})
 		if plan.Adoptable || !differs(plan, ClassAudienceScope) {
 			t.Errorf("a client %s was adoptable: %+v", name, plan)
 		}
@@ -101,7 +101,7 @@ func TestTheProfileScopeBlocksAWrongDeclaration(t *testing.T) {
 	provider := ScopeSets{Default: []string{"acr", "basic", "email", "scnehaux-provider"}, Optional: []string{}}
 
 	wrong := adoptable(ClassAudienceScope)
-	plan := planAdoption(wrong, runningBFF(), provider, "scnehaux-internal", 240, []keycloak.JWK{bffKey})
+	plan := planAdoption(wrong, runningBFF(), provider, 240, []keycloak.JWK{bffKey})
 	if plan.Adoptable || !differs(plan, ClassAudienceProfile) {
 		t.Fatalf("a provider client declared internal was adoptable: %+v", plan)
 	}
@@ -111,15 +111,35 @@ func TestTheProfileScopeBlocksAWrongDeclaration(t *testing.T) {
 
 	right := adoptable(ClassAudienceScope)
 	right.AudienceClass, right.PrivilegedForm = "privileged", FormProviderScope
-	plan = planAdoption(right, runningBFF(), provider, "scnehaux-provider", 240, []keycloak.JWK{bffKey})
+	plan = planAdoption(right, runningBFF(), provider, 240, []keycloak.JWK{bffKey})
 	if !plan.Adoptable || differs(plan, ClassAudienceProfile) || !differs(plan, ClassAudienceScope) {
 		t.Errorf("the same client declared as it runs: %+v; want adoptable with audience_scope converged", plan)
 	}
 
 	// No profile scope at all is a different claim surface too.
 	none := ScopeSets{Default: []string{"acr", "basic"}, Optional: []string{}}
-	plan = planAdoption(right, runningBFF(), none, "scnehaux-provider", 240, []keycloak.JWK{bffKey})
+	plan = planAdoption(right, runningBFF(), none, 240, []keycloak.JWK{bffKey})
 	if plan.Adoptable || !differs(plan, ClassAudienceProfile) {
 		t.Errorf("a client holding no profile scope was adoptable: %+v", plan)
+	}
+}
+
+// A per-sign-in client holds no profile scope as a default (ADR-IAM-008 §5.1): one holding both
+// forms' scopes as optional ones is adoptable, and one holding either as a default is refused, since
+// every token it is issued would then carry that form whatever the sign-in asked for.
+func TestAPerSignInClientHoldsNoDefaultProfile(t *testing.T) {
+	perSignIn := adoptable(ClassAudienceScope)
+	perSignIn.AudienceClass, perSignIn.PrivilegedForm = "privileged", FormPerSignIn
+	held := ScopeSets{Default: []string{"acr", "basic"},
+		Optional: []string{"organization", "scnehaux-privileged", "scnehaux-profile", "scnehaux-provider"}}
+	plan := planAdoption(perSignIn, runningBFF(), held, 240, []keycloak.JWK{bffKey})
+	if !plan.Adoptable || differs(plan, ClassAudienceProfile) || differs(plan, ClassAudienceScope) {
+		t.Errorf("a per-sign-in client holding its sets: %+v; want adoptable as it is", plan)
+	}
+
+	provider := ScopeSets{Default: []string{"acr", "basic", "scnehaux-provider"}, Optional: held.Optional}
+	plan = planAdoption(perSignIn, runningBFF(), provider, 240, []keycloak.JWK{bffKey})
+	if plan.Adoptable || !differs(plan, ClassAudienceProfile) {
+		t.Errorf("a per-sign-in client holding scnehaux-provider as a default was adoptable: %+v", plan)
 	}
 }

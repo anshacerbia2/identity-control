@@ -1134,3 +1134,43 @@ func TestTheTokenProfileIsHeldAndRepaired(t *testing.T) {
 		t.Error("the operator's reconcile did not restore the at+jwt attribute")
 	}
 }
+
+// A per-sign-in client (ADR-IAM-008 §5.1) is held to its sets: both forms' scopes optional and
+// neither a default. One attached as a default in the console is repaired back to optional, since it
+// would put that form into every token the client is issued.
+func TestAPerSignInClientHoldsNoDefaultForm(t *testing.T) {
+	h := newHarness(t)
+	caller := h.caller()
+	if err := h.pool.InTx(context.Background(), func(ctx context.Context, tx db.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE identity.client_registration
+		    SET audience_class = 'privileged', privileged_form = 'per-sign-in' WHERE registration_id = $1`,
+			caller.id.String())
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	desired, _ := clientregistration.DesiredScopes("confidential", "privileged", clientregistration.FormPerSignIn)
+	h.kernel.HoldScopes(caller.client, desired.Default, desired.Optional)
+	h.sweep()
+	if f := h.findings(caller.client); len(f) != 0 {
+		t.Fatalf("a per-sign-in client holding its sets has findings: %+v", f)
+	}
+
+	// The admin event a console change records is what lets the sweep repair it.
+	h.tick(time.Second)
+	h.kernel.ConsoleChange(admin, caller.client, func(*keycloak.Client) {})
+	h.kernel.AttachScope(caller.client, "scope-provider")
+	h.tick(time.Second)
+	h.sweep()
+	repaired := false
+	for _, f := range h.findings(caller.client) {
+		repaired = repaired || (f.field == string(AudienceScope) && f.class == string(Repaired) && f.convergedAt != nil)
+	}
+	if !repaired {
+		t.Errorf("findings = %+v, want audience_scope repaired and converged", h.findings(caller.client))
+	}
+	live, err := clientregistration.LiveScopes(context.Background(), h.kernel, realm, caller.client, time.Second)
+	if err != nil || !clientregistration.SameScopes(live, desired) {
+		t.Errorf("after the sweep the client holds %+v, %v; want %+v", live, err, desired)
+	}
+}

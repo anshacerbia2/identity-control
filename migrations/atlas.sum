@@ -1,4 +1,4 @@
-h1:G/IzJE198at9fiRMvwl1vmXlnnyq6vUKUe0qniEFtCQ=
+h1:IUrkS/nZmb/IIf56ppP9TELmqGJFC2Tl4ycA9z6JC0Q=
 20260817151332_baseline_identity_schema.sql h1:GysIRGAJncY8eQTmFIhc3g8FTeFq8dGu9wmdY4kefVQ=
 20260817201931_add_creation_payload.sql h1:ejgDHTQ30FK0/adjz26CYPnLsAJyodOxBHvTI/GOd8M=
 20260820185807_add_bootstrap_ceremony.sql h1:0tiQsqClxrSDiz1Jl+vd6VDStnO/nObLoeKIHBWsX3M=
@@ -29,3 +29,4 @@ h1:G/IzJE198at9fiRMvwl1vmXlnnyq6vUKUe0qniEFtCQ=
 20261006120000_add_provider_emergency_use.sql h1:ejnM3DliOD/FrpAuv0op2seHqKybyMiZhEHz8GmCbT4=
 20261006140000_add_security_notifications.sql h1:QEwYIfjDukO6rwkkHUgmz7JdU0DInLVEnKE8RQI5jEc=
 20261007100000_add_notification_address_proof.sql h1:zHb8sJYaQMUPsSTYaKgtL80qXDSPOAAI95SjKaGRDUc=
+20261007120000_allow_per_sign_in_form.sql h1:igtBOOztt9+VD4hoL3Tz2uh20bpCaGevfaTHUgkZLfU=
