@@ -214,15 +214,16 @@ table "principal_relink" {
 // user deleted on purpose must not come back by itself.
 table "principal_finding" {
   schema  = schema.identity
-  comment = "A dangling mapping: an active Principal whose Keycloak user is gone. TDD-identity-control-001."
+  comment = "What the Principal sweep found: a dangling mapping, or an unmapped, orphan or duplicate kernel user. TDD-identity-control-001 1.13.0."
 
   column "finding_id" {
     null = false
     type = uuid
   }
 
+  // Null for an unmapped or an orphan finding: no mapping accounts for the user.
   column "principal_id" {
-    null = false
+    null = true
     type = uuid
   }
 
@@ -234,7 +235,31 @@ table "principal_finding" {
   column "keycloak_user_id" {
     null    = false
     type    = text
-    comment = "The user the mapping pointed at when it was found missing."
+    comment = "The kernel user the finding is about: the mapping's missing user, or the user no mapping accounts for."
+  }
+
+  // The realm the kernel user is in. A finding without a Principal has no mapping to read it from.
+  column "realm" {
+    null = false
+    type = text
+  }
+
+  column "claimed_principal_id" {
+    null    = true
+    type    = text
+    comment = "An orphan's identifier: what the user carries, which no mapping holds and which may not parse."
+  }
+
+  column "username" {
+    null    = true
+    type    = text
+    comment = "The kernel user's username when found, so whoever triages it can find the user."
+  }
+
+  column "user_disabled" {
+    null    = false
+    type    = boolean
+    default = false
   }
 
   column "detected_at" {
@@ -264,19 +289,29 @@ table "principal_finding" {
     on_delete   = NO_ACTION
   }
 
-  // One open finding per Principal: a later sweep that still finds the user missing keeps it.
-  index "principal_finding_open" {
+  // One open finding per class and kernel user: a later sweep that still finds it keeps it. A
+  // duplicate is one finding per extra user, so the key is the user rather than the Principal.
+  index "principal_finding_open_user" {
     unique  = true
-    columns = [column.principal_id]
+    columns = [column.realm, column.finding_class, column.keycloak_user_id]
     where   = "resolved_at IS NULL"
   }
 
+  index "principal_finding_principal" {
+    columns = [column.principal_id]
+    where   = "principal_id IS NOT NULL"
+  }
+
   check "principal_finding_class_check" {
-    expr = "finding_class IN ('dangling')"
+    expr = "finding_class IN ('dangling', 'unmapped', 'orphan', 'duplicate')"
   }
 
   check "principal_finding_resolution_check" {
-    expr = "(resolved_at IS NULL) = (resolution IS NULL) AND (resolution IS NULL OR resolution IN ('relinked', 'user_present'))"
+    expr = "(resolved_at IS NULL) = (resolution IS NULL) AND (resolution IS NULL OR resolution IN ('relinked', 'user_present', 'user_absent'))"
+  }
+
+  check "principal_finding_subject_check" {
+    expr = "(finding_class IN ('dangling', 'duplicate') AND principal_id IS NOT NULL AND claimed_principal_id IS NULL) OR (finding_class = 'unmapped' AND principal_id IS NULL AND claimed_principal_id IS NULL) OR (finding_class = 'orphan' AND principal_id IS NULL AND claimed_principal_id IS NOT NULL)"
   }
 }
 

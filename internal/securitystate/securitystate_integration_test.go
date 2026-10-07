@@ -289,8 +289,9 @@ func TestARestoreWaitsForAnOpenFinding(t *testing.T) {
 	}
 	findingID, _ := id.NewV7()
 	if err := h.pool.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO identity.principal_finding (finding_id, principal_id, finding_class, keycloak_user_id)
-		    VALUES ($1, $2, 'dangling', $3)`, findingID.String(), alice.String(), string(user))
+		_, err := tx.Exec(ctx, `INSERT INTO identity.principal_finding (finding_id, principal_id, finding_class, keycloak_user_id, realm)
+		    SELECT $1, $2, 'dangling', $3, realm FROM identity.principal_mapping WHERE principal_id = $2`,
+			findingID.String(), alice.String(), string(user))
 		return err
 	}); err != nil {
 		t.Fatal(err)

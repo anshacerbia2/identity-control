@@ -84,6 +84,12 @@ type Config struct {
 	// for an estate whose bootstrap clients are not adopted yet (TDD-identity-control-003).
 	DisableUnmanagedClients bool
 
+	// DisableUnmappedUsers is IDENTITY_UNMAPPED_USERS=disable: a kernel user no mapping accounts for,
+	// unmapped or orphan, is disabled by the Principal sweep as well as recorded. The default follows
+	// IDENTITY_ENVIRONMENT, disable in production and report elsewhere, so the control a production
+	// estate depends on is not one it has to remember (TDD-identity-control-001 1.13.0).
+	DisableUnmappedUsers bool
+
 	// DeliveryPrincipal is IDENTITY_DELIVERY_PRINCIPAL_ID: Organization Control's workload
 	// principal_id, the one caller the delivery intake admits (TDD-identity-control-006). Unset, the
 	// intake answers 503 and no provider event is accepted.
@@ -277,6 +283,17 @@ func Load() (Config, error) {
 		cfg.DisableUnmanagedClients = true
 	default:
 		problems = append(problems, fmt.Errorf("IDENTITY_UNMANAGED_CLIENTS is %q; it is report or disable", mode))
+	}
+	unmappedDefault := "report"
+	if cfg.Production {
+		unmappedDefault = "disable"
+	}
+	switch mode := stringOr("IDENTITY_UNMAPPED_USERS", unmappedDefault); mode {
+	case "report":
+	case "disable":
+		cfg.DisableUnmappedUsers = true
+	default:
+		problems = append(problems, fmt.Errorf("IDENTITY_UNMAPPED_USERS is %q; it is report or disable", mode))
 	}
 
 	if raw := strings.TrimSpace(os.Getenv("IDENTITY_DELIVERY_PRINCIPAL_ID")); raw != "" {

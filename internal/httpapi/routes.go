@@ -146,6 +146,7 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	api.HandleFunc("POST /v1/principals", p(cfg.Principals.CreatePrincipal))
 	api.HandleFunc("POST /v1/principals/{target}", p(principalAction(cfg)))
 	api.HandleFunc("GET /v1/principals:dangling", p(cfg.Principals.Dangling))
+	api.HandleFunc("GET /v1/principals:unmapped", p(cfg.Principals.Unmapped))
 	if cfg.Investigation != nil {
 		api.HandleFunc("GET /v1/principals:search", p(cfg.Investigation.Search))
 		api.HandleFunc("GET /v1/principals/{principal_id}", p(cfg.Investigation.Principal))

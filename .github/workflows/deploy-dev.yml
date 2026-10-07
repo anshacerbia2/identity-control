@@ -99,6 +99,9 @@ jobs:
             echo "KEYS_OWNER=$(id -u):$(id -g)"
             # Short enough that Proof B sees the schedule run within the job.
             echo "IDENTITY_REGISTRATION_RECONCILE_INTERVAL=20s"
+            # Proof B scenario 6b proves the Principal sweep disables what it finds, against the live
+            # kernel, and that it never touches a service-account user (TDD-identity-control-001 1.13.0).
+            echo "IDENTITY_UNMAPPED_USERS=disable"
             # The development stand-in for the Notification Platform (TDD-identity-control-008).
             echo "IDENTITY_NOTIFICATION_DELIVERY=standin"
           } > .env

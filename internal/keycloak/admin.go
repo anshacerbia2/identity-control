@@ -345,6 +345,10 @@ type userRepresentation struct {
 	Email      string              `json:"email"`
 	Enabled    bool                `json:"enabled"`
 	Attributes map[string][]string `json:"attributes"`
+
+	// ServiceAccountClientLink names the client a service-account user belongs to, and is empty for
+	// every other user.
+	ServiceAccountClientLink string `json:"serviceAccountClientLink"`
 }
 
 func (r userRepresentation) toUser() User {
@@ -353,13 +357,16 @@ func (r userRepresentation) toUser() User {
 		Username: r.Username,
 		Email:    r.Email,
 		Enabled:  r.Enabled,
+
+		ServiceAccount: r.ServiceAccountClientLink != "",
 	}
 
 	// An unparseable or absent attribute leaves the identifier nil, which Mapped reports as
 	// unmapped. That is a reconciler finding rather than an error: a user carrying a
 	// malformed identifier reached the kernel through a path that should be closed, and
 	// failing the whole enumeration would stop the sweep that is meant to detect it.
-	if parsed, err := id.Parse(firstAttribute(r.Attributes, AttrPrincipalID)); err == nil {
+	user.ClaimedPrincipalID = strings.TrimSpace(firstAttribute(r.Attributes, AttrPrincipalID))
+	if parsed, err := id.Parse(user.ClaimedPrincipalID); err == nil {
 		user.PrincipalID = parsed
 	}
 	user.SubjectType = SubjectType(firstAttribute(r.Attributes, AttrSubjectType))

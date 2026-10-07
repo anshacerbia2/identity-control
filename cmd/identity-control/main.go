@@ -153,6 +153,7 @@ func run() error {
 		PendingRecoveryAfter: cfg.PendingRecoveryAfter,
 		RecoveryBatch:        cfg.ReconcilePageSize,
 		Realm:                keycloak.Realm(cfg.KeycloakRealm),
+		DisableUnmapped:      cfg.DisableUnmappedUsers,
 	}, logger)
 	if err != nil {
 		return fmt.Errorf("principal provisioner: %w", err)
@@ -557,11 +558,13 @@ func scheduleSweeps(ctx context.Context, provisioner *provisioning.Provisioner, 
 	defer ticker.Stop()
 	for {
 		// Principals first: a mapping whose creation was interrupted is recovered, which nothing ran
-		// before this schedule existed, and an active mapping whose Keycloak user is gone is reported.
-		if recovered, dangling, err := provisioner.Reconcile(ctx); err != nil {
+		// before this schedule existed, and every kernel user and active mapping is accounted for
+		// (TDD-identity-control-001 §Reconciliation Sweep).
+		if result, err := provisioner.Reconcile(ctx); err != nil {
 			logger.Error("principal sweep failed", slog.String("error", err.Error()))
-		} else if recovered > 0 || dangling > 0 {
-			logger.Warn("principal sweep", slog.Int("recovered", recovered), slog.Int("dangling", dangling))
+		} else if result != (provisioning.SweepResult{}) {
+			logger.Warn("principal sweep", slog.Int("recovered", result.Recovered), slog.Int("dangling", result.Dangling),
+				slog.Int("unmapped", result.Unmapped), slog.Int("orphan", result.Orphan), slog.Int("duplicate", result.Duplicate))
 		}
 		// Pending registrations first, so a client whose creation was interrupted is adopted before
 		// the sweep compares the registrations that are active.

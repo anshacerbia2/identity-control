@@ -75,20 +75,29 @@ func TestARelinkRefusesWhatItCannotDo(t *testing.T) {
 }
 
 func TestDanglingAndReconcileReportTheSweep(t *testing.T) {
-	stub := &stubProvisioner{dangling: []provisioning.DanglingFinding{{PrincipalID: mustUUID(t)}}}
+	stub := &stubProvisioner{dangling: []provisioning.DanglingFinding{{PrincipalID: mustUUID(t)}},
+		unmapped: []provisioning.UserFinding{{FindingID: mustUUID(t), Class: provisioning.FindingUnmapped, Username: "console.made"}}}
 	handler := principalRoutes(t, stub)
 
-	r, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, "/v1/principals:dangling", nil))
+	r, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, "/v1/principals:unmapped", nil))
+	if w := serve(handler, r); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"username":"console.made"`) ||
+		!strings.Contains(w.Body.String(), `"finding_class":"unmapped"`) {
+		t.Errorf("unmapped answered %d: %s", w.Code, w.Body)
+	}
+
+	r, _ = asPrincipal(t, httptest.NewRequest(http.MethodGet, "/v1/principals:dangling", nil))
 	if w := serve(handler, r); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), stub.dangling[0].PrincipalID.String()) {
 		t.Errorf("dangling answered %d: %s", w.Code, w.Body)
 	}
 	r, _ = asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/principals:reconcile", nil))
-	if w := serve(handler, r); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"dangling":1`) {
+	if w := serve(handler, r); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"dangling":1`) ||
+		!strings.Contains(w.Body.String(), `"unmapped":1`) {
 		t.Errorf("reconcile answered %d: %s", w.Code, w.Body)
 	}
 
 	failing := principalRoutes(t, &stubProvisioner{err: errors.New("kernel down")})
-	for path, want := range map[string]int{"/v1/principals:dangling": http.StatusInternalServerError} {
+	for path, want := range map[string]int{"/v1/principals:dangling": http.StatusInternalServerError,
+		"/v1/principals:unmapped": http.StatusInternalServerError} {
 		r, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, path, nil))
 		if w := serve(failing, r); w.Code != want {
 			t.Errorf("%s answered %d, want %d", path, w.Code, want)
@@ -100,6 +109,7 @@ func TestDanglingAndReconcileReportTheSweep(t *testing.T) {
 	}
 	for _, r := range []*http.Request{
 		httptest.NewRequest(http.MethodGet, "/v1/principals:dangling", nil),
+		httptest.NewRequest(http.MethodGet, "/v1/principals:unmapped", nil),
 		httptest.NewRequest(http.MethodPost, "/v1/principals:reconcile", nil),
 	} {
 		if w := serve(handler, r); w.Code != http.StatusUnauthorized {

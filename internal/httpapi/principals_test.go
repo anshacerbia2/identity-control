@@ -36,6 +36,7 @@ type stubProvisioner struct {
 	last     provisioning.CreateRequest
 	relinked *provisioning.RelinkRequest
 	dangling []provisioning.DanglingFinding
+	unmapped []provisioning.UserFinding
 }
 
 func (s *stubProvisioner) Create(_ context.Context, req provisioning.CreateRequest) (provisioning.Response, error) {
@@ -54,9 +55,13 @@ func (s *stubProvisioner) Dangling(context.Context) ([]provisioning.DanglingFind
 	return s.dangling, s.err
 }
 
-func (s *stubProvisioner) Reconcile(context.Context) (int, int, error) {
+func (s *stubProvisioner) Unmapped(context.Context) ([]provisioning.UserFinding, error) {
+	return s.unmapped, s.err
+}
+
+func (s *stubProvisioner) Reconcile(context.Context) (provisioning.SweepResult, error) {
 	s.calls++
-	return 0, len(s.dangling), s.err
+	return provisioning.SweepResult{Dangling: len(s.dangling), Unmapped: len(s.unmapped)}, s.err
 }
 
 func mustUUID(t *testing.T) id.UUID {

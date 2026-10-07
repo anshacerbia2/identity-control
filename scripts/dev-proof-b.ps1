@@ -16,6 +16,11 @@
 #      reconcile recreates it: deletion is how a compromised client is contained
 #   6. a Principal whose Keycloak user is deleted is reported, not recreated, and an operator's
 #      :relink provisions a new user carrying the same principal_id
+#  6b. users made in the console are accounted for (TDD-identity-control-001 1.13.0): one with no
+#      principal_id is unmapped, one carrying an identifier no mapping holds is an orphan, both
+#      disabled under IDENTITY_UNMAPPED_USERS=disable; a second user carrying a Principal's
+#      identifier disables both and quarantines the mapping; no service-account user is a finding;
+#      deleting the users resolves their findings
 #   7. a workload's keys rotate with an overlap and revoke at once, and a key added in the console
 #      blocks the client until an operator's reconcile puts back exactly the registered keys
 #   8. a client created in the console, which no registration describes, is recorded unmanaged and
@@ -295,6 +300,42 @@ Expect "a relink while the user exists is refused" (Api "POST" "/v1/principals/$
 Record "User deleted in the console" "reported, then relinked by an operator" "same principal_id, new user $($carriers[0].id)"
 
 Write-Host ""
+Write-Host "6b. users made in the console are accounted for"
+$run6 = [Guid]::NewGuid().ToString("N").Substring(0, 8)
+function Console-User($username, $principalId) {
+    $user = @{ username = $username; enabled = $true; firstName = "Proof"; lastName = "B"; email = "$username@scnehaux.local" }
+    if ($principalId) { $user.attributes = @{ scnehaux_principal_id = @($principalId) } }
+    $r = Kc "POST" "/users" ($user | ConvertTo-Json -Compress -Depth 4)
+    if ($r.code -ne 201) { throw "the console could not create $username`: $($r.code) $($r.text)" }
+    return @((Kc "GET" "/users?username=$username&exact=true" $null).json)[0].id
+}
+$r = Api "POST" "/v1/principals" "{`"username`":`"proofb.duplicated.$run6`",`"email`":`"duplicated.$run6@scnehaux.local`",`"subject_type`":`"human`"}" @{ "Idempotency-Key" = "proofb-duplicated-$run6" }
+Expect "a Principal to duplicate" $r.code 201
+$duplicated = $r.json.principal_id
+$duplicatedOwn = @(Users-Carrying $duplicated)[0].id
+$stray = Console-User "proofb-stray-$run6" $null
+$forged = Console-User "proofb-forged-$run6" ([Guid]::NewGuid().ToString())
+$copy = Console-User "proofb-copy-$run6" $duplicated
+$r = Api "POST" "/v1/principals:reconcile" $null $null
+Expect "the sweep ran" $r.code 200
+$open = @((Api "GET" "/v1/principals:unmapped" $null $null).json.unmapped)
+function Finding-For($username) { return @($open | Where-Object { (Get-Prop $_ "username") -eq $username }) }
+Expect "the console user is unmapped" (Finding-For "proofb-stray-$run6")[0].finding_class "unmapped"
+Expect "the forged identifier is an orphan" (Finding-For "proofb-forged-$run6")[0].finding_class "orphan"
+Expect "the second carrier is a duplicate" (Finding-For "proofb-copy-$run6")[0].finding_class "duplicate"
+Expect "naming the Principal" (Get-Prop (Finding-For "proofb-copy-$run6")[0] "principal_id") $duplicated
+Expect "no service-account user is a finding" @($open | Where-Object { "$(Get-Prop $_ 'username')" -like "service-account-*" }).Count 0
+Expect "the unmapped user is disabled" (Kc "GET" "/users/$stray" $null).json.enabled $false
+Expect "the orphan is disabled" (Kc "GET" "/users/$forged" $null).json.enabled $false
+Expect "the duplicate is disabled" (Kc "GET" "/users/$copy" $null).json.enabled $false
+Expect "and so is the Principal's own user" (Kc "GET" "/users/$duplicatedOwn" $null).json.enabled $false
+foreach ($user in @($stray, $forged, $copy)) { [void](Kc "DELETE" "/users/$user" $null) }
+[void](Api "POST" "/v1/principals:reconcile" $null $null)
+$left = @((Api "GET" "/v1/principals:unmapped" $null $null).json.unmapped | Where-Object { "$(Get-Prop $_ 'username')" -like "proofb-*-$run6" })
+Expect "deleting the users resolves their findings" $left.Count 0
+Record "Users made in the console" "unmapped, orphan and duplicate recorded and disabled" "resolved once the users were deleted"
+
+Write-Host ""
 Write-Host "7. client keys: rotation, revocation, and a key added in the console"
 if ($PSVersionTable.PSEdition -ne 'Core') {
     Write-Host "  skip  PowerShell 7 is needed to make PKCS#8 keys for the run"
@@ -343,6 +384,7 @@ if ($PSVersionTable.PSEdition -ne 'Core') {
         $r = Api "POST" "/v1/workloads" $body @{ "Idempotency-Key" = "proofb-workload-$run" }
         Expect "workload created with key A" $r.code 201
         $keyRegistration = $r.json.registration_id
+        $jobPrincipal = $r.json.principal_id
         $jobUuid = (Kc "GET" "/clients?clientId=$job&search=false" $null).json[0].id
         Expect "key A authenticates" (Token-Status $job $a) 200
 
@@ -377,6 +419,12 @@ if ($PSVersionTable.PSEdition -ne 'Core') {
         Expect "key B authenticates again" (Token-Status $job $b) 200
         Expect "the console key is refused" ((Token-Status $job $c) -ne 200) $true
         Record "Workload keys: rotate, revoke, console key" "overlap held, revocation at once, console key blocked" "blocked $keyBlocked s after the change"
+
+        # A workload's user is its client's service account, which the user listing may not return:
+        # the Principal sweep reads it directly rather than report it dangling (TDD-identity-control-001 1.13.0).
+        Expect "the Principal sweep ran" (Api "POST" "/v1/principals:reconcile" $null $null).code 200
+        Expect "the workload is not reported dangling" @((Api "GET" "/v1/principals:dangling" $null $null).json.dangling | Where-Object { $_.principal_id -eq $jobPrincipal }).Count 0
+        Expect "and still authenticates after the sweep" (Token-Status $job $b) 200
     } finally {
         foreach ($file in $keyFiles) { Remove-Item -Force -ErrorAction SilentlyContinue $file }
     }

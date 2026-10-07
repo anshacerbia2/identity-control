@@ -124,6 +124,10 @@ services:
       # either in .env and recreate the service. compose passes a container only what is listed here,
       # so a setting missing from this list is a setting .env cannot reach.
       IDENTITY_UNMANAGED_CLIENTS: ${IDENTITY_UNMANAGED_CLIENTS:-report}
+      # Whether the Principal sweep disables a kernel user no mapping accounts for, or only records it
+      # (TDD-identity-control-001 1.13.0). Report on a development server, whose realm may hold users
+      # made before this service; GET /v1/principals:unmapped lists them.
+      IDENTITY_UNMAPPED_USERS: ${IDENTITY_UNMAPPED_USERS:-report}
       # Account security notifications (TDD-identity-control-008): standin on a development server
       # accepts them and delivers none, until the Notification Platform exists. Empty records and
       # waits.

@@ -56,7 +56,7 @@ VALUES ($1, $2, $3, $4, $5)`
 
 const resolveFindingStatement = `UPDATE identity.principal_finding
 SET resolved_at = now(), resolution = $2
-WHERE principal_id = $1 AND resolved_at IS NULL`
+WHERE principal_id = $1 AND finding_class = 'dangling' AND resolved_at IS NULL`
 
 // Relink returns an active mapping whose Keycloak user no longer exists to pending, records who did
 // it and why, and runs recovery for it at once.
@@ -150,106 +150,14 @@ type DanglingFinding struct {
 	DetectedAt  time.Time `json:"detected_at"`
 }
 
-// activeBeforeStatement is every active mapping in the realm activated before the enumeration
-// began. One activated during it may point at a user the enumeration's pages had already passed.
-const activeBeforeStatement = `SELECT principal_id::text, keycloak_user_id FROM identity.principal_mapping
-WHERE realm = $1 AND state = 'active' AND activated_at < $2`
-
-const insertDanglingStatement = `INSERT INTO identity.principal_finding
-    (finding_id, principal_id, finding_class, keycloak_user_id)
-VALUES ($1, $2, 'dangling', $3)
-ON CONFLICT (principal_id) WHERE resolved_at IS NULL DO NOTHING`
-
-// danglingPages bounds one enumeration. A realm larger than this is read over several sweeps
-// by nothing yet, so the sweep refuses it rather than report users past the bound as missing.
-const danglingPages = 1000
-
-// FindDangling enumerates the realm's users and records a finding for every active mapping whose
-// user is not among them. It never relinks: a user deleted on purpose, by an administrator removing
-// someone's access, must not come back within one interval with nobody having decided it. A mapping
-// whose user is present again has its open finding resolved. An enumeration that fails part way
-// records nothing, because an unread page is not a missing user.
-func (p *Provisioner) FindDangling(ctx context.Context) (int, error) {
-	if p.cfg.Realm == "" {
-		return 0, errors.New("provisioning: a realm is required to find dangling mappings")
-	}
-	started := time.Now().UTC()
-	present := map[keycloak.UserID]bool{}
-	for page := 0; ; page++ {
-		if page == danglingPages {
-			return 0, errors.New("provisioning: the realm holds more users than one enumeration reads")
-		}
-		callCtx, cancel := context.WithTimeout(ctx, p.cfg.ProvisionTimeout)
-		users, err := p.kernel.ListUsers(callCtx, p.cfg.Realm, keycloak.Page{First: page * p.cfg.RecoveryBatch, Max: p.cfg.RecoveryBatch})
-		cancel()
-		if err != nil {
-			return 0, fmt.Errorf("provisioning: enumerate users: %w", err)
-		}
-		for _, user := range users {
-			present[user.ID] = true
-		}
-		if len(users) < p.cfg.RecoveryBatch {
-			break
-		}
-	}
-
-	found := 0
-	err := p.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
-		rows, err := tx.Query(ctx, activeBeforeStatement, string(p.cfg.Realm), started)
-		if err != nil {
-			return fmt.Errorf("provisioning: read active mappings: %w", err)
-		}
-		type active struct {
-			principal string
-			user      string
-		}
-		var mappings []active
-		for rows.Next() {
-			var m active
-			if err := rows.Scan(&m.principal, &m.user); err != nil {
-				rows.Close()
-				return err
-			}
-			mappings = append(mappings, m)
-		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
-			return err
-		}
-		for _, m := range mappings {
-			if present[keycloak.UserID(m.user)] {
-				if _, err := tx.Exec(ctx, resolveFindingStatement, m.principal, "user_present"); err != nil {
-					return err
-				}
-				continue
-			}
-			findingID, err := p.newID()
-			if err != nil {
-				return err
-			}
-			tag, err := tx.Exec(ctx, insertDanglingStatement, findingID.String(), m.principal, m.user)
-			if err != nil {
-				return fmt.Errorf("provisioning: record a dangling mapping: %w", err)
-			}
-			found++
-			if tag.RowsAffected() == 1 {
-				p.logger.ErrorContext(ctx, "an active Principal's Keycloak user is gone; relinking it is an operator's decision",
-					slog.String("principal_id", m.principal))
-			}
-		}
-		return nil
-	})
-	return found, err
-}
-
 const openDanglingStatement = `SELECT principal_id::text, detected_at FROM identity.principal_finding
-WHERE resolved_at IS NULL ORDER BY detected_at`
+WHERE realm = $1 AND finding_class = 'dangling' AND resolved_at IS NULL ORDER BY detected_at`
 
 // Dangling lists the open dangling-mapping findings.
 func (p *Provisioner) Dangling(ctx context.Context) ([]DanglingFinding, error) {
 	out := []DanglingFinding{}
 	err := p.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
-		rows, err := tx.Query(ctx, openDanglingStatement)
+		rows, err := tx.Query(ctx, openDanglingStatement, string(p.cfg.Realm))
 		if err != nil {
 			return fmt.Errorf("provisioning: read dangling mappings: %w", err)
 		}
@@ -270,13 +178,4 @@ func (p *Provisioner) Dangling(ctx context.Context) ([]DanglingFinding, error) {
 		return rows.Err()
 	})
 	return out, err
-}
-
-// Reconcile runs pending recovery and the dangling-mapping sweep, as the schedule does.
-func (p *Provisioner) Reconcile(ctx context.Context) (recovered, dangling int, err error) {
-	if recovered, err = p.RecoverPending(ctx); err != nil {
-		return 0, 0, err
-	}
-	dangling, err = p.FindDangling(ctx)
-	return recovered, dangling, err
 }

@@ -491,6 +491,29 @@ func TestListUsersPagesThroughQueryParameters(t *testing.T) {
 	}
 }
 
+// A listed user says whether it is a client's service account, and keeps the identifier it carries
+// even when it does not parse: the sweep tells an orphan from an unmapped user by it.
+func TestListedUsersCarryTheirServiceAccountLinkAndRawIdentifier(t *testing.T) {
+	k := &kernel{adminBody: `[
+	  {"id":"u1","username":"service-account-identity-control","enabled":true,"serviceAccountClientLink":"c1"},
+	  {"id":"u2","username":"forged","enabled":true,"attributes":{"scnehaux_principal_id":["not-a-uuid"]}},
+	  {"id":"u3","username":"person","enabled":false}]`}
+	admin, _ := newAdmin(t, k)
+	users, err := admin.ListUsers(context.Background(), testRealm, keycloak.Page{First: 0, Max: 10})
+	if err != nil || len(users) != 3 {
+		t.Fatalf("ListUsers = %+v, %v", users, err)
+	}
+	if !users[0].ServiceAccount || users[1].ServiceAccount || users[2].ServiceAccount {
+		t.Errorf("service accounts = %v %v %v", users[0].ServiceAccount, users[1].ServiceAccount, users[2].ServiceAccount)
+	}
+	if users[1].ClaimedPrincipalID != "not-a-uuid" || users[1].Mapped() {
+		t.Errorf("forged user = %+v", users[1])
+	}
+	if users[2].ClaimedPrincipalID != "" || users[2].Enabled {
+		t.Errorf("person = %+v", users[2])
+	}
+}
+
 func TestDisableUserSetsEnabledFalse(t *testing.T) {
 	k := &kernel{adminStatus: http.StatusNoContent}
 	admin, _ := newAdmin(t, k)
