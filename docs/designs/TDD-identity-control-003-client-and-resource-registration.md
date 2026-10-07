@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-003
   title: Protocol Client and Protected-Resource Registration
   owner: Core Platform Team
-  version: 1.32.0
+  version: 1.33.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -297,7 +297,8 @@ CREATE TABLE identity.registration_finding (
     resolution_reason TEXT,
     CONSTRAINT registration_finding_field_check
         CHECK (field_class IS NULL OR field_class IN
-            ('redirect_uris', 'token_lifespan', 'audience_scope', 'signing_algorithm', 'profile', 'client_keys')),
+            ('redirect_uris', 'token_lifespan', 'audience_scope', 'signing_algorithm', 'profile', 'client_keys',
+             'suspension', 'token_format', 'audience')),
     CONSTRAINT registration_finding_class_check
         CHECK (finding_class IN
             ('repaired', 'blocked', 'sanctioned', 'unattributed', 'missing', 'recreated', 'unmanaged')),
@@ -910,6 +911,7 @@ Each field class has one policy, and the first two are what the drift proof exer
 | `redirect_uris` | `redirectUris` | block |
 | `audience_scope` | default and optional client scopes, as the closed sets of §Profiles | repair |
 | `token_format` | `access.token.header.type.rfc9068`, the `client_id` mapper | repair |
+| `audience` (1.33.0) | the client's `oidc-audience-mapper` protocol mappers | repair |
 | `signing_algorithm` | `access.token.signed.response.alg` | repair |
 | `profile` | `publicClient`, `serviceAccountsEnabled`, `standardFlowEnabled` | repair |
 | `client_keys` | `clientAuthenticatorType`, `use.jwks.string`, `jwks.string` | block |
@@ -988,6 +990,33 @@ closed sets, the second as the attribute and the mapper's value. A client regist
 were compared, and an adopted one, is found differing at the first sweep; with no admin event to
 attribute the difference to, the finding is `unattributed` and an operator applies the registered
 state once. `signing_algorithm` and `profile` are designed above and not compared yet.
+
+**`audience` is compared from 1.33.0**, for every active client but a resource, which is issued no
+token. The desired value is the registration's `audience`: one audience mapper per resource, written
+as the registration path writes it, `audience-<client_key>` including that resource in access tokens
+and introspection and not in ID tokens (§Registration Changes). The live value is every
+`oidc-audience-mapper` on the client, and the two are compared as lists, so a second mapper for a
+declared resource, a mapper under another name or one writing a custom audience is a difference.
+
+- **Repaired, under the attribution rule.** A mapper added in the console sends the client's tokens
+  to a resource whose owners never agreed to it, which a repair removes; a mapper deleted in the
+  console may be an operator taking a resource out of reach in an emergency, which a repair would
+  undo. So it is repaired only when an admin event names who changed it, as `audience_scope` is, and
+  is `unattributed` otherwise. The repair is the change apply's own write: the mapper set made exactly
+  the declared one, a hand-made mapper removed.
+- **No drift exception covers it.** An audience changes through a registration change, which in
+  production a second provider approves (§Registration Changes, `ADR-IAM-003` [R1], NIST AC-5). A
+  24-hour exception for a console edit would be a path around that approval. A drift exception's
+  field classes are unchanged, as for `client_keys` and `token_format`.
+- **A divergence is confirmed before it is acted on.** An audience change writes the kernel's
+  mappers inside the transaction that holds the registration's row lock, before it commits the new
+  audience, as a key rotation does. A sweep that read the registration before that commit and the
+  client after the kernel write would see a difference nobody made, so an `audience` divergence is
+  read again: the registration's audience under a share lock on its row, then the client. Only a
+  divergence that survives is recorded.
+- **An adopted client is compared like any other.** Adoption does not plan audience mappers
+  (§Adoption), so a client adopted with an audience its mappers do not match differs at the first
+  sweep, with no admin event to attribute it to, and an operator applies the registered state once.
 
 - **An absent client is held, not recreated.** It is recorded as one open `missing`
   finding naming whoever the deletion's admin event names, and every sweep leaves it
@@ -1292,8 +1321,9 @@ apply(audience change), under the registration's row lock:
 - **The mapper set is closed.** An audience mapper the registration does not declare is a path for
   a token to reach a resource nobody recorded, so the apply removes it. That is how a caller's
   hand-made audience mapper (`deploy/dev/create-kernel-clients.sh`) is replaced.
-- **Not compared by the sweep yet.** The drift sweep does not read audience mappers, so a console
-  edit between changes is not found. Comparing them is the next step and needs no new state.
+- **Compared by the sweep (1.33.0).** The drift sweep reads the audience mappers as the `audience`
+  field class (§Drift Reconciliation), so a console edit between changes is found and, attributed,
+  repaired.
 
 | Ref | Source |
 | :-- | :-- |
