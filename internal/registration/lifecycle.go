@@ -64,13 +64,25 @@ type StateChange struct {
 	RegistrationID id.UUID
 	ChangedBy      id.UUID
 	Reason         string
+
+	// Automatic is a change nobody asked for: the workload sweep suspending a workload orphaned past
+	// its grace period (TDD-identity-control-003 1.34.0). It names no Principal, and only it may.
+	Automatic bool
 }
 
 func (c StateChange) validate() error {
-	if c.ChangedBy.IsNil() || strings.TrimSpace(c.Reason) == "" {
-		return fmt.Errorf("%w: a lifecycle action names the Principal asking and a reason", ErrInvalid)
+	if c.ChangedBy.IsNil() != c.Automatic || strings.TrimSpace(c.Reason) == "" {
+		return fmt.Errorf("%w: a lifecycle action names the Principal asking, or is automatic, and gives a reason", ErrInvalid)
 	}
 	return nil
+}
+
+// actor is the changed_by column: the Principal who asked, or null for an automatic change.
+func (c StateChange) actor() any {
+	if c.Automatic {
+		return nil
+	}
+	return c.ChangedBy.String()
 }
 
 const lockLifecycleStatement = `SELECT profile, state, coalesce(kc_client_id, ''), suspended_at, client_key
@@ -102,8 +114,8 @@ SET converged_at = $2, resolved_by = $3, resolution_reason = $4
 WHERE registration_id = $1 AND converged_at IS NULL AND field_class IS NOT NULL`
 
 const insertStateChangeStatement = `INSERT INTO identity.registration_state_change
-    (change_id, registration_id, from_state, to_state, changed_by, reason, changed_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7)`
+    (change_id, registration_id, from_state, to_state, changed_by, reason, changed_at, automatic)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`
 
 // dependentsStatement is every active or suspended registration whose audience names the resource.
 // A suspended one counts, because a restore would bring it back holding an audience that no longer
@@ -150,7 +162,7 @@ func (s *Service) recordChange(ctx context.Context, tx db.Tx, change StateChange
 		return fmt.Errorf("registration: mint change_id: %w", err)
 	}
 	if _, err := tx.Exec(ctx, insertStateChangeStatement, changeID.String(), change.RegistrationID.String(), from, to,
-		change.ChangedBy.String(), strings.TrimSpace(change.Reason), at); err != nil {
+		change.actor(), strings.TrimSpace(change.Reason), at, change.Automatic); err != nil {
 		return fmt.Errorf("registration: record the change: %w", err)
 	}
 	return nil
@@ -272,6 +284,9 @@ func (s *Service) RestoreWorkloadWithin(ctx context.Context, tx db.Tx, change St
 }
 
 func (s *Service) restoreWithin(ctx context.Context, tx db.Tx, change StateChange, workload bool) (bool, error) {
+	if change.Automatic {
+		return false, fmt.Errorf("%w: only a suspension is ever automatic", ErrInvalid)
+	}
 	locked, err := s.lockLifecycle(ctx, tx, change.RegistrationID)
 	if err != nil {
 		return false, err
@@ -399,6 +414,9 @@ func (s *Service) RetireWorkloadWithin(ctx context.Context, tx db.Tx, change Sta
 }
 
 func (s *Service) retireWithin(ctx context.Context, tx db.Tx, change StateChange, workload bool) (bool, error) {
+	if change.Automatic {
+		return false, fmt.Errorf("%w: only a suspension is ever automatic", ErrInvalid)
+	}
 	locked, err := s.lockLifecycle(ctx, tx, change.RegistrationID)
 	if err != nil {
 		return false, err

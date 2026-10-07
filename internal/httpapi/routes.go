@@ -230,7 +230,13 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	api.HandleFunc("POST /v1/registration-requests/{request_action}", creator(cfg.Registrations.RequestAction))
 	api.HandleFunc("POST /v1/workloads", p(cfg.Workloads.CreateWorkload))
 	api.HandleFunc("GET /v1/workloads/{target}", p(cfg.Workloads.GetWorkload))
-	api.HandleFunc("POST /v1/workloads/{target}", p(cfg.Workloads.WorkloadAction))
+	// :review is the workload owner's; every other action a provider's (TDD-identity-control-004 1.5.0).
+	ownedWorkload := cfg.Workloads.owned(cfg.Assurance)
+	api.HandleFunc("POST /v1/workloads/{target}", ownedWorkload(cfg.Workloads.WorkloadAction))
+	api.HandleFunc("POST /v1/workloads:sweep", p(cfg.Workloads.Sweep))
+	api.HandleFunc("GET /v1/workloads:orphaned", p(cfg.Workloads.Orphaned))
+	api.HandleFunc("GET /v1/workloads:unused", p(cfg.Workloads.Unused))
+	api.HandleFunc("GET /v1/workloads:reviews-overdue", p(cfg.Workloads.ReviewsOverdue))
 
 	return Surface{Probes: probes, API: api, Deliveries: deliveryIntake(cfg.DeliveryVerifier, cfg.Deliveries)}, nil
 }

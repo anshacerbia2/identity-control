@@ -24,10 +24,15 @@ type LifecycleRequest struct {
 	PrincipalID id.UUID
 	ChangedBy   id.UUID
 	Reason      string
+
+	// automatic is the workload sweep's suspension of a workload orphaned past its grace period: it
+	// names no Principal (TDD-identity-control-004 1.5.0 §Orphan Handling). Unexported, so no caller
+	// outside the sweep can make a change nobody answers for.
+	automatic bool
 }
 
 func (r LifecycleRequest) validate() error {
-	if r.PrincipalID.IsNil() || r.ChangedBy.IsNil() {
+	if r.PrincipalID.IsNil() || r.ChangedBy.IsNil() != r.automatic {
 		return fmt.Errorf("%w: a lifecycle action names the workload and the Principal asking", ErrInvalid)
 	}
 	if strings.TrimSpace(r.Reason) == "" {
@@ -49,7 +54,8 @@ SET state = 'retired', version = version + 1
 WHERE principal_id = $1 AND state = 'suspended'`
 
 func (r LifecycleRequest) change(registrationID id.UUID) registration.StateChange {
-	return registration.StateChange{RegistrationID: registrationID, ChangedBy: r.ChangedBy, Reason: r.Reason}
+	return registration.StateChange{RegistrationID: registrationID, ChangedBy: r.ChangedBy, Reason: r.Reason,
+		Automatic: r.automatic}
 }
 
 // Suspend suspends the workload and its registration, then disables its client and sets its

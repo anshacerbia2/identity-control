@@ -73,6 +73,14 @@ type Config struct {
 	// admin events for 7 days, and a change must still carry its event when a sweep reads it.
 	RegistrationReconcileInterval time.Duration
 
+	// The workload sweep (TDD-identity-control-004 1.5.0 §Configuration): its cadence, when an
+	// orphan is escalated and suspended, when a workload is unused, and how often its owner reviews it.
+	WorkloadSweepInterval   time.Duration
+	WorkloadOrphanEscalate  time.Duration
+	WorkloadOrphanSuspend   time.Duration
+	WorkloadUnusedThreshold time.Duration
+	WorkloadReviewInterval  time.Duration
+
 	// ClientKeyLifetime is how long a registered client key is valid before it is removed, and
 	// ClientKeyRotationOverlap how long the previous key keeps authenticating after the next is
 	// registered (TDD-identity-control-003 §Configuration). The overlap is shorter than the lifetime.
@@ -245,6 +253,18 @@ func Load() (Config, error) {
 		problems = append(problems, errors.New("IDENTITY_KERNEL_EVENT_INTERVAL must be positive and at most 7h, so every kernel event is read at least twice before its 7-day retention expires it"))
 	}
 	cfg.RegistrationReconcileInterval = durationOr("IDENTITY_REGISTRATION_RECONCILE_INTERVAL", time.Hour, &problems)
+	cfg.WorkloadSweepInterval = durationOr("IDENTITY_WORKLOAD_SWEEP_INTERVAL", 24*time.Hour, &problems)
+	cfg.WorkloadOrphanEscalate = durationOr("IDENTITY_WORKLOAD_ORPHAN_ESCALATE_AFTER", 7*24*time.Hour, &problems)
+	cfg.WorkloadOrphanSuspend = durationOr("IDENTITY_WORKLOAD_ORPHAN_SUSPEND_AFTER", 30*24*time.Hour, &problems)
+	cfg.WorkloadUnusedThreshold = durationOr("IDENTITY_WORKLOAD_UNUSED_THRESHOLD", 90*24*time.Hour, &problems)
+	cfg.WorkloadReviewInterval = durationOr("IDENTITY_WORKLOAD_REVIEW_INTERVAL", 90*24*time.Hour, &problems)
+	switch {
+	case cfg.WorkloadSweepInterval <= 0 || cfg.WorkloadOrphanEscalate <= 0 || cfg.WorkloadOrphanSuspend <= 0 ||
+		cfg.WorkloadUnusedThreshold <= 0 || cfg.WorkloadReviewInterval <= 0:
+		problems = append(problems, errors.New("the IDENTITY_WORKLOAD_* sweep durations must be positive"))
+	case cfg.WorkloadOrphanEscalate >= cfg.WorkloadOrphanSuspend:
+		problems = append(problems, errors.New("IDENTITY_WORKLOAD_ORPHAN_ESCALATE_AFTER must be shorter than IDENTITY_WORKLOAD_ORPHAN_SUSPEND_AFTER, or an orphan would be suspended before anyone was told"))
+	}
 	if cfg.RegistrationReconcileInterval >= 7*24*time.Hour {
 		problems = append(problems, errors.New("IDENTITY_REGISTRATION_RECONCILE_INTERVAL must be shorter than the kernel's 7-day admin-event retention, or a change loses its attribution before a sweep reads it"))
 	}

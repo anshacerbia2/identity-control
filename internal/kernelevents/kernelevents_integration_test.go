@@ -224,3 +224,65 @@ func TestTheRecordedHookSeesEachEventOnce(t *testing.T) {
 		t.Error("the event was recorded although its hook failed; the two must commit together")
 	}
 }
+
+// A successful client credentials grant by a workload's service-account user moves the workload's
+// last_seen_at forward (TDD-identity-control-007 1.1.0); a failed one, an older one read late, and a
+// person's login do not.
+func TestAWorkloadsClientLoginIsItsLastSeen(t *testing.T) {
+	h := newHarness(t)
+	owner, principal, registration := newID(t), newID(t), newID(t)
+	serviceAccount := "sa-" + principal.String()
+	if err := h.pool.InTx(context.Background(), func(ctx context.Context, tx db.Tx) error {
+		realm, p, r, o := string(h.realm), principal.String(), registration.String(), owner.String()
+		for _, step := range []struct {
+			statement string
+			args      []any
+		}{
+			{`INSERT INTO identity.client_registration (registration_id, realm, client_key, profile, application_authority,
+			    application_ref, registered_by, audience_class, state)
+			 VALUES ($1, $2, $3, 'workload', 'manual', 'events-test', $4, 'workload', 'active')`, []any{r, realm, "job-" + p, o}},
+			{`INSERT INTO identity.workload (principal_id, registration_id, display_name, purpose, workload_type,
+			    owner_principal_id, state, created_by, idempotency_scope, idempotency_key, request_digest)
+			 VALUES ($1, $2, 'job', 'a test', 'job', $3, 'active', $3, 's', $4, 'd')`, []any{p, r, o, "k-" + p}},
+			{`INSERT INTO identity.principal_mapping (principal_id, realm, username, subject_type, workload_owner,
+			    keycloak_user_id, state)
+			 VALUES ($1, $2, $3, 'workload', $4, $5, 'active')`, []any{p, realm, "service-account-job-" + p, o, serviceAccount}},
+		} {
+			if _, err := tx.Exec(ctx, step.statement, step.args...); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed the workload: %v", err)
+	}
+	grant := func(id string, at time.Time, failed string) keycloak.KernelEvent {
+		return keycloak.KernelEvent{Kind: keycloak.KindUserEvent, ID: id, Time: at, Type: "CLIENT_LOGIN",
+			UserID: serviceAccount, ClientID: "job", Error: failed}
+	}
+	lastSeen := func() *time.Time {
+		var at *time.Time
+		if err := h.pool.InTx(context.Background(), func(ctx context.Context, tx db.Tx) error {
+			return tx.QueryRow(ctx, `SELECT last_seen_at FROM identity.workload WHERE principal_id = $1`,
+				principal.String()).Scan(&at)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return at
+	}
+
+	seen := h.now.Add(-10 * time.Minute)
+	h.store.Record(grant("w1", seen, ""), grant("w2", h.now.Add(-time.Minute), "invalid_client_credentials"),
+		login("w3", serviceAccount, h.now.Add(-30*time.Second)))
+	h.sweep(t)
+	if at := lastSeen(); at == nil || !at.Equal(seen) {
+		t.Fatalf("last_seen_at = %v, want the successful grant at %s", at, seen)
+	}
+
+	h.now = h.now.Add(time.Hour)
+	h.store.Record(grant("w4", seen.Add(-5*time.Minute), ""))
+	h.sweep(t)
+	if at := lastSeen(); at == nil || !at.Equal(seen) {
+		t.Errorf("an older grant read late moved last_seen_at to %v", at)
+	}
+}

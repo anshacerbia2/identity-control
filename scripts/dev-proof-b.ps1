@@ -22,7 +22,9 @@
 #      identifier disables both and quarantines the mapping; no service-account user is a finding;
 #      deleting the users resolves their findings
 #   7. a workload's keys rotate with an overlap and revoke at once, and a key added in the console
-#      blocks the client until an operator's reconcile puts back exactly the registered keys
+#      blocks the client until an operator's reconcile puts back exactly the registered keys; its
+#      grants are its last authentication, its owner reviews it, and its client deleted in the
+#      console is rebuilt under the same principal_id (TDD-identity-control-004 1.5.0)
 #   8. a client created in the console, which no registration describes, is recorded unmanaged and
 #      left alone in report mode, and its finding converges once it is gone
 #   9. a suspended client stays disabled with its not-before, a console re-enable is repaired, a
@@ -425,6 +427,36 @@ if ($PSVersionTable.PSEdition -ne 'Core') {
         Expect "the Principal sweep ran" (Api "POST" "/v1/principals:reconcile" $null $null).code 200
         Expect "the workload is not reported dangling" @((Api "GET" "/v1/principals:dangling" $null $null).json.dangling | Where-Object { $_.principal_id -eq $jobPrincipal }).Count 0
         Expect "and still authenticates after the sweep" (Token-Status $job $b) 200
+
+        # TDD-identity-control-004 1.5.0. Its client credentials grants are its last authentication,
+        # which the kernel event record writes (TDD-identity-control-007 1.1.0).
+        Expect "the kernel event record swept" (Api "POST" "/v1/kernel-events:sweep" $null $null).code 200
+        Expect "the workload's last authentication is recorded" ($null -ne (Get-Prop (Api "GET" "/v1/workloads/$jobPrincipal" $null $null).json "last_seen_at")) $true
+        $r = Api "POST" "/v1/workloads/${jobPrincipal}:review" $null @{ "X-Administrative-Reason" = "proof-b: still needed, purpose and owner hold" }
+        Expect "its owner reviews it" $r.code 200
+        Expect "and the review is recorded" ($null -ne (Get-Prop $r.json "last_reviewed_at")) $true
+        $r = Api "POST" "/v1/workloads:sweep" $null $null
+        Expect "the workload sweep ran" $r.code 200
+        Expect "and orphaned nothing" (Get-Prop $r.json "orphaned") 0
+
+        # A workload's client deleted in the console is rebuilt under the same principal_id and keys.
+        Expect "a rebuild while the client exists is refused" (Api "POST" "/v1/workloads/${jobPrincipal}:rebuild" $null @{ "X-Administrative-Reason" = "proof-b" }).code 409
+        Expect "the console administrator deletes the workload's client" (Kc "DELETE" "/clients/$jobUuid" $null).code 204
+        Expect "the deleted client's key no longer authenticates" ((Token-Status $job $b) -ne 200) $true
+        $r = Api "POST" "/v1/workloads/${jobPrincipal}:rebuild" $null @{ "X-Administrative-Reason" = "proof-b: its client was deleted in the console" }
+        Expect "the workload's client is rebuilt" $r.code 200
+        $rebuiltUuid = (Kc "GET" "/clients?clientId=$job&search=false" $null).json[0].id
+        Expect "as a new client" ($rebuiltUuid -ne $jobUuid) $true
+        Expect "key B authenticates the rebuilt client" (Token-Status $job $b) 200
+        Expect "the workload is not reported dangling after the rebuild" @((Api "GET" "/v1/principals:dangling" $null $null).json.dangling | Where-Object { $_.principal_id -eq $jobPrincipal }).Count 0
+        $form = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+        $form["grant_type"] = "client_credentials"; $form["client_id"] = $job
+        $form["client_assertion_type"] = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+        $form["client_assertion"] = New-ClientAssertion -KeyFile $b.file -ClientId $job -Audience $issuer
+        $token = ($http.PostAsync("$kcAdmin/realms/$realm/protocol/openid-connect/token",
+            (New-Object System.Net.Http.FormUrlEncodedContent($form))).Result.Content.ReadAsStringAsync().Result | ConvertFrom-Json).access_token
+        Expect "its token carries the same principal_id" (Decode-Segment $token.Split('.')[1] | ConvertFrom-Json).principal_id $jobPrincipal
+        Record "Workload client deleted in the console" "rebuilt by :rebuild" "same principal_id, new client"
     } finally {
         foreach ($file in $keyFiles) { Remove-Item -Force -ErrorAction SilentlyContinue $file }
     }

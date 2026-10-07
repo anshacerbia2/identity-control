@@ -37,6 +37,8 @@ BEGIN
               ('identity.client_key'),
               ('identity.workload'),
               ('identity.workload_owner_change'),
+              ('identity.workload_finding'),
+              ('identity.workload_review'),
               ('identity.registration_adoption'),
               ('identity.registration_state_change'),
               ('identity.registration_owner'),
@@ -139,6 +141,11 @@ GRANT UPDATE (state, retiring_at, revoked_at, revoked_by, revocation_reason) ON 
 -- answerable at a given time cannot be rewritten by whoever holds the workload now.
 REVOKE DELETE, TRUNCATE ON identity.workload FROM identity_runtime;
 REVOKE UPDATE, DELETE, TRUNCATE ON identity.workload_owner_change FROM identity_runtime;
+-- An owner's review is insert-only, so the record of who vouched for a credential is not rewritten by
+-- whoever holds the workload later. A workload finding is kept after it resolves: nothing deletes one
+-- (TDD-identity-control-004 1.5.0).
+REVOKE UPDATE, DELETE, TRUNCATE ON identity.workload_review FROM identity_runtime;
+REVOKE DELETE, TRUNCATE ON identity.workload_finding FROM identity_runtime;
 
 -- An adoption record says who brought a client created outside this service under registration,
 -- why, and what the client held then. Insert-only (ADR-IAM-001 §5.12 rule 5).

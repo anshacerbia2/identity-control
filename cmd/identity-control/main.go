@@ -213,6 +213,10 @@ func run() error {
 		Realm:                keycloak.Realm(cfg.KeycloakRealm),
 		CallTimeout:          cfg.ProvisionTimeout,
 		PendingRecoveryAfter: cfg.PendingRecoveryAfter,
+		OrphanEscalateAfter:  cfg.WorkloadOrphanEscalate,
+		OrphanSuspendAfter:   cfg.WorkloadOrphanSuspend,
+		UnusedThreshold:      cfg.WorkloadUnusedThreshold,
+		ReviewInterval:       cfg.WorkloadReviewInterval,
 	}, logger)
 	if err != nil {
 		return fmt.Errorf("workload service: %w", err)
@@ -511,6 +515,7 @@ func run() error {
 	}
 	go scheduleTenantSweeps(ctx, tenantSweep, cfg.ProjectionReconcileInterval, logger)
 	go scheduleKernelEventSweeps(ctx, kernelEvents, cfg.KernelEventInterval, logger)
+	go scheduleWorkloadSweeps(ctx, workloads, cfg.WorkloadSweepInterval, logger)
 	// The dispatcher hands requested notifications to the delivery adapter. With none configured the
 	// requests are recorded and wait for the Notification Platform (TDD-identity-control-008).
 	if cfg.NotificationDelivery == "standin" {
@@ -655,6 +660,28 @@ func scheduleSweeps(ctx context.Context, provisioner *provisioning.Provisioner, 
 				slog.String("run_id", run.ID.String()),
 				slog.String("outcome", string(run.Outcome)),
 				slog.Int("findings", run.Findings))
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// scheduleWorkloadSweeps runs the workload sweep (TDD-identity-control-004 1.5.0) at start and then
+// every interval: orphan handling, unused detection and overdue owner reviews. Every replica runs it;
+// each step is a guarded update or an insert that keeps one open finding, so two replicas agree.
+func scheduleWorkloadSweeps(ctx context.Context, workloads *workload.Service, interval time.Duration, logger *slog.Logger) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		if result, err := workloads.Sweep(ctx); err != nil {
+			logger.Error("workload sweep failed", slog.String("error", err.Error()))
+		} else if result != (workload.SweepResult{}) {
+			logger.Info("workload sweep", slog.Int("orphaned", result.Orphaned), slog.Int("reclaimed", result.Reclaimed),
+				slog.Int("suspended", result.Suspended), slog.Int("unused", result.Unused),
+				slog.Int("reviews_overdue", result.ReviewsOverdue))
 		}
 		select {
 		case <-ctx.Done():

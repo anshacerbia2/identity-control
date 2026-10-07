@@ -1225,6 +1225,123 @@ table "workload_owner_change" {
   }
 }
 
+// What the workload sweep found (TDD-identity-control-004 1.5.0): a workload unused past the
+// threshold, or one whose owner's review is overdue. Kept after it resolves; the runtime deletes none.
+table "workload_finding" {
+  schema  = schema.identity
+  comment = "A workload unused past the threshold, or whose owner review is overdue. TDD-identity-control-004 1.5.0."
+
+  column "finding_id" {
+    null = false
+    type = uuid
+  }
+
+  column "principal_id" {
+    null = false
+    type = uuid
+  }
+
+  column "finding_class" {
+    null = false
+    type = text
+  }
+
+  column "detected_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+
+  column "resolved_at" {
+    null = true
+    type = timestamptz
+  }
+
+  column "resolution" {
+    null = true
+    type = text
+  }
+
+  primary_key {
+    columns = [column.finding_id]
+  }
+
+  foreign_key "workload_finding_principal_id_fkey" {
+    columns     = [column.principal_id]
+    ref_columns = [table.workload.column.principal_id]
+    on_update   = NO_ACTION
+    on_delete   = NO_ACTION
+  }
+
+  // One open finding per workload and class: a later sweep that still finds it keeps it.
+  index "workload_finding_open" {
+    unique  = true
+    columns = [column.principal_id, column.finding_class]
+    where   = "resolved_at IS NULL"
+  }
+
+  check "workload_finding_class_check" {
+    expr = "finding_class IN ('unused', 'review_overdue')"
+  }
+
+  check "workload_finding_resolution_check" {
+    expr = "(resolved_at IS NULL) = (resolution IS NULL) AND (resolution IS NULL OR resolution IN ('seen', 'reviewed', 'stopped'))"
+  }
+}
+
+// An owner's periodic review of a workload (TDD-identity-control-004 1.5.0 §Periodic Review, CIS 5.5):
+// who vouched for it, when, and what they said. Insert-only, so the record of who answered for a
+// credential cannot be rewritten by whoever holds it later.
+table "workload_review" {
+  schema  = schema.identity
+  comment = "An insert-only record of an owner's review of a workload. TDD-identity-control-004 1.5.0."
+
+  column "review_id" {
+    null = false
+    type = uuid
+  }
+
+  column "principal_id" {
+    null = false
+    type = uuid
+  }
+
+  column "reviewed_by" {
+    null = false
+    type = uuid
+  }
+
+  column "statement" {
+    null = false
+    type = text
+  }
+
+  column "reviewed_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+
+  primary_key {
+    columns = [column.review_id]
+  }
+
+  foreign_key "workload_review_principal_id_fkey" {
+    columns     = [column.principal_id]
+    ref_columns = [table.workload.column.principal_id]
+    on_update   = NO_ACTION
+    on_delete   = NO_ACTION
+  }
+
+  index "workload_review_by_workload" {
+    columns = [column.principal_id, column.reviewed_at]
+  }
+
+  check "workload_review_statement_check" {
+    expr = "btrim(statement) <> ''"
+  }
+}
+
 // How a client created before this service existed came under registration: who adopted it, when,
 // why, what it held at that moment, and which repairable differences the adoption converged
 // (ADR-IAM-001 §5.12). Insert-only, so the record outlives whoever adopted it.
@@ -1322,9 +1439,16 @@ table "registration_state_change" {
     type = text
   }
 
+  // Null for an automatic change, which nobody asked for (TDD-identity-control-003 1.34.0).
   column "changed_by" {
-    null = false
+    null = true
     type = uuid
+  }
+
+  column "automatic" {
+    null    = false
+    type    = boolean
+    default = false
   }
 
   column "reason" {
@@ -1359,6 +1483,10 @@ table "registration_state_change" {
 
   check "registration_state_change_transition_check" {
     expr = "(from_state = 'active' AND to_state IN ('suspended', 'retired')) OR (from_state = 'suspended' AND to_state IN ('active', 'retired'))"
+  }
+
+  check "registration_state_change_actor_check" {
+    expr = "(changed_by IS NULL) = automatic"
   }
 }
 

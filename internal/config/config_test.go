@@ -386,6 +386,40 @@ func TestUnmappedUsersFollowTheEnvironmentUnlessStated(t *testing.T) {
 	}
 }
 
+// The workload sweep's durations default to TDD-identity-control-004's, and an escalation that would
+// come after the suspension is refused.
+func TestWorkloadSweepDurations(t *testing.T) {
+	for _, c := range []struct {
+		escalate, suspend string
+		ok                bool
+	}{{"", "", true}, {"1h", "2h", true}, {"720h", "168h", false}, {"-1h", "", false}} {
+		t.Setenv("IDENTITY_DATABASE_URL", "postgres://runtime@localhost:5432/identity")
+		t.Setenv("IDENTITY_KEYCLOAK_REALM", "scnehaux")
+		t.Setenv("IDENTITY_KEYCLOAK_BASE_URL", "https://identity.example.com")
+		t.Setenv("IDENTITY_KEYCLOAK_CLIENT_ID", "identity-control")
+		t.Setenv("IDENTITY_KEYCLOAK_CLIENT_KEY_FILE", "/keys/identity-control.pem")
+		t.Setenv("IDENTITY_TOKEN_ISSUER", "https://identity.example.com/realms/scnehaux")
+		t.Setenv("IDENTITY_TOKEN_AUDIENCE", "identity-control")
+		t.Setenv("IDENTITY_JWKS_URL", "https://identity.example.com/realms/scnehaux/protocol/openid-connect/certs")
+		t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_ID", "identity-control-registration")
+		t.Setenv("IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_KEY_FILE", "/keys/identity-control-registration.pem")
+		t.Setenv("IDENTITY_SECURITY_REF_KEY_FILE", "/keys/security-ref.json")
+		t.Setenv("IDENTITY_WORKLOAD_ORPHAN_ESCALATE_AFTER", c.escalate)
+		t.Setenv("IDENTITY_WORKLOAD_ORPHAN_SUSPEND_AFTER", c.suspend)
+		cfg, err := config.Load()
+		if c.ok && err != nil {
+			t.Errorf("%q/%q refused: %v", c.escalate, c.suspend, err)
+		}
+		if !c.ok && err == nil {
+			t.Errorf("%q/%q was accepted", c.escalate, c.suspend)
+		}
+		if c.escalate == "" && c.ok && (cfg.WorkloadOrphanSuspend != 720*time.Hour || cfg.WorkloadReviewInterval != 2160*time.Hour ||
+			cfg.WorkloadSweepInterval != 24*time.Hour) {
+			t.Errorf("defaults = %+v", cfg)
+		}
+	}
+}
+
 func TestTheTokenTypeIsReportedUnlessEnforcementIsAsked(t *testing.T) {
 	for _, c := range []struct {
 		value   string

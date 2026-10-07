@@ -120,6 +120,18 @@ VALUES ($1, $2, $3, $4, $5, nullif($6, ''),
         nullif($7, ''), nullif($8, ''), nullif($9, ''), nullif($10, ''), nullif($11, ''), nullif($12, ''), $13::jsonb)
 ON CONFLICT (realm, kind, kc_event_id) DO NOTHING`
 
+// lastSeenStatement moves a workload's last authentication forward to a client credentials grant its
+// service-account user made (TDD-identity-control-007 1.1.0, TDD-identity-control-004 §Unused Workload
+// Detection). It never moves it back: an older event read late changes nothing.
+const lastSeenStatement = `UPDATE identity.workload w
+SET last_seen_at = $3
+FROM identity.principal_mapping m
+WHERE m.realm = $1 AND m.keycloak_user_id = $2 AND m.subject_type = 'workload'
+  AND w.principal_id = m.principal_id AND (w.last_seen_at IS NULL OR w.last_seen_at < $3)`
+
+// clientLogin is the kernel's event type for a successful client credentials grant.
+const clientLogin = "CLIENT_LOGIN"
+
 // saveMarkStatement records the sweep. read_through only moves forward, and a truncated read
 // passes the mark it started from, which leaves it where it was.
 const saveMarkStatement = `INSERT INTO identity.kernel_event_mark
@@ -175,6 +187,12 @@ func (s *Sweeper) sweepKind(ctx context.Context, kind string) (KindResult, error
 				return fmt.Errorf("record %s: %w", event.ID, err)
 			}
 			result.Recorded += int(tag.RowsAffected())
+			if tag.RowsAffected() == 1 && event.Kind == keycloak.KindUserEvent && event.Type == clientLogin &&
+				event.Error == "" && event.UserID != "" {
+				if _, err := tx.Exec(ctx, lastSeenStatement, string(s.realm), event.UserID, event.Time); err != nil {
+					return fmt.Errorf("record %s's workload authentication: %w", event.ID, err)
+				}
+			}
 			if tag.RowsAffected() == 1 && s.recorded != nil {
 				if err := s.recorded(ctx, tx, s.realm, event); err != nil {
 					return err

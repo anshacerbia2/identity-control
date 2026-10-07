@@ -19,8 +19,9 @@
 //     Membership, which organization-control grants like any other binding; this service holds no
 //     Membership data and does not need any to create an identity.
 //   - An agent workload is refused: bounded delegation and the act claim are not built.
-//   - Orphan handling and unused detection wait on the Membership and authentication events this
-//     service does not consume yet. Suspension, restoration and retirement are in lifecycle.go.
+//   - Suspension, restoration and retirement are in lifecycle.go; orphan handling, unused detection
+//     and overdue reviews in sweep.go; the owner's review in review.go; rebuilding a deleted client in
+//     rebuild.go (TDD-identity-control-004 1.5.0).
 package workload
 
 import (
@@ -98,6 +99,11 @@ type Registrar interface {
 	RestoreWorkloadWithin(ctx context.Context, tx db.Tx, change registration.StateChange) error
 	RetireWorkloadWithin(ctx context.Context, tx db.Tx, change registration.StateChange) error
 	ConvergeSuspension(ctx context.Context, registrationID id.UUID) error
+
+	// A rebuild creates the client inside the workload's transaction, and discards it when that
+	// transaction fails (TDD-identity-control-004 1.5.0 §Rebuilding a Workload's Client).
+	RebuildWorkloadClientWithin(ctx context.Context, tx db.Tx, change registration.StateChange) (keycloak.ClientUUID, error)
+	DiscardClient(ctx context.Context, client keycloak.ClientUUID) error
 }
 
 // Config bounds the service.
@@ -110,7 +116,24 @@ type Config struct {
 	// PendingRecoveryAfter is the age at which a pending workload enters recovery. It must exceed
 	// CallTimeout, or recovery races the request it is repairing.
 	PendingRecoveryAfter time.Duration
+
+	// The workload sweep's thresholds (TDD-identity-control-004 §Configuration): an orphan is
+	// escalated after OrphanEscalateAfter and suspended after OrphanSuspendAfter, a workload not seen
+	// for UnusedThreshold is unused, and an owner reviews every ReviewInterval. An overdue review is
+	// escalated after OrphanEscalateAfter too. Zero takes the default.
+	OrphanEscalateAfter time.Duration
+	OrphanSuspendAfter  time.Duration
+	UnusedThreshold     time.Duration
+	ReviewInterval      time.Duration
 }
+
+// The defaults TDD-identity-control-004 §Configuration states.
+const (
+	DefaultOrphanEscalateAfter = 7 * 24 * time.Hour
+	DefaultOrphanSuspendAfter  = 30 * 24 * time.Hour
+	DefaultUnusedThreshold     = 90 * 24 * time.Hour
+	DefaultReviewInterval      = 90 * 24 * time.Hour
+)
 
 // Service creates workloads, reads them, and moves their ownership.
 //
@@ -149,6 +172,22 @@ func New(tx Transactor, registrar Registrar, clients keycloak.ClientRegistry, us
 	}
 	if cfg.PendingRecoveryAfter <= 0 {
 		cfg.PendingRecoveryAfter = 60 * time.Second
+	}
+	if cfg.OrphanEscalateAfter <= 0 {
+		cfg.OrphanEscalateAfter = DefaultOrphanEscalateAfter
+	}
+	if cfg.OrphanSuspendAfter <= 0 {
+		cfg.OrphanSuspendAfter = DefaultOrphanSuspendAfter
+	}
+	if cfg.UnusedThreshold <= 0 {
+		cfg.UnusedThreshold = DefaultUnusedThreshold
+	}
+	if cfg.ReviewInterval <= 0 {
+		cfg.ReviewInterval = DefaultReviewInterval
+	}
+	if cfg.OrphanEscalateAfter >= cfg.OrphanSuspendAfter {
+		return nil, fmt.Errorf("workload: OrphanEscalateAfter (%s) must be shorter than OrphanSuspendAfter (%s)",
+			cfg.OrphanEscalateAfter, cfg.OrphanSuspendAfter)
 	}
 	if cfg.PendingRecoveryAfter <= cfg.CallTimeout {
 		return nil, fmt.Errorf("workload: PendingRecoveryAfter (%s) must exceed CallTimeout (%s)",
@@ -196,6 +235,11 @@ type Workload struct {
 	CreatedBy       id.UUID    `json:"created_by"`
 	CreatedAt       time.Time  `json:"created_at"`
 	ActivatedAt     *time.Time `json:"activated_at"`
+
+	// LastReviewedAt is the owner's latest review, and ReviewDueAt when the next is due, for an active
+	// or orphaned workload (TDD-identity-control-004 1.5.0 §Periodic Review).
+	LastReviewedAt *time.Time `json:"last_reviewed_at"`
+	ReviewDueAt    *time.Time `json:"review_due_at,omitempty"`
 }
 
 const (
