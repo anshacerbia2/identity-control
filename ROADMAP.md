@@ -355,7 +355,10 @@ Acceptance criteria, also from RESPONSE-4 §4:
   - `GET /v1/registrations:drift` and `POST /v1/registrations:reconcile`;
   - a drift algorithm and a 1h interval;
   - the `identity-control-registration` credential with `manage-clients` and `view-clients`.
-- TDD-002 designs `identity.drift_finding`, and it is not built.
+- TDD-002 designed `identity.drift_finding`. ✅ Superseded rather than built: TDD-002 2.0.0 replaced it
+  with `identity.projection_finding`, built in the Tenant context projection's slice 3a (TDD-002
+  2.1.0, `internal/tenantcontext`), and the registration sweep's own findings are
+  `identity.registration_finding` (step 4 below).
 
 **What is missing:**
 
@@ -373,7 +376,8 @@ Acceptance criteria, also from RESPONSE-4 §4:
   representation and 7-day retention (identity-kernel #16).
 - The mapping state machine has no way back from `active`. A blanked `keycloak_user_id` on an
   active row is picked up by nothing, so the portability test needs a designed transition.
-  Designed as `:relink` (decision 4), not built.
+  ✅ Designed as `:relink` (decision 4) and built in step 7 below
+  (`internal/identity/provisioning/relink.go`).
 
 **Decided 2026-09-28:**
 
@@ -537,7 +541,7 @@ Acceptance criteria, also from RESPONSE-4 §4:
   - The client and the Principal stop together: the workload lifecycle holds the workload's row lock and changes its registration in the same transaction, through the registration package's `…WorkloadWithin` seams, because the registration lifecycle still refuses a workload's client.
   - A suspension commits, then disables the client and sets its not-before. A restore is refused while the owner is not an active human Principal (reassign first), and writes the client back inside its transaction. A retirement, only after a suspension, deletes the client, revokes its keys, and retires the Principal's mapping, so the dangling sweep does not report the deleted service-account user.
   - Each change is recorded in the registration's insert-only `registration_state_change`, naming who asked and why.
-- **Kernel scopes:** `identity-kernel` declares `scnehaux-workload` (identity-kernel#23). It still has to declare a tenant-scope privileged scope before registrations of that class can exist, and that waits on the context projection.
+- ✅ **Kernel scopes:** `identity-kernel` declares `scnehaux-workload` (identity-kernel#23) and the tenant-scope privileged scope `scnehaux-privileged` (`TDD-identity-kernel-001` 1.14.0), which the `tenant-scoped` privileged form holds (item 6 of the Tenant context projection, below).
 
 ## Account security and investigation (TDD-identity-control-005)
 
