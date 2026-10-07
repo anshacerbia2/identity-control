@@ -28,7 +28,8 @@ path = sys.argv[1]
 text = open(path, encoding="utf-8").read()
 today = datetime.date.today()
 rules = re.findall(r"^  - ", text, re.M)
-reasons = re.findall(r"^\s+reason:\s*['\"]?review-by (\d{4}-\d{2}-\d{2}):", text, re.M)
+# A reason is written inline or as a folded block (reason: >-), and begins with its review date.
+reasons = re.findall(r"^\s+reason:\s*(?:>-?[ \t]*\n\s*)?['\"]?review-by (\d{4}-\d{2}-\d{2}):", text, re.M)
 failed = False
 if len(rules) != len(reasons):
     print(f"::error file={path}::{len(rules)} ignore rules and {len(reasons)} reasons beginning 'review-by YYYY-MM-DD:'; every rule needs one")

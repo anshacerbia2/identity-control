@@ -768,9 +768,13 @@ Two decisions are recorded here:
   `scripts/dev-credential-split.ps1` asserts in `deploy-dev` that neither credential can do the
   other's work.
 - **Container images have no enterprise standard.** SAD-004 says only "compiled as an OCI image".
-  The images here follow the kernel's precedent: pinned digests, distroless, non-root. Scanning the
-  built image for vulnerabilities, which SAD-001 §7.6 requires, is not yet in CI. Both are
-  production-gate items.
+  The images here follow the kernel's precedent: pinned digests, distroless, non-root. Since
+  STD-GLB-009 1.4.0 §Container Images they are a standard, and the `image-scan` workflow scans the
+  service and migrate images and every digest-pinned image `deploy/dev/compose.yaml` names, on every
+  change and daily, with Grype pinned by digest (`scripts/image-scan.sh`). It fails on a High or
+  Critical vulnerability with a fix. The exceptions in `.grype.yaml` each carry a review date that
+  the scan enforces. A registry and image signing for the production path remain production-gate
+  items.
 
 ## Not this service
 
