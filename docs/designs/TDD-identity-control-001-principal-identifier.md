@@ -324,6 +324,7 @@ CREATE TABLE identity.principal_finding (
     finding_class        TEXT        NOT NULL
         CHECK (finding_class IN ('dangling', 'unmapped', 'orphan', 'duplicate')),
     keycloak_user_id     TEXT        NOT NULL,
+    realm                TEXT        NOT NULL,
     claimed_principal_id TEXT,                    -- orphan: the identifier the user carries
     username             TEXT,                    -- the kernel user's username, for triage
     user_disabled        BOOLEAN     NOT NULL DEFAULT false,
@@ -339,7 +340,7 @@ CREATE TABLE identity.principal_finding (
 );
 
 CREATE UNIQUE INDEX principal_finding_open_user
-    ON identity.principal_finding (finding_class, keycloak_user_id) WHERE resolved_at IS NULL;
+    ON identity.principal_finding (realm, finding_class, keycloak_user_id) WHERE resolved_at IS NULL;
 ```
 
 **1.13.0 widens the finding to the sweep's other three branches.** An `unmapped` or `orphan`
@@ -348,7 +349,9 @@ records the identifier the user carries, which no mapping holds and which may no
 `username` is recorded so whoever triages the finding can find the user: `keycloak_user_id` never
 leaves this module. `user_disabled` says whether the sweep disabled the user, which it does only
 under `IDENTITY_UNMAPPED_USERS=disable` (§Reconciliation Sweep). One open finding per class and
-kernel user replaces one per Principal, because a duplicate is one finding per extra user.
+kernel user replaces one per Principal, because a duplicate is one finding per extra user. `realm`
+is recorded because a finding without a Principal has no mapping to read it from; the migration
+fills it for the dangling findings recorded before.
 
 `principal_relink` is insert-only for the runtime role: a Principal's move to a new
 Keycloak user is exactly the change whose record must not be rewritable by the process
@@ -590,7 +593,7 @@ For each user the enumeration returned:
     else if the mapping is pending: skip                          -- (1.13.0) recovery's, below
 
     else if the mapping row points at a different keycloak_user_id:
-        read the mapping's own user; if the kernel no longer holds it: skip   -- (1.13.0) below
+        if the mapping is active or suspended and the kernel no longer holds its own user: skip  -- below
         disable both users
         transition the mapping to quarantined when it is active or suspended
         record a duplicate finding, raise an alert
@@ -635,12 +638,13 @@ what the pseudocode above left open:
   mapping holds yet, and workload recovery is what finishes it.
 - **A pending mapping is recovery's.** A user carrying a pending mapping's identifier is the one
   recovery adopts, and recovery's own many-match branch already quarantines a duplicate.
-- **A duplicate needs two users that exist.** A mapping whose own user is gone, while another user
-  carries its identifier, is a dangling mapping or a rebind in flight: `:relink`'s recovery, or a
+- **A duplicate needs two users that exist.** An active or suspended mapping whose own user is gone,
+  while another user carries its identifier, is a dangling mapping or a rebind in flight: `:relink`'s recovery, or a
   workload's client rebuilt with a new service-account user (`TDD-identity-control-004` 1.5.0).
   Quarantining it would turn an operator's repair into an incident. Both users of a real duplicate
   are disabled whatever `IDENTITY_UNMAPPED_USERS` says: either one's token asserts the same
-  `principal_id`. A quarantined or retired mapping keeps its state; only the users are disabled.
+  `principal_id`. A quarantined or retired mapping keeps its state, and any other user carrying its
+  identifier is a duplicate, since nothing rebinds such a mapping; only the users are disabled.
 - **Disabling is a setting, for the rollout.** `IDENTITY_UNMAPPED_USERS` is `report` or `disable`,
   as `IDENTITY_UNMANAGED_CLIENTS` is for clients and for the same reason: an estate whose users
   predate this service would lose all of them to the first sweep, and the first sweep runs at
