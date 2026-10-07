@@ -155,15 +155,33 @@ func (o Operation) Final() bool {
 
 // Service accepts, executes and reads security operations.
 type Service struct {
-	tx     Transactor
-	kernel keycloak.Containment
-	refs   *securityref.Codec
-	cfg    Config
-	logger *slog.Logger
-	newID  func() (id.UUID, error)
-	jitter func(limit time.Duration) time.Duration
-	metric instruments
+	tx      Transactor
+	kernel  keycloak.Containment
+	refs    *securityref.Codec
+	cfg     Config
+	logger  *slog.Logger
+	newID   func() (id.UUID, error)
+	jitter  func(limit time.Duration) time.Duration
+	metric  instruments
+	applied AppliedHook
 }
+
+// Applied is a security command the kernel applied, as the applied hook receives it.
+type Applied struct {
+	OperationID id.UUID
+	Type        string
+	Subject     id.UUID
+	Actor       id.UUID
+	Self        bool
+}
+
+// AppliedHook is called for each command whose applied outcome is recorded, in the transaction that
+// records it, so what it writes commits with the outcome or not at all. The notification of an
+// assisted recovery is requested this way (TDD-identity-control-008 1.3.0).
+type AppliedHook func(ctx context.Context, tx db.Tx, op Applied) error
+
+// OnApplied sets the hook. Nil, the default, calls nothing.
+func (s *Service) OnApplied(hook AppliedHook) { s.applied = hook }
 
 // New builds the service.
 func New(tx Transactor, kernel keycloak.Containment, refs *securityref.Codec, cfg Config, logger *slog.Logger) (*Service, error) {

@@ -96,6 +96,65 @@ func (r *Requester) FromKernelEvent(ctx context.Context, tx db.Tx, realm keycloa
 	return nil
 }
 
+// restoreStatement records the request for a restored Principal, to the addresses it holds now. An
+// operation already requested records nothing.
+const restoreStatement = `WITH a AS (
+    SELECT coalesce(array_agg(address_id ORDER BY added_at, address_id), '{}'::uuid[]) AS ids
+    FROM identity.notification_address
+    WHERE principal_id = $2 AND state = 'active'
+)
+INSERT INTO identity.security_notification
+    (notification_id, principal_id, event, source_key, occurred_at, details, recipients, state)
+SELECT $1, $2, $3, $4, now(), $5::jsonb, a.ids,
+       CASE WHEN cardinality(a.ids) = 0 THEN 'no_address' ELSE 'requested' END
+FROM a
+ON CONFLICT (source_key) DO NOTHING
+RETURNING state`
+
+// FromRestore requests account_recovered for a Principal a provider restored: the last step of
+// assisted recovery (TDD-identity-control-008 1.3.0). It runs in the transaction that records the
+// restore as applied, so the two commit together.
+func (r *Requester) FromRestore(ctx context.Context, tx db.Tx, operationID, principal id.UUID) error {
+	notificationID, err := r.newID()
+	if err != nil {
+		return err
+	}
+	details, err := json.Marshal(map[string]string{"method": "assisted", "actor": ActorAdministrator})
+	if err != nil {
+		return err
+	}
+	sourceKey := "command:operation:" + operationID.String()
+	rows, err := tx.Query(ctx, restoreStatement, notificationID.String(), principal.String(), EventAccountRecovered,
+		sourceKey, string(details))
+	if err != nil {
+		return fmt.Errorf("securitynotify: request %s for %s: %w", EventAccountRecovered, sourceKey, err)
+	}
+	var state string
+	recorded := rows.Next()
+	if recorded {
+		err = rows.Scan(&state)
+	}
+	rows.Close()
+	if err == nil {
+		err = rows.Err()
+	}
+	if err != nil {
+		return fmt.Errorf("securitynotify: request %s for %s: %w", EventAccountRecovered, sourceKey, err)
+	}
+	if !recorded {
+		return nil
+	}
+	attrs := []any{slog.String("notification_id", notificationID.String()), slog.String("principal_id", principal.String()),
+		slog.String("event", EventAccountRecovered), slog.String("operation_id", operationID.String())}
+	if state == StateNoAddress {
+		r.logger.ErrorContext(ctx, "an account security event was recorded for a Principal with no notification address; "+
+			"the person cannot be told", attrs...)
+		return nil
+	}
+	r.logger.InfoContext(ctx, "account security notification requested", attrs...)
+	return nil
+}
+
 // The request states (TDD-identity-control-008 §Data Model).
 const (
 	StateRequested = "requested"
