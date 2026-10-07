@@ -303,8 +303,6 @@ func TestRuntimeRoleCanPerformDML(t *testing.T) {
 		{"identity.principal_mapping", "SELECT"},
 		{"identity.principal_mapping", "INSERT"},
 		{"identity.principal_mapping", "UPDATE"},
-		{"identity.projection_cursor", "SELECT"},
-		{"identity.projection_cursor", "UPDATE"},
 		{"platform.outbox", "INSERT"},
 		{"platform.outbox", "SELECT"},
 		{"platform.outbox", "UPDATE"},
@@ -336,14 +334,20 @@ func TestRuntimeRoleCanPerformDML(t *testing.T) {
 	}
 }
 
-// TestWeek1SchemaShape asserts that the two tables named by the Week 1 checklist exist
-// with the state machine and the partial unique index it calls out. Atlas applied them, so
+// TestWeek1SchemaShape asserts that the mapping table the Week 1 checklist names exists
+// with the state machine and the partial unique index it calls out. Atlas applied it, so
 // this is a check that the applied state matches what schema.hcl declares rather than a
-// restatement of the DDL.
+// restatement of the DDL. The checklist's other table, projection_cursor, is dropped
+// (TDD-identity-control-002 2.4.0), and its absence is asserted too.
 func TestWeek1SchemaShape(t *testing.T) {
 	pool, ctx := openPool(t)
 
-	for _, table := range []string{"principal_mapping", "projection_cursor"} {
+	if queryBool(t, pool, ctx,
+		`SELECT EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'identity' AND tablename = 'projection_cursor')`) {
+		t.Error("identity.projection_cursor still exists; the drop migration has not been applied")
+	}
+
+	for _, table := range []string{"principal_mapping"} {
 		if !queryBool(t, pool, ctx,
 			`SELECT EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'identity' AND tablename = $1)`,
 			table) {

@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-005
   title: Account Security and Investigation API Mediation
   owner: Core Platform Team
-  version: 2.9.2
+  version: 2.10.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -834,6 +834,17 @@ approved secret manager and have independent rotation schedules.
 - Administrative mutation without reason, version, correlation, or idempotency key is
   refused before any kernel call.
 
+### Enforcement Delay (2.10.0)
+
+- `deploy-dev` measures session removal's accept-to-enforcement delay against the live kernel. The
+  bootstrap operator signs in, then calls `POST /v1/me/sessions:terminate-all`. The figure is the
+  operation's `applied_at` less its `created_at`: acceptance is the committed operation, and
+  `applied` is written only once the read-back finds the session list empty (§Containment as Built). The kernel's
+  own list is read through the Admin API, and the refresh token issued at the sign-in must be refused.
+- The figure goes to the job summary against two bounds. `IDENTITY_SECURITY_COMMAND_BUDGET` (2 s) is
+  the inline wait: above it is a warning. `SAD-001 §7.7`'s 60-second propagation budget for the
+  Session class is the declared bound, and above it the job fails [R18].
+
 ### Kernel Compatibility
 
 - The pinned Keycloak release passes session list/delete, user logout, credential
@@ -915,3 +926,4 @@ degradation.
 | R15 | Keycloak, *Server Administration Guide*, Authentication flows, the built-in browser flow, <https://www.keycloak.org/docs/latest/server_admin/index.html>, accessed 2026-10-03: "The first execution is the Username Password Form, an authentication type that renders the username and password page. It is marked as required, so the user must enter a valid username and password." |
 | R16 | STD-IAM-002 1.4.0, *Token and Verification Profile*, §3.2: the kernel writes `sid` into its access tokens, "the session identifier OpenID Connect logout defines". |
 | R17 | Keycloak 26.7.5, *Server Administration Guide*, Registering WebAuthn credentials using AIA, source `docs/documentation/server_admin/topics/authentication/webauthn.adoc` at tag 26.7.5, accessed 2026-10-03: "The actions *Webauthn Register* (`kc_action=webauthn-register`) and *Webauthn Register Passwordless* (`kc_action=webauthn-register-passwordless`) are available for the applications if enabled in the Required actions tab." |
+| R18 | SAD-001 §7.7, *Revocation Classes and Enforcement*: "The propagation budget is 60 seconds as the planning figure, against an operational target below 10 seconds"; Session class: "kernel session removal", maximum delay "60s + class"; and "the production gate MUST include measured acceptance-to-enforcement evidence for every class in the table above." |

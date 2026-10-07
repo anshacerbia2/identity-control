@@ -28,7 +28,6 @@ BEGIN
       INTO missing
       FROM (VALUES
               ('identity.principal_mapping'),
-              ('identity.projection_cursor'),
               ('identity.bootstrap_ceremony'),
               ('identity.client_registration'),
               ('identity.reconcile_run'),

@@ -513,6 +513,20 @@ curl -fsS http://127.0.0.1:8082/readyz
 
 The service is never without an accepted key while this runs.
 
+For the two Keycloak administration credentials, `rotate-client-key.sh` runs the five steps and then
+deletes the previous pair:
+
+```sh
+./rotate-client-key.sh identity-control
+./rotate-client-key.sh identity-control-registration
+```
+
+It refuses to start over a rotation left half-done, and prints no key. `deploy-dev` rehearses it on
+every run, on a kernel that lives for the job: after each rotation the new key is accepted, the
+previous one is refused as `invalid_client`, and the restarted service still reaches the kernel
+(`scripts/dev-key-rotation-proof.ps1`). The caller's key, `identity-control-caller`, rotates by the
+same five steps by hand; nothing restarts for it.
+
 The other secrets on disk: `keys/security-ref.json`, the key ring `create-security-ref-key.sh` made
 (§Updating, The investigation reads), and `keys/operator-totp.json`, the server's TOTP for the
 bootstrap operator (§Updating, The server's own TOTP). Neither is ever printed, and both are in the

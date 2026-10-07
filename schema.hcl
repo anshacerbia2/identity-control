@@ -383,47 +383,6 @@ table "bootstrap_ceremony" {
   }
 }
 
-// This service's own consumer position. The publisher registry lives in the Organization
-// Database and is never read from here.
-table "projection_cursor" {
-  schema  = schema.identity
-  comment = "Per-stream consumer watermark. TDD-identity-control-002."
-
-  column "stream" {
-    null = false
-    type = text
-  }
-
-  column "projection_version" {
-    null = false
-    type = text
-  }
-
-  // An observability watermark, not a delivery checkpoint. The priority lane may deliver
-  // a later position before an earlier lifecycle event, so delivery progress belongs to
-  // the durable broker consumer and deduplication identity stays event_id in
-  // platform.processed_event.
-  column "max_applied_stream_position" {
-    null    = false
-    type    = bigint
-    default = 0
-  }
-
-  column "last_snapshot_mark" {
-    null = true
-    type = bigint
-  }
-
-  column "last_reconciled_at" {
-    null = true
-    type = timestamptz
-  }
-
-  primary_key {
-    columns = [column.stream]
-  }
-}
-
 // Desired state for one protocol client or protected resource. TDD-identity-control-003.
 //
 // The reconciler applies whatever this row says, so it is a security control in its own right:
