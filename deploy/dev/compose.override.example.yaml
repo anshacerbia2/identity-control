@@ -1,0 +1,28 @@
+# Copy to compose.override.yaml beside compose.yaml for what is this host's alone. It is git-ignored,
+# and `docker compose` reads it after compose.yaml. Every value below is an example, from the
+# development server this stack was first stood up on; take yours from your host.
+#
+# Do not rename the project or the networks here: the server's volume and the network
+# organization-control joins are named after them, and a rename strands both.
+
+services:
+  # Builds where the network intercepts TLS to proxy.golang.org. GOPROXY=direct in .env does the
+  # same; this is for a host that prefers to keep it out of .env.
+  migrate:
+    build: { args: { GOPROXY: direct } }
+  identity-control:
+    build: { args: { GOPROXY: direct } }
+
+  # The Control Database on loopback, for a laptop replica through the tunnel
+  # (README.md §One-off tasks, Running the code from a laptop). Owner-only on the tunnel.
+  postgres:
+    ports: ["127.0.0.1:5433:5432"]
+
+# Subnets pinned clear of what else the host uses (a CNI, the LAN, docker0, a VPN pool).
+networks:
+  internal:
+    ipam:
+      config: [{ subnet: 172.28.242.0/24 }]
+  api:
+    ipam:
+      config: [{ subnet: 172.28.243.0/24 }]

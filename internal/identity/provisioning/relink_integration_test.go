@@ -48,8 +48,7 @@ func newPortability(t *testing.T) *portability {
 	t.Cleanup(pool.Close)
 	if err := pool.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
 		for _, statement := range []string{
-			`DELETE FROM identity.principal_finding WHERE principal_id IN
-			   (SELECT principal_id FROM identity.principal_mapping WHERE realm = $1)`,
+			`DELETE FROM identity.principal_finding WHERE realm = $1`,
 			`DELETE FROM identity.principal_relink WHERE principal_id IN
 			   (SELECT principal_id FROM identity.principal_mapping WHERE realm = $1)`,
 			`DELETE FROM identity.principal_mapping WHERE realm = $1`,
@@ -207,9 +206,9 @@ func TestReconcileRecoversPendingAndSweeps(t *testing.T) {
 	p := newPortability(t)
 	created := p.create("swept.user")
 	p.kernel.DeleteUser(p.user(created.PrincipalID).ID)
-	recovered, dangling, err := p.provisioner.Reconcile(context.Background())
-	if err != nil || recovered != 0 || dangling != 1 {
-		t.Errorf("Reconcile = %d recovered, %d dangling, %v", recovered, dangling, err)
+	result, err := p.provisioner.Reconcile(context.Background())
+	if err != nil || result != (provisioning.SweepResult{Dangling: 1}) {
+		t.Errorf("Reconcile = %+v, %v", result, err)
 	}
 }
 

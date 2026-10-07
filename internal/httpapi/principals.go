@@ -31,7 +31,8 @@ type Provisioner interface {
 	Create(ctx context.Context, req provisioning.CreateRequest) (provisioning.Response, error)
 	Relink(ctx context.Context, req provisioning.RelinkRequest) (provisioning.RelinkResult, error)
 	Dangling(ctx context.Context) ([]provisioning.DanglingFinding, error)
-	Reconcile(ctx context.Context) (recovered, dangling int, err error)
+	Unmapped(ctx context.Context) ([]provisioning.UserFinding, error)
+	Reconcile(ctx context.Context) (provisioning.SweepResult, error)
 }
 
 // Principals serves the Principal surface.
@@ -173,19 +174,34 @@ func (h *Principals) Dangling(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"dangling": found})
 }
 
-// Reconcile handles POST /v1/principals:reconcile: pending recovery and the dangling-mapping sweep
-// now, as the schedule runs them.
+// Unmapped handles GET /v1/principals:unmapped: open findings about kernel users no mapping accounts
+// for, unmapped, orphan or duplicate (TDD-identity-control-001 1.13.0).
+func (h *Principals) Unmapped(w http.ResponseWriter, r *http.Request) {
+	if _, ok := callerPrincipal(r); !ok {
+		httpapi.Problem(w, r, httpapi.AuthenticationRequired, "The request carries no authenticated caller")
+		return
+	}
+	found, err := h.provisioner.Unmapped(r.Context())
+	if err != nil {
+		httpapi.Problem(w, r, httpapi.Internal, "The unmapped users could not be read")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"unmapped": found})
+}
+
+// Reconcile handles POST /v1/principals:reconcile: pending recovery and the Principal sweep now, as
+// the schedule runs them.
 func (h *Principals) Reconcile(w http.ResponseWriter, r *http.Request) {
 	if _, ok := callerPrincipal(r); !ok {
 		httpapi.Problem(w, r, httpapi.AuthenticationRequired, "The request carries no authenticated caller")
 		return
 	}
-	recovered, dangling, err := h.provisioner.Reconcile(r.Context())
+	result, err := h.provisioner.Reconcile(r.Context())
 	if err != nil {
 		httpapi.Problem(w, r, httpapi.DependencyUnavailable, "The identity kernel could not be enumerated; retry")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]int{"recovered": recovered, "dangling": dangling})
+	writeJSON(w, http.StatusOK, result)
 }
 
 // writeProvisioningError maps a domain error onto the compiled problem registry.

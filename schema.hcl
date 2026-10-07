@@ -214,15 +214,16 @@ table "principal_relink" {
 // user deleted on purpose must not come back by itself.
 table "principal_finding" {
   schema  = schema.identity
-  comment = "A dangling mapping: an active Principal whose Keycloak user is gone. TDD-identity-control-001."
+  comment = "What the Principal sweep found: a dangling mapping, or an unmapped, orphan or duplicate kernel user. TDD-identity-control-001 1.13.0."
 
   column "finding_id" {
     null = false
     type = uuid
   }
 
+  // Null for an unmapped or an orphan finding: no mapping accounts for the user.
   column "principal_id" {
-    null = false
+    null = true
     type = uuid
   }
 
@@ -234,7 +235,31 @@ table "principal_finding" {
   column "keycloak_user_id" {
     null    = false
     type    = text
-    comment = "The user the mapping pointed at when it was found missing."
+    comment = "The kernel user the finding is about: the mapping's missing user, or the user no mapping accounts for."
+  }
+
+  // The realm the kernel user is in. A finding without a Principal has no mapping to read it from.
+  column "realm" {
+    null = false
+    type = text
+  }
+
+  column "claimed_principal_id" {
+    null    = true
+    type    = text
+    comment = "An orphan's identifier: what the user carries, which no mapping holds and which may not parse."
+  }
+
+  column "username" {
+    null    = true
+    type    = text
+    comment = "The kernel user's username when found, so whoever triages it can find the user."
+  }
+
+  column "user_disabled" {
+    null    = false
+    type    = boolean
+    default = false
   }
 
   column "detected_at" {
@@ -264,19 +289,29 @@ table "principal_finding" {
     on_delete   = NO_ACTION
   }
 
-  // One open finding per Principal: a later sweep that still finds the user missing keeps it.
-  index "principal_finding_open" {
+  // One open finding per class and kernel user: a later sweep that still finds it keeps it. A
+  // duplicate is one finding per extra user, so the key is the user rather than the Principal.
+  index "principal_finding_open_user" {
     unique  = true
-    columns = [column.principal_id]
+    columns = [column.realm, column.finding_class, column.keycloak_user_id]
     where   = "resolved_at IS NULL"
   }
 
+  index "principal_finding_principal" {
+    columns = [column.principal_id]
+    where   = "principal_id IS NOT NULL"
+  }
+
   check "principal_finding_class_check" {
-    expr = "finding_class IN ('dangling')"
+    expr = "finding_class IN ('dangling', 'unmapped', 'orphan', 'duplicate')"
   }
 
   check "principal_finding_resolution_check" {
-    expr = "(resolved_at IS NULL) = (resolution IS NULL) AND (resolution IS NULL OR resolution IN ('relinked', 'user_present'))"
+    expr = "(resolved_at IS NULL) = (resolution IS NULL) AND (resolution IS NULL OR resolution IN ('relinked', 'user_present', 'user_absent'))"
+  }
+
+  check "principal_finding_subject_check" {
+    expr = "(finding_class IN ('dangling', 'duplicate') AND principal_id IS NOT NULL AND claimed_principal_id IS NULL) OR (finding_class = 'unmapped' AND principal_id IS NULL AND claimed_principal_id IS NULL) OR (finding_class = 'orphan' AND principal_id IS NULL AND claimed_principal_id IS NOT NULL)"
   }
 }
 
@@ -755,7 +790,7 @@ table "registration_finding" {
   }
 
   check "registration_finding_field_check" {
-    expr = "field_class IS NULL OR field_class IN ('redirect_uris', 'token_lifespan', 'audience_scope', 'signing_algorithm', 'profile', 'client_keys', 'suspension', 'token_format')"
+    expr = "field_class IS NULL OR field_class IN ('redirect_uris', 'token_lifespan', 'audience_scope', 'signing_algorithm', 'profile', 'client_keys', 'suspension', 'token_format', 'audience')"
   }
 
   check "registration_finding_class_check" {
@@ -1190,6 +1225,123 @@ table "workload_owner_change" {
   }
 }
 
+// What the workload sweep found (TDD-identity-control-004 1.5.0): a workload unused past the
+// threshold, or one whose owner's review is overdue. Kept after it resolves; the runtime deletes none.
+table "workload_finding" {
+  schema  = schema.identity
+  comment = "A workload unused past the threshold, or whose owner review is overdue. TDD-identity-control-004 1.5.0."
+
+  column "finding_id" {
+    null = false
+    type = uuid
+  }
+
+  column "principal_id" {
+    null = false
+    type = uuid
+  }
+
+  column "finding_class" {
+    null = false
+    type = text
+  }
+
+  column "detected_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+
+  column "resolved_at" {
+    null = true
+    type = timestamptz
+  }
+
+  column "resolution" {
+    null = true
+    type = text
+  }
+
+  primary_key {
+    columns = [column.finding_id]
+  }
+
+  foreign_key "workload_finding_principal_id_fkey" {
+    columns     = [column.principal_id]
+    ref_columns = [table.workload.column.principal_id]
+    on_update   = NO_ACTION
+    on_delete   = NO_ACTION
+  }
+
+  // One open finding per workload and class: a later sweep that still finds it keeps it.
+  index "workload_finding_open" {
+    unique  = true
+    columns = [column.principal_id, column.finding_class]
+    where   = "resolved_at IS NULL"
+  }
+
+  check "workload_finding_class_check" {
+    expr = "finding_class IN ('unused', 'review_overdue')"
+  }
+
+  check "workload_finding_resolution_check" {
+    expr = "(resolved_at IS NULL) = (resolution IS NULL) AND (resolution IS NULL OR resolution IN ('seen', 'reviewed', 'stopped'))"
+  }
+}
+
+// An owner's periodic review of a workload (TDD-identity-control-004 1.5.0 §Periodic Review, CIS 5.5):
+// who vouched for it, when, and what they said. Insert-only, so the record of who answered for a
+// credential cannot be rewritten by whoever holds it later.
+table "workload_review" {
+  schema  = schema.identity
+  comment = "An insert-only record of an owner's review of a workload. TDD-identity-control-004 1.5.0."
+
+  column "review_id" {
+    null = false
+    type = uuid
+  }
+
+  column "principal_id" {
+    null = false
+    type = uuid
+  }
+
+  column "reviewed_by" {
+    null = false
+    type = uuid
+  }
+
+  column "statement" {
+    null = false
+    type = text
+  }
+
+  column "reviewed_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+
+  primary_key {
+    columns = [column.review_id]
+  }
+
+  foreign_key "workload_review_principal_id_fkey" {
+    columns     = [column.principal_id]
+    ref_columns = [table.workload.column.principal_id]
+    on_update   = NO_ACTION
+    on_delete   = NO_ACTION
+  }
+
+  index "workload_review_by_workload" {
+    columns = [column.principal_id, column.reviewed_at]
+  }
+
+  check "workload_review_statement_check" {
+    expr = "btrim(statement) <> ''"
+  }
+}
+
 // How a client created before this service existed came under registration: who adopted it, when,
 // why, what it held at that moment, and which repairable differences the adoption converged
 // (ADR-IAM-001 §5.12). Insert-only, so the record outlives whoever adopted it.
@@ -1287,9 +1439,16 @@ table "registration_state_change" {
     type = text
   }
 
+  // Null for an automatic change, which nobody asked for (TDD-identity-control-003 1.34.0).
   column "changed_by" {
-    null = false
+    null = true
     type = uuid
+  }
+
+  column "automatic" {
+    null    = false
+    type    = boolean
+    default = false
   }
 
   column "reason" {
@@ -1324,6 +1483,10 @@ table "registration_state_change" {
 
   check "registration_state_change_transition_check" {
     expr = "(from_state = 'active' AND to_state IN ('suspended', 'retired')) OR (from_state = 'suspended' AND to_state IN ('active', 'retired'))"
+  }
+
+  check "registration_state_change_actor_check" {
+    expr = "(changed_by IS NULL) = automatic"
   }
 }
 

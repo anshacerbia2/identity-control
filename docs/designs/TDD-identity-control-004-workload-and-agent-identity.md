@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-004
   title: Workload and Bounded Agent Identity
   owner: Core Platform Team
-  version: 1.4.1
+  version: 1.5.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-11
-  last_reviewed: 2026-10-04
+  last_reviewed: 2026-10-07
   parent_sad: SAD-001
 ---
 
@@ -103,12 +103,13 @@ a cryptographic one.
 | `AgentDelegationService` | `internal/workload` | Bounded delegation for governed agents |
 | `WorkloadReconciler` | `internal/reconcile` | Orphan sweep, unused-workload detection |
 
-**Built so far.** `WorkloadProvisioner` is built: creation, pending-workload recovery, and reading a
-workload. Of `OwnershipRegistry`, reassignment and the lifecycle (§Suspension, Restoration, and
-Retirement) are built. Orphan detection needs the owner-lifecycle events this service does not
-consume yet; the suspension it leads to is the one built here. `AgentDelegationService`,
-`WorkloadReconciler`, unused detection and periodic review are not built, and an `agent` workload is
-refused until delegation is.
+**Built so far.** `WorkloadProvisioner` is built: creation, pending-workload recovery, reading a
+workload, and rebuilding its client (1.5.0, §Rebuilding a Workload's Client). `OwnershipRegistry` is
+built: reassignment, the lifecycle (§Suspension, Restoration, and Retirement), orphan detection and
+the owner's periodic review (1.5.0). The `WorkloadReconciler` is built in `internal/workload`
+(`sweep.go`), not `internal/reconcile`, because every rule it applies is the workload's: orphan
+handling, unused detection and overdue reviews (1.5.0). `AgentDelegationService` is not built, and an
+`agent` workload is refused until it is.
 
 ### Creation
 
@@ -170,7 +171,8 @@ retry of the same request replays the workload rather than waiting on it forever
 
 **A workload's client is never recreated alone.** An operator's reconcile that would recreate a
 deleted client refuses a workload's, because a new client has a new service-account user without the
-workload's identity. Rebuilding a workload's client is a workload operation and is not built yet.
+workload's identity. Rebuilding a workload's client is a workload operation (1.5.0, §Rebuilding a
+Workload's Client).
 
 ## Data Model
 
@@ -223,6 +225,34 @@ complete it. The runtime role deletes no workload row, and `workload_owner_chang
 so the record of who answered for a credential at a given time cannot be rewritten by whoever holds
 the workload now (`grants.sql`).
 
+```sql
+CREATE TABLE identity.workload_finding (                    -- 1.5.0
+    finding_id     UUID        PRIMARY KEY,
+    principal_id   UUID        NOT NULL REFERENCES identity.workload(principal_id),
+    finding_class  TEXT        NOT NULL CHECK (finding_class IN ('unused', 'review_overdue')),
+    detected_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    resolved_at    TIMESTAMPTZ,
+    resolution     TEXT,
+    CHECK ((resolved_at IS NULL) = (resolution IS NULL)
+        AND (resolution IS NULL OR resolution IN ('seen', 'reviewed', 'stopped')))
+);
+CREATE UNIQUE INDEX workload_finding_open ON identity.workload_finding (principal_id, finding_class)
+    WHERE resolved_at IS NULL;
+
+CREATE TABLE identity.workload_review (                     -- 1.5.0
+    review_id      UUID        PRIMARY KEY,
+    principal_id   UUID        NOT NULL REFERENCES identity.workload(principal_id),
+    reviewed_by    UUID        NOT NULL,
+    statement      TEXT        NOT NULL CHECK (btrim(statement) <> ''),
+    reviewed_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+A finding is kept after it resolves, and the runtime deletes none. A review is insert-only: the
+record that an owner vouched for a credential at a given time is not rewritable by whoever holds the
+workload later. Orphaning needs no table of its own: the workload's state and `orphaned_at` are the
+record, and the age is read from them.
+
 `purpose` is free text and is required. A workload whose purpose nobody wrote down is a
 workload nobody can decide to retire, and the review that should retire it will defer
 instead.
@@ -260,8 +290,12 @@ POST   /v1/workloads/{principal_id}:reassign           built
 POST   /v1/workloads/{principal_id}:suspend           built
 POST   /v1/workloads/{principal_id}:restore           built
 POST   /v1/workloads/{principal_id}:retire            built
-GET    /v1/workloads:orphaned
-GET    /v1/workloads:unused
+POST   /v1/workloads/{principal_id}:review            built (1.5.0), the owner's
+POST   /v1/workloads/{principal_id}:rebuild           built (1.5.0)
+GET    /v1/workloads:orphaned                          built (1.5.0)
+GET    /v1/workloads:unused                            built (1.5.0)
+GET    /v1/workloads:reviews-overdue                   built (1.5.0)
+POST   /v1/workloads:sweep                             built (1.5.0)
 
 POST   /v1/agents/{principal_id}/delegations
 POST   /v1/agents/{principal_id}/delegations/{delegation_id}:revoke
@@ -274,6 +308,23 @@ JWK. The creating Principal is the authenticated caller. It answers `201` with t
 names its `registration_id` and carries no kernel identifier and nothing secret. An `agent` is
 refused until bounded delegation is built. `:reassign` takes `{"owner_principal_id": ...}` and an
 `X-Administrative-Reason`.
+
+1.5.0 adds, every one a provider's at `aal2` but `:review`:
+
+- **`:review`** is the owner's attestation (§Periodic Review). It takes an `X-Administrative-Reason`,
+  which is recorded as the owner's statement, and answers the workload. Only the workload's current
+  owner may call it, a provider included only when it is that owner; anyone else is answered `404`,
+  so a caller cannot learn which workloads exist. The workload must be `active`.
+- **`:rebuild`** takes an `X-Administrative-Reason` (§Rebuilding a Workload's Client) and answers the
+  workload.
+- **`:orphaned`**, **`:unused`** and **`:reviews-overdue`** list the workloads in each condition,
+  oldest first, each with its `principal_id`, `client_key`, `display_name`, owner and the instant the
+  condition began: `{"workloads": [...]}`. An orphaned workload carries its `stage`, `reminder`,
+  `escalated` or `suspended`.
+- **`:sweep`** runs the workload sweep now, as the schedule does, and answers what it did:
+  `{"orphaned", "reclaimed", "suspended", "unused", "reviews_overdue"}`.
+
+A workload also carries `last_reviewed_at` and `review_due_at`.
 
 ### Token Shape
 
@@ -363,6 +414,27 @@ become an outage.
 The workload keeps running while orphaned. That is deliberate: the grace period buys
 the reassignment that ought to happen, and the escalation makes ignoring it
 progressively harder. Suspension at thirty days is the backstop, and it is reversible.
+
+**As built (1.5.0).** The owner is a Principal of this service, so its end is read from this
+service's own record rather than awaited as an event: the workload sweep, every
+`IDENTITY_WORKLOAD_SWEEP_INTERVAL` and on `POST /v1/workloads:sweep`, orphans every active workload
+whose owner's mapping is not `active`. `retired` and `quarantined` are the `TDD-identity-control-001` states of an owner
+whose identity ended or broke, and `suspended` is the one a provider's containment leaves, the kernel
+user disabled (`TDD-identity-control-005`). A day's sweep is well inside a thirty-day grace period.
+
+- **The reminder and the escalation are alerts.** Under seven days the sweep logs a `WARN` naming
+  the workload and its owner; from seven days, an `ERROR`. Telling the owner's administrative chain
+  and the Tenant's administrators needs the Notification Platform, and knowing who a Tenant's
+  administrators are is organization-control's, so neither is sent from here yet; the log line and
+  `GET /v1/workloads:orphaned` are the signal.
+- **Thirty days suspends**, through the lifecycle above, recorded `automatic` in
+  `registration_state_change` with the rule as its reason (`TDD-identity-control-003` 1.34.0). It
+  is reversible: a provider reassigns, then restores.
+- **An owner restored before then reclaims the workload.** A provider's restore of a suspended owner
+  (`TDD-identity-control-005`) makes the same person answerable again, and reassigning a workload to
+  the owner it already has is refused. So an orphaned workload whose owner's mapping is `active` again
+  returns to `active` at the next sweep, `orphaned_at` cleared, logged at `WARN`. A reassignment
+  remains the way to move it to anyone else.
 
 ### Revocation Reaching a Workload
 
@@ -459,6 +531,14 @@ weekly sweep:
         notify the owner
 ```
 
+**As built (1.5.0).** `last_seen_at` is written by the kernel event record from each successful
+`CLIENT_LOGIN` of the workload's service-account user (`TDD-identity-control-007` 1.1.0). A workload
+never seen is measured from its activation, so one created and never used is found too. The check
+runs in the workload sweep, daily rather than weekly: the finding is opened once, so the cadence only
+decides how soon it appears. "Notify the owner" is a `WARN` naming the workload and its owner, for the
+reason the orphan reminder is one. The finding resolves `seen` once the workload authenticates again,
+and `stopped` once it is suspended or retired.
+
 An unused finding is not automatic retirement. A quarterly job legitimately sits idle
 for eighty-nine days. The finding puts the decision in front of the owner, who is the
 only party who can make it.
@@ -475,7 +555,59 @@ purpose still holds, and whether its owner and team are right. CIS 5.5 requires 
 inventory to name the owner, the purpose and a review date, reviewed at least quarterly, and NIST
 SP 800-53 AC-2(j) requires accounts to be reviewed at a defined frequency. An overdue review is a
 finding for the owner and then the Tenant administrator, on the orphan escalation's path. The review
-record and its schedule are not built.
+record and its schedule are built in 1.5.0:
+
+- **The owner attests** with `POST /v1/workloads/{principal_id}:review`, its statement as the reason,
+  and the review is recorded insert-only in `identity.workload_review`. A review confirms the three
+  things hold. One that does not hold is changed by what changes it: `:reassign` for the owner, a
+  provider's `:suspend` and `:retire` for a workload no longer needed. A review is an owner's word,
+  recorded with who gave it, which is what CIS 5.5's review date stands for.
+- **A review is due** `IDENTITY_WORKLOAD_REVIEW_INTERVAL` after the last one, or after activation.
+  Past it, the sweep opens a `review_overdue` finding and logs a `WARN` for the owner; seven days past
+  it (`IDENTITY_WORKLOAD_ORPHAN_ESCALATE_AFTER`), an `ERROR` for the Tenant's administrators, on the
+  orphan escalation's path. A review resolves it `reviewed`, and a suspension or retirement `stopped`.
+- **An overdue review suspends nothing.** CIS 5.5 and AC-2(j) ask for the review, not for an
+  automatic consequence of missing it, and suspending a running workload because a form was late is
+  the outage §Orphan Handling avoids. The owner who stops answering is the orphan case, which does
+  suspend.
+
+### Rebuilding a Workload's Client
+
+A workload's client deleted in the console takes its service-account user with it, and with it the
+workload's identity in the kernel: the registration sweep holds the client `missing`, and the
+Principal sweep reports the mapping dangling. An operator's reconcile refuses to recreate it, because
+a recreated client's new service-account user would carry no `principal_id`. `:rebuild` is the
+workload's own recreation, with a reason (1.5.0):
+
+```text
+rebuild(workload, reason):
+    refuse unless the workload is active or orphaned                    409
+    read its client; refuse while the kernel holds it                   409
+    an unknown answer is not an absent client                          503
+    lock the workload and its registration
+    create the client from desired state, with its active and retiring keys, and scope it
+    read the new client's service-account user; write the workload's identity on it
+    bind the mapping to that user, recording the move in principal_relink with who and why
+    record the registration's new client; its open 'missing' finding becomes 'recreated'
+    resolve the mapping's open dangling finding as 'relinked'
+    commit; on any failure after the client was created, delete that client and roll back
+```
+
+- **The same `principal_id`, the same keys.** Every Membership and record naming the workload stays
+  valid, and the key pairs that authenticated it before authenticate it again, and no other, as an
+  operator's recreation of any other client does.
+- **Not for a suspended workload.** Its client is held disabled; a suspended workload whose client is
+  gone is retired, as a suspended registration whose client is gone is
+  (`TDD-identity-control-003` §Suspension, Restoration, and Retirement).
+- **Why the kernel is written inside the transaction.** A rebuild that committed its record and then
+  failed to create the client would point the mapping at nothing; one that created the client and then
+  failed to commit would leave a client no record knows. Creating inside the transaction and deleting
+  the client on the way out of a failure leaves neither: a client that is created and then outlives a
+  failed commit is held by the registration's `client_key`, which the next rebuild refuses until an
+  operator deletes it, so a failure errs toward a stop, as every lifecycle path here does.
+- **The Principal sweep does not take a rebuild in flight for a duplicate.** The new service-account
+  user carries the workload's `principal_id` before the mapping is bound to it, while the old user is
+  gone, which `TDD-identity-control-001` 1.13.0 reads as a rebind rather than a second user.
 
 ### Agent Delegation
 
@@ -501,14 +633,16 @@ event that revokes the human.
 
 | Variable | Default | Purpose |
 | :-- | :-- | :-- |
-| `IDENTITY_WORKLOAD_ORPHAN_ESCALATE_AFTER` | `7d` | First escalation |
-| `IDENTITY_WORKLOAD_ORPHAN_SUSPEND_AFTER` | `30d` | Automatic suspension |
-| `IDENTITY_WORKLOAD_UNUSED_THRESHOLD` | `90d` | Unused finding threshold |
+| `IDENTITY_WORKLOAD_ORPHAN_ESCALATE_AFTER` | `168h` (7 days) | First escalation, of an orphan and of an overdue review |
+| `IDENTITY_WORKLOAD_ORPHAN_SUSPEND_AFTER` | `720h` (30 days) | Automatic suspension |
+| `IDENTITY_WORKLOAD_UNUSED_THRESHOLD` | `2160h` (90 days) | Unused finding threshold |
 | `IDENTITY_AGENT_DELEGATION_MAX_DURATION` | `24h` | Ceiling on one delegation |
-| `IDENTITY_WORKLOAD_SWEEP_INTERVAL` | `24h` | Orphan and unused sweep cadence |
+| `IDENTITY_WORKLOAD_SWEEP_INTERVAL` | `24h` | Orphan, unused and review sweep cadence |
 | `IDENTITY_WORKLOAD_REVIEW_INTERVAL` | `2160h` (90 days) | Periodic owner review |
 
-None of these is read yet: orphan handling, unused detection, delegation and review are not built.
+They are Go durations, so the days are written in hours. The escalation must be shorter than the
+suspension, and both positive; a misconfiguration is refused at startup. Every one but the delegation
+ceiling is read from 1.5.0; delegation is not built.
 Pending-workload recovery runs on the registration sweep's schedule
 (`IDENTITY_REGISTRATION_RECONCILE_INTERVAL`) and uses `IDENTITY_PENDING_RECOVERY_AFTER`.
 
@@ -538,7 +672,16 @@ Pending-workload recovery runs on the registration sweep's schedule
 - Revoking the owner's Membership marks every workload they own `orphaned`, and none of
   them stops working.
 - Escalation fires at the configured ages.
-- Suspension at thirty days is applied, is reversible, and keeps the record.
+- Suspension at thirty days is applied, is reversible, and keeps the record, recorded `automatic`.
+- An owner suspended, quarantined or retired orphans the workload, which keeps working; the owner
+  restored before thirty days reclaims it.
+- A workload unused past the threshold is found once, and resolved when it authenticates again; a
+  successful `CLIENT_LOGIN` moves `last_seen_at`.
+- A review is the owner's alone, is recorded insert-only, and resolves an overdue finding; an overdue
+  review suspends nothing.
+- A rebuild refuses while the client exists, creates one holding the registered keys, binds the
+  mapping to its service-account user under the same `principal_id`, and leaves nothing behind when
+  it fails.
 - Reassignment to a principal that is not an active human is refused; a reassignment the kernel
   refuses changes nothing; one that succeeds names the new owner on the record, the mapping and
   the service-account user, and records who and why.
@@ -633,5 +776,6 @@ credential compromise, agent delegation review, and unused workload retirement.
 | Depends on | `TDD-organization-control-002` — workload Membership and its revocation |
 | Depends on | `TDD-identity-kernel-001` §Claim Projection — a workload's claim source is its client's service-account user, and its client holds no `acr` scope |
 | Conforms to | NIST SP 800-53 Rev. 5 AC-2(3)(b), AC-2(j) — disable within a defined period once unowned; review at a defined frequency |
-| Conforms to | CIS Controls v8 5.5 — service-account inventory with owner, purpose and review date, reviewed at least quarterly |
+| Conforms to | CIS Controls v8 5.5 — service-account inventory with owner, purpose and review date, reviewed at least quarterly (`STD-IAM-001` [R19]) |
+| Conforms to | NIST SP 800-53 Rev. 5 AC-2(j) — review at a defined frequency (`ADR-IAM-003` [R3]) |
 | Evidence | Google Cloud, Microsoft Entra, AWS IAM and Kubernetes documentation on workload-identity scope, ownership, leavers and unused identities, surveyed 2026-09-30 |

@@ -69,6 +69,12 @@ type Client struct {
 	// token_format field class.
 	RFC9068       bool
 	ClientIDClaim string
+
+	// Audience is the client's audience mappers, sorted: the resource of each one written as the
+	// registration path writes it, and "mapper:<name>" for any other audience mapper, so a hand-made
+	// mapper is never mistaken for a declared resource (the audience field class,
+	// TDD-identity-control-003 1.33.0).
+	Audience []string
 }
 
 // ClientCredential is a client's authentication configuration as the kernel holds it.
@@ -586,6 +592,15 @@ func audienceOf(mapper map[string]any) string {
 	return resource
 }
 
+// audienceEntry is one audience mapper as Client.Audience records it: the resource when the mapper is
+// the one audienceMapper writes for it, and its name otherwise.
+func audienceEntry(mapper map[string]any) string {
+	if resource := audienceOf(mapper); resource != "" && stringField(mapper, "name") == "audience-"+resource {
+		return resource
+	}
+	return "mapper:" + stringField(mapper, "name")
+}
+
 // ensureClientIDMapper creates the client_id mapper, or rewrites one that writes another value.
 func (a *Admin) ensureClientIDMapper(ctx context.Context, realm Realm, client ClientUUID, value string) error {
 	models := a.clientPath(realm, client) + "/protocol-mappers/models"
@@ -689,7 +704,11 @@ func clientFrom(representation map[string]any) (Client, error) {
 		if stringField(mapper, "name") == ClientIDMapper {
 			client.ClientIDClaim = clientIDValue(mapper)
 		}
+		if stringField(mapper, "protocolMapper") == audienceMapperType {
+			client.Audience = append(client.Audience, audienceEntry(mapper))
+		}
 	}
+	sort.Strings(client.Audience)
 	if raw, ok := attributes[AttrAccessTokenLifespan].(string); ok && strings.TrimSpace(raw) != "" {
 		lifespan, err := strconv.Atoi(strings.TrimSpace(raw))
 		if err != nil {

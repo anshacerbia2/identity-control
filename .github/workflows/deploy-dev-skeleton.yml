@@ -1,0 +1,20 @@
+name: deploy-dev skeleton
+
+# STD-GLB-009 §Development Server Deployment: deploy/dev follows the service skeleton (the README's
+# ten sections, the compose rules, the files a server-deployed service carries). Its own workflow
+# rather than a job in ci.yml: a reusable workflow that cannot be resolved fails the whole calling
+# file, and the verify job must not depend on it.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  deploy-dev-skeleton:
+    uses: anshacerbia2/scnehaux-architecture/.github/workflows/deploy-dev-skeleton.yml@main
+    with:
+      kind: service

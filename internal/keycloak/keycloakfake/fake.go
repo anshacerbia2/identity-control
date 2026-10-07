@@ -22,6 +22,7 @@ package keycloakfake
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 
@@ -70,6 +71,15 @@ type Client struct {
 	FailList    error
 	FailDisable error
 	FailWrite   error
+
+	// ListServiceAccounts makes ListUsers return service-account users after every other user. Off,
+	// the listing omits them, as the kernel's plain user listing may; the sweep is correct either way
+	// (TDD-identity-control-001 1.13.0), and this switch is how a test proves it.
+	ListServiceAccounts bool
+
+	// FailListAfter makes ListUsers fail once this many pages have been served, so an enumeration
+	// that fails part way can be reached. Zero never fails.
+	FailListAfter int
 
 	// Calls counts each operation, so a test can assert that a repeated idempotency key
 	// performed no remote call.
@@ -247,12 +257,26 @@ func (c *Client) ListUsers(ctx context.Context, realm keycloak.Realm, page keycl
 	// Insertion order, reconstructed from the assigned identifier. A map iteration order
 	// would make a paged sweep return overlapping or missing pages between calls, which
 	// would make a reconciliation test pass or fail at random.
+	if c.FailListAfter > 0 && c.Calls.ListUsers > c.FailListAfter {
+		return nil, fmt.Errorf("keycloakfake: the listing failed part way: %w", keycloak.ErrUnavailable)
+	}
+
 	ordered := make([]keycloak.User, 0, len(c.users))
 	for i := 1; i <= c.nextID; i++ {
 		entry, ok := c.users[keycloak.UserID(fmt.Sprintf("kc-user-%04d", i))]
 		if ok && entry.realm == realm {
 			ordered = append(ordered, entry.user)
 		}
+	}
+	if c.ListServiceAccounts {
+		accounts := make([]keycloak.User, 0)
+		for _, entry := range c.users {
+			if entry.realm == realm && entry.user.ServiceAccount {
+				accounts = append(accounts, entry.user)
+			}
+		}
+		sort.Slice(accounts, func(i, j int) bool { return accounts[i].ID < accounts[j].ID })
+		ordered = append(ordered, accounts...)
 	}
 
 	if page.First >= len(ordered) {
@@ -313,7 +337,8 @@ func (c *Client) GetUser(ctx context.Context, realm keycloak.Realm, userID keycl
 func (c *Client) AddServiceAccount(realm keycloak.Realm, user keycloak.User) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.users[user.ID] = stored{realm: realm, user: keycloak.User{ID: user.ID, Username: user.Username, Enabled: true}}
+	c.users[user.ID] = stored{realm: realm, user: keycloak.User{ID: user.ID, Username: user.Username, Enabled: true,
+		ServiceAccount: true}}
 }
 
 // WriteWorkloadIdentity sets a workload's claim-source attributes on a user.
@@ -361,6 +386,21 @@ func (c *Client) Seed(realm keycloak.Realm, username string, principalID id.UUID
 			SubjectType: subjectType,
 		},
 	}
+	return userID
+}
+
+// SeedClaim inserts a user carrying an identifier attribute that may not parse, as one written by
+// hand in the console would.
+func (c *Client) SeedClaim(realm keycloak.Realm, username, claimed string) keycloak.UserID {
+	userID := c.Seed(realm, username, id.Nil, keycloak.SubjectHuman)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry := c.users[userID]
+	entry.user.ClaimedPrincipalID = claimed
+	if parsed, err := id.Parse(claimed); err == nil {
+		entry.user.PrincipalID = parsed
+	}
+	c.users[userID] = entry
 	return userID
 }
 

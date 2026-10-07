@@ -22,6 +22,7 @@ type stubWorkloadService struct {
 	created    *workload.CreateRequest
 	reassigned *workload.ReassignRequest
 	lifecycle  map[string]workload.LifecycleRequest
+	reviewed   *workload.ReviewRequest
 }
 
 func (s *stubWorkloadService) act(action string, req workload.LifecycleRequest) (workload.Workload, error) {
@@ -69,6 +70,34 @@ func (s *stubWorkloadService) Reassign(_ context.Context, req workload.ReassignR
 		return workload.Workload{}, s.err
 	}
 	return workload.Workload{PrincipalID: req.PrincipalID, Owner: req.NewOwner, State: workload.StateActive}, nil
+}
+
+func (s *stubWorkloadService) Rebuild(_ context.Context, req workload.LifecycleRequest) (workload.Workload, error) {
+	return s.act("rebuild", req)
+}
+
+func (s *stubWorkloadService) Review(_ context.Context, req workload.ReviewRequest) (workload.Workload, error) {
+	s.reviewed = &req
+	if s.err != nil {
+		return workload.Workload{}, s.err
+	}
+	return workload.Workload{PrincipalID: req.PrincipalID, State: workload.StateActive}, nil
+}
+
+func (s *stubWorkloadService) Sweep(context.Context) (workload.SweepResult, error) {
+	return workload.SweepResult{Orphaned: 1, Unused: 2}, s.err
+}
+
+func (s *stubWorkloadService) Orphaned(context.Context) ([]workload.Condition, error) {
+	return []workload.Condition{{ClientKey: "orphaned-job", Stage: workload.StageEscalated}}, s.err
+}
+
+func (s *stubWorkloadService) Unused(context.Context) ([]workload.Condition, error) {
+	return []workload.Condition{{ClientKey: "idle-job"}}, s.err
+}
+
+func (s *stubWorkloadService) ReviewsOverdue(context.Context) ([]workload.Condition, error) {
+	return []workload.Condition{{ClientKey: "unreviewed-job"}}, s.err
 }
 
 func stubWorkloads(t *testing.T) *httpapi.Workloads {
@@ -300,5 +329,75 @@ func TestEveryWorkloadRouteRequiresAnAuthenticatedPrincipal(t *testing.T) {
 func TestTheWorkloadHandlerNeedsAService(t *testing.T) {
 	if _, err := httpapi.NewWorkloads(nil); err == nil {
 		t.Error("a handler without a service was built")
+	}
+}
+
+// The owner reviews its workload with a statement; anyone the service says is not the owner is
+// answered 404, and an owner token reaches no other workload action (TDD-identity-control-004 1.5.0).
+func TestAWorkloadIsReviewedByItsOwnerAlone(t *testing.T) {
+	service := &stubWorkloadService{}
+	handler := workloadHandler(t, service)
+	target, owner := mustUUID(t), mustUUID(t)
+	path := "/v1/workloads/" + target.String() + ":review"
+
+	r := asOwner(httptest.NewRequest(http.MethodPost, path, nil), owner)
+	if w := serve(handler, r); w.Code != http.StatusBadRequest || service.reviewed != nil {
+		t.Errorf("a review without a statement answered %d", w.Code)
+	}
+	r = asOwner(httptest.NewRequest(http.MethodPost, path, nil), owner)
+	r.Header.Set(httpapi.AdministrativeReasonHeader, "still needed: it exports payroll nightly")
+	if w := serve(handler, r); w.Code != http.StatusOK {
+		t.Fatalf("an owner's review answered %d: %s", w.Code, w.Body)
+	}
+	if got := service.reviewed; got == nil || got.PrincipalID != target || got.ReviewedBy != owner ||
+		got.Statement != "still needed: it exports payroll nightly" {
+		t.Errorf("review = %+v", got)
+	}
+
+	refusing := workloadHandler(t, &stubWorkloadService{err: workload.ErrNotOwner})
+	r = asOwner(httptest.NewRequest(http.MethodPost, path, nil), owner)
+	r.Header.Set(httpapi.AdministrativeReasonHeader, "r")
+	if w := serve(refusing, r); w.Code != http.StatusNotFound {
+		t.Errorf("a review by another answered %d, want 404", w.Code)
+	}
+
+	for _, action := range []string{"suspend", "rebuild", "reassign"} {
+		r := asOwner(httptest.NewRequest(http.MethodPost, "/v1/workloads/"+target.String()+":"+action, strings.NewReader(`{}`)), owner)
+		r.Header.Set(httpapi.AdministrativeReasonHeader, "r")
+		if w := serve(handler, r); w.Code != http.StatusForbidden {
+			t.Errorf("an owner's :%s answered %d, want 403", action, w.Code)
+		}
+	}
+}
+
+// A provider rebuilds a workload's client with a reason, runs the sweep, and reads what it found.
+func TestAProviderRebuildsSweepsAndListsWorkloads(t *testing.T) {
+	service := &stubWorkloadService{}
+	handler := workloadHandler(t, service)
+	target := mustUUID(t)
+	r, caller := asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/workloads/"+target.String()+":rebuild", nil))
+	r.Header.Set(httpapi.AdministrativeReasonHeader, "its client was deleted in the console")
+	if w := serve(handler, r); w.Code != http.StatusOK {
+		t.Fatalf("rebuild answered %d: %s", w.Code, w.Body)
+	}
+	if got := service.lifecycle["rebuild"]; got.PrincipalID != target || got.ChangedBy != caller {
+		t.Errorf("rebuild = %+v", got)
+	}
+	r, _ = asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/workloads:sweep", nil))
+	if w := serve(handler, r); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"orphaned":1`) {
+		t.Errorf("sweep answered %d: %s", w.Code, w.Body)
+	}
+	for path, want := range map[string]string{"/v1/workloads:orphaned": `"stage":"escalated"`,
+		"/v1/workloads:unused": "idle-job", "/v1/workloads:reviews-overdue": "unreviewed-job"} {
+		r, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, path, nil))
+		if w := serve(handler, r); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), want) {
+			t.Errorf("%s answered %d: %s", path, w.Code, w.Body)
+		}
+	}
+	failing := workloadHandler(t, &stubWorkloadService{err: workload.ErrClientPresent})
+	r, _ = asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/workloads/"+target.String()+":rebuild", nil))
+	r.Header.Set(httpapi.AdministrativeReasonHeader, "r")
+	if w := serve(failing, r); w.Code != http.StatusConflict {
+		t.Errorf("a rebuild while the client exists answered %d, want 409", w.Code)
 	}
 }

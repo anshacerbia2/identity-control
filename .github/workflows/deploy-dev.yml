@@ -99,6 +99,9 @@ jobs:
             echo "KEYS_OWNER=$(id -u):$(id -g)"
             # Short enough that Proof B sees the schedule run within the job.
             echo "IDENTITY_REGISTRATION_RECONCILE_INTERVAL=20s"
+            # Proof B scenario 6b proves the Principal sweep disables what it finds, against the live
+            # kernel, and that it never touches a service-account user (TDD-identity-control-001 1.13.0).
+            echo "IDENTITY_UNMAPPED_USERS=disable"
             # The development stand-in for the Notification Platform (TDD-identity-control-008).
             echo "IDENTITY_NOTIFICATION_DELIVERY=standin"
           } > .env
@@ -182,6 +185,18 @@ jobs:
           sudo cp "$RUNNER_TEMP/caddy-root.crt" /usr/local/share/ca-certificates/caddy-local-root.crt
           sudo update-ca-certificates
           curl -fsS https://localhost/realms/scnehaux/.well-known/openid-configuration >/dev/null
+
+      # STD-GLB-009 1.3.0: a procedure step runs in CI. deploy/dev/README.md §First start step 8 adopts
+      # the development caller with scripts/dev-adopt-caller.ps1, a plan and then -Apply, exactly as it
+      # runs here. The smoke's own step 9b then finds the caller registered already.
+      - name: the caller adoption procedure
+        run: |
+          set -a; . deploy/dev/.env; set +a
+          export IDENTITY_API_URL=http://127.0.0.1:8082 KC_BASE_URL=https://localhost
+          export IDENTITY_OPERATOR_TOTP_FILE="$RUNNER_TEMP/operator-totp.json"
+          pwsh -NoProfile -File scripts/dev-adopt-caller.ps1
+          pwsh -NoProfile -File scripts/dev-adopt-caller.ps1 -Apply
+          pwsh -NoProfile -File scripts/dev-adopt-caller.ps1 | grep -F "registered already"
 
       - name: smoke the API with a provider-scope token
         run: |

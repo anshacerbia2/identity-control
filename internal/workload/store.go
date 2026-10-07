@@ -50,7 +50,8 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)`
 // is read from the registration, the one record of it.
 const workloadColumns = `w.principal_id::text, w.registration_id::text, r.client_key, w.display_name, w.purpose,
        w.workload_type, w.owner_principal_id::text, coalesce(w.team_reference, ''), w.owner_recorded_at, w.state,
-       w.orphaned_at, w.last_seen_at, w.created_by::text, w.created_at, w.activated_at`
+       w.orphaned_at, w.last_seen_at, w.created_by::text, w.created_at, w.activated_at,
+       (SELECT max(v.reviewed_at) FROM identity.workload_review v WHERE v.principal_id = w.principal_id)`
 
 const readStatement = `SELECT ` + workloadColumns + `
 FROM identity.workload w
@@ -72,13 +73,14 @@ type scanned struct {
 	principal, registration, owner, createdBy string
 	ownerRecordedAt, createdAt                time.Time
 	orphanedAt, lastSeenAt, activatedAt       *time.Time
+	lastReviewedAt                            *time.Time
 }
 
 func (s *scanned) targets() []any {
 	w := &s.workload
 	return []any{&s.principal, &s.registration, &w.ClientKey, &w.DisplayName, &w.Purpose, &w.WorkloadType, &s.owner,
 		&w.TeamReference, &s.ownerRecordedAt, &w.State, &s.orphanedAt, &s.lastSeenAt, &s.createdBy, &s.createdAt,
-		&s.activatedAt}
+		&s.activatedAt, &s.lastReviewedAt}
 }
 
 func (s *scanned) finish() (Workload, error) {
@@ -94,6 +96,7 @@ func (s *scanned) finish() (Workload, error) {
 	}
 	w.OwnerRecordedAt, w.CreatedAt = s.ownerRecordedAt.UTC(), s.createdAt.UTC()
 	w.OrphanedAt, w.LastSeenAt, w.ActivatedAt = utc(s.orphanedAt), utc(s.lastSeenAt), utc(s.activatedAt)
+	w.LastReviewedAt = utc(s.lastReviewedAt)
 	return w, nil
 }
 
@@ -132,7 +135,26 @@ func (s *Service) one(ctx context.Context, tx db.Tx, statement string, principal
 	if err := rows.Scan(row.targets()...); err != nil {
 		return Workload{}, fmt.Errorf("workload: scan: %w", err)
 	}
-	return row.finish()
+	found, err := row.finish()
+	if err != nil {
+		return Workload{}, err
+	}
+	found.ReviewDueAt = s.reviewDue(found)
+	return found, nil
+}
+
+// reviewDue is when an active or orphaned workload's next owner review is due: the review interval
+// after the latest review, or after activation when there is none.
+func (s *Service) reviewDue(w Workload) *time.Time {
+	if (w.State != StateActive && w.State != StateOrphaned) || w.ActivatedAt == nil {
+		return nil
+	}
+	base := *w.ActivatedAt
+	if w.LastReviewedAt != nil && w.LastReviewedAt.After(base) {
+		base = *w.LastReviewedAt
+	}
+	due := base.Add(s.cfg.ReviewInterval).UTC()
+	return &due
 }
 
 // pendingOlderThan reads pending workloads created before the cutoff, with the idempotency claim

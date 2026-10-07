@@ -24,6 +24,15 @@ type WorkloadService interface {
 	Suspend(ctx context.Context, req workload.LifecycleRequest) (workload.Workload, error)
 	Restore(ctx context.Context, req workload.LifecycleRequest) (workload.Workload, error)
 	Retire(ctx context.Context, req workload.LifecycleRequest) (workload.Workload, error)
+
+	// TDD-identity-control-004 1.5.0: the owner's review, the rebuild of a deleted client, the sweep
+	// and what it found.
+	Review(ctx context.Context, req workload.ReviewRequest) (workload.Workload, error)
+	Rebuild(ctx context.Context, req workload.LifecycleRequest) (workload.Workload, error)
+	Sweep(ctx context.Context) (workload.SweepResult, error)
+	Orphaned(ctx context.Context) ([]workload.Condition, error)
+	Unused(ctx context.Context) ([]workload.Condition, error)
+	ReviewsOverdue(ctx context.Context) ([]workload.Condition, error)
 }
 
 // Workloads serves the workload routes.
@@ -127,8 +136,9 @@ func (h *Workloads) WorkloadAction(w http.ResponseWriter, r *http.Request) {
 	raw, action, _ := strings.Cut(r.PathValue("target"), ":")
 	lifecycle := map[string]func(context.Context, workload.LifecycleRequest) (workload.Workload, error){
 		"suspend": h.service.Suspend, "restore": h.service.Restore, "retire": h.service.Retire,
+		"rebuild": h.service.Rebuild,
 	}
-	if _, known := lifecycle[action]; !known && action != "reassign" {
+	if _, known := lifecycle[action]; !known && action != "reassign" && action != "review" {
 		httpapi.Problem(w, r, httpapi.NotFound, "No such workload action")
 		return
 	}
@@ -140,6 +150,17 @@ func (h *Workloads) WorkloadAction(w http.ResponseWriter, r *http.Request) {
 	reason := strings.TrimSpace(r.Header.Get(AdministrativeReasonHeader))
 	if reason == "" {
 		httpapi.Problem(w, r, httpapi.ValidationFailed, "A workload action requires an X-Administrative-Reason header")
+		return
+	}
+	if action == "review" {
+		// The owner's attestation; the reason is its statement (TDD-identity-control-004 §Periodic Review).
+		reviewed, err := h.service.Review(r.Context(), workload.ReviewRequest{PrincipalID: target, ReviewedBy: principal,
+			Statement: reason})
+		if err != nil {
+			writeWorkloadError(w, r, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, reviewed)
 		return
 	}
 	if act, ok := lifecycle[action]; ok {
@@ -174,8 +195,67 @@ func (h *Workloads) WorkloadAction(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, moved)
 }
 
+// owned serves POST /v1/workloads/{principal_id}:{action}: :review to the workload's owner, whom the
+// service checks, and every other action to a provider alone, refused before anything is read
+// (TDD-identity-control-004 1.5.0).
+func (h *Workloads) owned(policy AssurancePolicy) func(http.HandlerFunc) http.HandlerFunc {
+	provider := providerOnly(policy)
+	return func(next http.HandlerFunc) http.HandlerFunc {
+		guarded := provider(next)
+		return func(w http.ResponseWriter, r *http.Request) {
+			if _, action, _ := strings.Cut(r.PathValue("target"), ":"); action == "review" {
+				if _, ok := callerPrincipal(r); !ok {
+					httpapi.Problem(w, r, httpapi.AuthenticationRequired, "The request carries no authenticated caller")
+					return
+				}
+				next(w, r)
+				return
+			}
+			guarded(w, r)
+		}
+	}
+}
+
+// Sweep handles POST /v1/workloads:sweep: the workload sweep now, as the schedule runs it.
+func (h *Workloads) Sweep(w http.ResponseWriter, r *http.Request) {
+	result, err := h.service.Sweep(r.Context())
+	if err != nil {
+		httpapi.Problem(w, r, httpapi.DependencyUnavailable, "The workload sweep did not complete; retry")
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+// Orphaned, Unused and ReviewsOverdue handle the three listings of the sweep's conditions.
+func (h *Workloads) Orphaned(w http.ResponseWriter, r *http.Request) {
+	h.conditions(w, r, h.service.Orphaned)
+}
+
+func (h *Workloads) Unused(w http.ResponseWriter, r *http.Request) {
+	h.conditions(w, r, h.service.Unused)
+}
+
+func (h *Workloads) ReviewsOverdue(w http.ResponseWriter, r *http.Request) {
+	h.conditions(w, r, h.service.ReviewsOverdue)
+}
+
+func (h *Workloads) conditions(w http.ResponseWriter, r *http.Request,
+	read func(context.Context) ([]workload.Condition, error)) {
+	found, err := read(r.Context())
+	if err != nil {
+		httpapi.Problem(w, r, httpapi.Internal, "The workloads could not be read")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"workloads": found})
+}
+
 func writeWorkloadError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
+	case errors.Is(err, workload.ErrNotOwner):
+		// Not 403: a caller must not learn that a workload it does not own exists.
+		httpapi.Problem(w, r, httpapi.NotFound, "No such workload")
+	case errors.Is(err, workload.ErrClientPresent):
+		httpapi.Problem(w, r, httpapi.StateTransitionRefused, err.Error())
 	case errors.Is(err, workload.ErrInvalid), errors.Is(err, workload.ErrAgentNotBuilt),
 		errors.Is(err, workload.ErrOwnerNotEligible):
 		// Each message names a rule, never a stored value.

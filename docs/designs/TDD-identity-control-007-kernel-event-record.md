@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-007
   title: The Kernel Event Record and Its Completeness
   owner: Core Platform Team
-  version: 1.0.0
+  version: 1.1.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-10-05
-  last_reviewed: 2026-10-05
+  last_reviewed: 2026-10-07
   parent_sad: SAD-001
 ---
 
@@ -118,6 +118,14 @@ error, the time, the client and IP address, and the session. `kc_user_id` stays 
 published: when canonical events are translated, they carry `principal_id` (`TDD-identity-control-001`).
 A kernel user no mapping holds, such as a service account or the bootstrap administrator, is
 recorded with no Principal.
+
+**A workload's last authentication is kept on the workload (1.1.0).** A successful
+`CLIENT_LOGIN` user event is a client credentials grant, and its user is the client's
+service-account user. When that user is a workload's mapped user, the sweep moves the workload's
+`last_seen_at` forward to the event's time, in the transaction that records the event, the first
+time the event is recorded. It is what unused-workload detection reads
+(`TDD-identity-control-004` 1.5.0 §Unused Workload Detection), and it adds a write per workload per
+sweep rather than a new stream, as that design's §Performance Notes expect.
 
 **Credential values are removed before a row is written.** An admin event's representation is the
 resource as it was written. One that carried a credential, for example a user created with a

@@ -191,8 +191,18 @@ type User struct {
 	// that should be closed.
 	PrincipalID id.UUID
 
+	// ClaimedPrincipalID is the identifier attribute as the kernel holds it, parsed or not. A user
+	// carrying a value that does not parse is an orphan, not an unmapped user: something wrote it.
+	ClaimedPrincipalID string
+
 	SubjectType   SubjectType
 	WorkloadOwner id.UUID
+
+	// ServiceAccount is whether the user is a client's service-account user: the kernel creates one
+	// for every client with service accounts enabled, and names the client it belongs to. A
+	// workload's carries its principal_id; any other belongs to its client, which the registration
+	// sweep accounts for, and is never an unmapped Principal (TDD-identity-control-001 1.13.0).
+	ServiceAccount bool
 }
 
 // Mapped reports whether this user carries a canonical identifier.

@@ -59,6 +59,17 @@ func newHarness(t *testing.T) *harness {
 	t.Cleanup(pool.Close)
 	if err := pool.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
 		for _, statement := range []string{
+			`DELETE FROM identity.workload_finding WHERE principal_id IN
+			   (SELECT w.principal_id FROM identity.workload w
+			    JOIN identity.client_registration r ON r.registration_id = w.registration_id WHERE r.realm = $1)`,
+			`DELETE FROM identity.workload_review WHERE principal_id IN
+			   (SELECT w.principal_id FROM identity.workload w
+			    JOIN identity.client_registration r ON r.registration_id = w.registration_id WHERE r.realm = $1)`,
+			`DELETE FROM identity.principal_relink WHERE principal_id IN
+			   (SELECT principal_id FROM identity.principal_mapping WHERE realm = $1)`,
+			`DELETE FROM identity.principal_finding WHERE realm = $1`,
+			`DELETE FROM identity.registration_finding WHERE registration_id IN
+			   (SELECT registration_id FROM identity.client_registration WHERE realm = $1)`,
 			`DELETE FROM identity.workload_owner_change WHERE principal_id IN
 			   (SELECT w.principal_id FROM identity.workload w
 			    JOIN identity.client_registration r ON r.registration_id = w.registration_id WHERE r.realm = $1)`,

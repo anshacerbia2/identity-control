@@ -309,11 +309,16 @@ Principals created through the API carry none.
 
 ### Week 3 · Event translation and consumption
 
-- Publication of `com.scnehaux.identity.*` through the shared outbox
-- Consumption of `com.scnehaux.organization.membership.*` and `...tenant.*`
-- Deduplication guard on every consumed event
-- Reconciler skeleton reading authority through the published snapshot contract, never
-  through a database connection
+- Publication of `com.scnehaux.identity.*` through the shared outbox. Not built: the canonical
+  events wait until Audit & Evidence consumes them (`TDD-identity-control-007` §Scope; ADR-GLB-018
+  §5.3 retains an outbox event only while a delivery is owed, so with no consumer they would be
+  pruned unread). The kernel event record holds every event meanwhile
+- ✅ Consumption of `com.scnehaux.organization.membership.*` and `...tenant.*`: posted to
+  `POST /v1/deliveries` rather than read from a broker (TDD-identity-control-002 2.0.0, below)
+- ✅ Deduplication guard on every consumed event: foundation-platform's inbox guard in
+  `internal/delivery`
+- ✅ Reconciler reading authority through the published snapshot contract, never through a database
+  connection (`internal/organization`, TDD-identity-control-002 slice 3a and TDD-identity-control-006)
 
 **Exit:** no code path in this service constructs an Organization Database connection,
 asserted by test.
@@ -355,7 +360,10 @@ Acceptance criteria, also from RESPONSE-4 §4:
   - `GET /v1/registrations:drift` and `POST /v1/registrations:reconcile`;
   - a drift algorithm and a 1h interval;
   - the `identity-control-registration` credential with `manage-clients` and `view-clients`.
-- TDD-002 designs `identity.drift_finding`, and it is not built.
+- TDD-002 designed `identity.drift_finding`. ✅ Superseded rather than built: TDD-002 2.0.0 replaced it
+  with `identity.projection_finding`, built in the Tenant context projection's slice 3a (TDD-002
+  2.1.0, `internal/tenantcontext`), and the registration sweep's own findings are
+  `identity.registration_finding` (step 4 below).
 
 **What is missing:**
 
@@ -373,7 +381,8 @@ Acceptance criteria, also from RESPONSE-4 §4:
   representation and 7-day retention (identity-kernel #16).
 - The mapping state machine has no way back from `active`. A blanked `keycloak_user_id` on an
   active row is picked up by nothing, so the portability test needs a designed transition.
-  Designed as `:relink` (decision 4), not built.
+  ✅ Designed as `:relink` (decision 4) and built in step 7 below
+  (`internal/identity/provisioning/relink.go`).
 
 **Decided 2026-09-28:**
 
@@ -478,7 +487,7 @@ Acceptance criteria, also from RESPONSE-4 §4:
   - The sweep records every Keycloak client no registration describes as `unmanaged`. The kernel's built-in clients and this service's two Admin API clients are exempt. `IDENTITY_UNMANAGED_CLIENTS` is `report` by default and `disable` once an estate's bootstrap clients are adopted; production runs `disable`.
   - The `deploy-dev` smoke adopts `identity-control-caller` with the key it already holds, so its sweeps converge; Proof B scenario 8 records a console-created client `unmanaged` and converges it once deleted.
   - **On the development server:** adopt `identity-experience-bff` with its public key (`deploy/dev/README.md` §Adopting the BFF), then set `IDENTITY_UNMANAGED_CLIENTS=disable`.
-  - An adopted client is not released afterwards (ADR-IAM-001 §5.13, Alternative J): it stops like any registration, below. A declared audience that names this service's own Admin API client cannot be registered, so the caller is adopted with an empty audience; audience mappers are not compared.
+  - An adopted client is not released afterwards (ADR-IAM-001 §5.13, Alternative J): it stops like any registration, below. A declared audience that names this service's own Admin API client cannot be registered, so the caller is adopted with an empty audience; an adoption does not plan audience mappers, and the sweep compares them from TDD-003 1.33.0 (below).
 - ✅ **The token profile** (STD-IAM-002 §3.2 and §3.2.1, TDD-003 1.17.0 §Profiles; identity-kernel compat runs 36775603547 and the claim closure).
   - Every client but a resource is registered with the `access.token.header.type.rfc9068` attribute, so its access tokens carry `typ` `at+jwt`, and a `client_id` mapper naming its `client_key`, which RFC 9068 §2.2 requires and the kernel writes only into a service-account token.
   - Its default and optional client scopes are closed sets: `basic`, `acr` (not for a workload) and its managed audience scope, and `scnehaux-profile` as an optional scope for a confidential client. A built-in `profile`, `email`, `roles` or `web-origins` scope is detached. A workload holds `service_account`, which the kernel attaches again on every update; identity-kernel declares it with its `client_id` mapper alone. No access token carries personal data, roles, or a workload's address.
@@ -493,13 +502,26 @@ Acceptance criteria, also from RESPONSE-4 §4:
   - Every action takes an `X-Administrative-Reason` and is recorded insert-only in `identity.registration_state_change`. An operator's reconcile and a recreation refuse a suspended registration. A workload's client is refused: deleting a client deletes its service-account user, so the workload lifecycle stops it.
   - Proof B scenario 9 runs it against the kernel: a console re-enable of a suspended client is repaired with its not-before, a restore enables it, an active client's retirement is refused, and a retired client's `client_key` registers again.
   - The workload lifecycle's own suspension, restoration and retirement are built (TDD-004 1.4.0, below). The Admin Portal actions follow in identity-experience.
-- **The rest of the Principal sweep:** its unmapped, orphan and duplicate branches (TDD-001 §Reconciliation Sweep) are not built. Only the dangling branch and pending recovery run.
+- ✅ **The rest of the Principal sweep** (TDD-identity-control-001 1.13.0 §Reconciliation Sweep): `internal/identity/provisioning/sweep.go`, on the registration schedule and `POST /v1/principals:reconcile`, which now answers `{"recovered", "dangling", "unmapped", "orphan", "duplicate"}`.
+  - A user carrying no `principal_id` is `unmapped`, and one carrying an identifier no mapping holds, parsed or not, is an `orphan`. Both are disabled under `IDENTITY_UNMAPPED_USERS=disable`, the default in production; `report`, the default elsewhere, records them only.
+  - A second user carrying a Principal's identifier is a `duplicate`: both users are disabled whatever the setting, and an active or suspended mapping is quarantined.
+  - A client's service-account user is never `unmapped`, and a mapping's user the listing does not return is read before it is called dangling, so a workload is never reported dangling. A pending workload's identifier is not an orphan, and a mapping whose own user is gone is not a duplicate: that is a relink or a rebuild in flight.
+  - `GET /v1/principals:unmapped` lists the open findings with the user's username; `identity.principal_finding` carries the classes, the realm and the claimed identifier (migration `20261007185259_widen_principal_findings`). A finding resolves `user_absent` once its user is deleted.
+  - Proof B scenario 6b proves the orphan and duplicate branches against the live kernel under `disable`, and that the sweep leaves a workload authenticating and every service-account user alone. The unmapped branch cannot be reached there through the Admin API: identity-kernel's user profile requires `scnehaux_principal_id` of a user an administrator makes, and the scenario asserts that refusal. The branch guards the paths that profile does not cover, such as an import or a profile changed later, and the integration suite proves it.
+  - No `identity.principal.*_detected` event yet: canonical events wait on Audit & Evidence (item 8 of the Tenant context projection, below).
 - ✅ **Workload identity, first slice** (TDD-004 1.3.0): `POST /v1/workloads`, `GET /v1/workloads/{id}` and `:reassign`, with `identity.workload` and the insert-only `identity.workload_owner_change`.
   - A workload's Keycloak user is its client's service-account user, the one a client credentials token is issued for (identity-kernel#23). The workload path creates the client, writes `principal_id`, `subject_type=workload` and `workload_owner` on that user with the Principal credential, and binds the mapping to it. `POST /v1/principals` and `:relink` now refuse a workload, which on the old path would have carried its identity into no token.
   - The owner is an active human Principal. Where the workload may act is its Membership, granted by organization-control like any binding. This follows how Google Cloud, Entra, AWS and Kubernetes scope workload identities, and needs no Membership data here (decided 2026-09-30).
   - Pending workloads are recovered before each sweep, after pending registrations, and the creating request's key is completed by recovery.
   - The `deploy-dev` smoke creates a workload and authenticates as it with its own key: its token carries `principal_id`, `subject_type=workload` and `workload_owner`, and no `acr` and no refresh token (first passing run 36746826573, 2026-09-30).
-  - Not built yet: orphan handling (on the owner's Principal being retired, quarantined or disabled; NIST AC-2(3)(b)), unused detection (90 days), the quarterly owner review (CIS 5.5), rebuilding a workload's client after a console deletion, and agent delegation. `identity-experience`'s admin form that creates a workload through `POST /v1/principals` must move to `POST /v1/workloads`.
+  - ✅ **Orphans, unused workloads, owner reviews and client rebuilds** (TDD-identity-control-004 1.5.0, TDD-identity-control-003 1.34.0, TDD-identity-control-007 1.1.0), in `internal/workload` (`sweep.go`, `review.go`, `rebuild.go`), migration `20261007190929_workload_sweep`:
+    - The workload sweep runs every `IDENTITY_WORKLOAD_SWEEP_INTERVAL` (24h) and on `POST /v1/workloads:sweep`. An active workload whose owner's mapping is retired, quarantined or suspended is orphaned and keeps working (NIST AC-2(3)(b)); a `WARN` reminder, an `ERROR` from seven days, and at thirty days an automatic suspension, recorded in `registration_state_change` with `automatic` and no actor. An owner restored before then reclaims it. `GET /v1/workloads:orphaned` lists them with their stage.
+    - The kernel event record moves `last_seen_at` forward from each successful `CLIENT_LOGIN`; a workload unseen for 90 days (or never, since activation) is an open `unused` finding, resolved when it authenticates again. `GET /v1/workloads:unused`.
+    - `POST /v1/workloads/{id}:review` is the owner's attestation (CIS 5.5, AC-2(j)), the reason as its statement, recorded insert-only in `identity.workload_review`; anyone else is answered 404. A review is due 90 days after the last one or activation; overdue, the sweep alerts and suspends nothing. `GET /v1/workloads:reviews-overdue`; a workload carries `last_reviewed_at` and `review_due_at`.
+    - `POST /v1/workloads/{id}:rebuild` recreates a deleted workload client from desired state with its keys, writes the identity on the new service-account user and binds the mapping there under the same `principal_id`, recorded in `principal_relink`, in one transaction that deletes the client again on failure.
+    - Proof B scenario 7 proves the last authentication, the review and the rebuild against the live kernel.
+    - Not built: telling the owner's administrative chain and the Tenant's administrators, which needs the Notification Platform and organization-control's knowledge of who administers a Tenant; the log alerts and listings stand in.
+  - Not built yet: agent delegation, which needs the human's Membership and scope (organization-control) and an `act` claim the kernel issues (identity-kernel). `identity-experience`'s admin form that creates a workload through `POST /v1/principals` must move to `POST /v1/workloads`.
 - ✅ **Registration ownership, first slice** (ADR-IAM-003; TDD-003 1.19.0 §Registration Ownership; TDD-001 1.8.0 §Caller Token): `identity.registration_owner`, granted and revoked by a provider with a reason, insert-only but for its revocation columns.
   - An owner is an active human Principal, counted only while its mapping is active, so a Principal retired or quarantined confers nothing at the next request. In production (`IDENTITY_ENVIRONMENT`, `production` by default) a registration keeps at least two owners.
   - A token without `provider_scope` is an owner's, the `resource-scoped` form of STD-IAM-002 §3.1.1: a person, with `acr` and `auth_time`. Every route is wrapped in `providerOnly` or `owned`, and a test fails on an unwrapped one: an owner reads, rotates and revokes keys of, and suspends and restores, a registration it owns, answers 404 for any other, and 403 on every provider route before anything is read. `GET /v1/registrations:mine` lists what the caller owns.
@@ -514,7 +536,8 @@ Acceptance criteria, also from RESPONSE-4 §4:
   - The Developer Console proposes and withdraws, and the Admin Portal approves and rejects, in identity-experience#22.
   - Audience changes, the `audience` kind of a change (TDD-identity-control-003 1.26.0): an owner adds only resources it owns and always removes, a provider adds any registered resource, approved in production by another provider. The apply makes the client's audience mappers exactly the declared set, a hand-made one removed, and re-derives the lifespan. It is how callers move to `identity-control-api` (STD-IAM-002 §3.1).
   - The ceremony registers `identity-control-api`, this service's own resource (ADR-IAM-001 §5.11 rule 5, TDD-identity-control-001 1.11.0), named by `IDENTITY_TOKEN_AUDIENCE`, so a fresh stack's first caller has a resource to name. The dev caller's audience mapper names it, and a server whose ceremony ran before moves by resuming the ceremony and changing its callers' audience (`deploy/dev/README.md`).
-  - Not built yet: lifetime-class changes, which change every client whose audience names the resource, and the drift sweep comparing audience mappers.
+  - ✅ The drift sweep compares audience mappers (TDD-identity-control-003 1.33.0): the `audience` field class, every `oidc-audience-mapper` on an active client against one per declared resource, compared as lists, so a hand-made, renamed or repeated mapper is a difference. It is repaired when an admin event names who changed it and `unattributed` otherwise, is confirmed under the registration's share lock first, since an audience change writes the kernel before it commits, and no drift exception covers it (`internal/reconcile`, migration `20261007190438_compare_audience_mappers`).
+  - Not built yet: lifetime-class changes, which change every client whose audience names the resource. TDD-003 §Registration Changes says they need their own design, and STD-IAM-002 §3.3 requires an increase to be carried into every affected revocation class's stated maximum enforcement delay, which is an architecture change, not this repository's; it waits on an owner decision.
 - ✅ **Application developer standing, non-production creation** (ADR-IAM-003 §5.3; TDD-003 1.21.0 §Application Developers): `identity.application_developer`, and `GET`/`POST /v1/application-developers` and `:revoke`, a provider's.
   - The standing is granted and revoked by a provider with a reason. It is held only by an active human Principal, counted only while the mapping is active, and insert-only but for its revocation columns.
   - `POST /v1/registrations` admits a caller holding the standing. A caller without it is refused before the body is read. Such a caller registers only:
@@ -537,7 +560,7 @@ Acceptance criteria, also from RESPONSE-4 §4:
   - The client and the Principal stop together: the workload lifecycle holds the workload's row lock and changes its registration in the same transaction, through the registration package's `…WorkloadWithin` seams, because the registration lifecycle still refuses a workload's client.
   - A suspension commits, then disables the client and sets its not-before. A restore is refused while the owner is not an active human Principal (reassign first), and writes the client back inside its transaction. A retirement, only after a suspension, deletes the client, revokes its keys, and retires the Principal's mapping, so the dangling sweep does not report the deleted service-account user.
   - Each change is recorded in the registration's insert-only `registration_state_change`, naming who asked and why.
-- **Kernel scopes:** `identity-kernel` declares `scnehaux-workload` (identity-kernel#23). It still has to declare a tenant-scope privileged scope before registrations of that class can exist, and that waits on the context projection.
+- ✅ **Kernel scopes:** `identity-kernel` declares `scnehaux-workload` (identity-kernel#23) and the tenant-scope privileged scope `scnehaux-privileged` (`TDD-identity-kernel-001` 1.14.0), which the `tenant-scoped` privileged form holds (item 6 of the Tenant context projection, below).
 
 ## Account security and investigation (TDD-identity-control-005)
 

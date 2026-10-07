@@ -59,9 +59,13 @@ type Config struct {
 	// enumeration.
 	RecoveryBatch int
 
-	// Realm is the realm the dangling-mapping sweep enumerates. Creation takes its realm from the
-	// request; the sweep has none.
+	// Realm is the realm the sweep enumerates. Creation takes its realm from the request; the sweep
+	// has none.
 	Realm keycloak.Realm
+
+	// DisableUnmapped disables an unmapped or orphan user as well as recording it
+	// (IDENTITY_UNMAPPED_USERS=disable). A duplicate's users are disabled either way.
+	DisableUnmapped bool
 }
 
 func (c *Config) applyDefaults() {

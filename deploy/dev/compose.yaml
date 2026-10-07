@@ -29,6 +29,11 @@ services:
     build:
       context: ../..
       target: migrate
+      # From .env: GOPROXY=direct where the network intercepts TLS to the module proxy
+      # (STD-GLB-009 §Development Server Deployment). go.sum and the checksum database still verify
+      # every module either way.
+      args:
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
     # Named, so every one-off task below runs this image and `up --build` rebuilds them with the
     # release (STD-GLB-009 §Development Server Deployment).
     image: scnehaux-identity-control-dev-migrate
@@ -97,6 +102,8 @@ services:
     build:
       context: ../..
       target: service
+      args:
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
     restart: unless-stopped
     # The service signs with private keys in ./keys, mode 0600 and owned by KEYS_OWNER, which is the
     # image's nonroot user unless a local override says otherwise.
@@ -124,6 +131,10 @@ services:
       # either in .env and recreate the service. compose passes a container only what is listed here,
       # so a setting missing from this list is a setting .env cannot reach.
       IDENTITY_UNMANAGED_CLIENTS: ${IDENTITY_UNMANAGED_CLIENTS:-report}
+      # Whether the Principal sweep disables a kernel user no mapping accounts for, or only records it
+      # (TDD-identity-control-001 1.13.0). Report on a development server, whose realm may hold users
+      # made before this service; GET /v1/principals:unmapped lists them.
+      IDENTITY_UNMAPPED_USERS: ${IDENTITY_UNMAPPED_USERS:-report}
       # Account security notifications (TDD-identity-control-008): standin on a development server
       # accepts them and delivers none, until the Notification Platform exists. Empty records and
       # waits.

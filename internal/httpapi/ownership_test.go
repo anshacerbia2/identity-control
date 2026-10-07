@@ -112,6 +112,9 @@ func TestEveryAPIRouteIsWrapped(t *testing.T) {
 			}
 			continue // route class self: the caller's own Principal, named by no path segment
 		}
+		if pattern == "POST /v1/workloads/{target}" && strings.HasPrefix(handler, "ownedWorkload(") {
+			continue // :review is the workload owner's, every other action a provider's
+		}
 		if !strings.HasPrefix(handler, "p(") && !strings.HasPrefix(handler, "owned(") {
 			t.Errorf("%s is served by %s, neither providerOnly nor owned", pattern, handler)
 		}

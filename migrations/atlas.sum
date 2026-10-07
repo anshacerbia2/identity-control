@@ -1,4 +1,4 @@
-h1:IUrkS/nZmb/IIf56ppP9TELmqGJFC2Tl4ycA9z6JC0Q=
+h1:VbGaqtlPF/c71mhuMP6owzAf27rr/IzOm09D87lMdcA=
 20260817151332_baseline_identity_schema.sql h1:GysIRGAJncY8eQTmFIhc3g8FTeFq8dGu9wmdY4kefVQ=
 20260817201931_add_creation_payload.sql h1:ejgDHTQ30FK0/adjz26CYPnLsAJyodOxBHvTI/GOd8M=
 20260820185807_add_bootstrap_ceremony.sql h1:0tiQsqClxrSDiz1Jl+vd6VDStnO/nObLoeKIHBWsX3M=
@@ -30,3 +30,6 @@ h1:IUrkS/nZmb/IIf56ppP9TELmqGJFC2Tl4ycA9z6JC0Q=
 20261006140000_add_security_notifications.sql h1:QEwYIfjDukO6rwkkHUgmz7JdU0DInLVEnKE8RQI5jEc=
 20261007100000_add_notification_address_proof.sql h1:zHb8sJYaQMUPsSTYaKgtL80qXDSPOAAI95SjKaGRDUc=
 20261007120000_allow_per_sign_in_form.sql h1:igtBOOztt9+VD4hoL3Tz2uh20bpCaGevfaTHUgkZLfU=
+20261007185259_widen_principal_findings.sql h1:lVaDorWU6zxt3KM92KzOXtTLhnosDaiD2S536DtF2DM=
+20261007190438_compare_audience_mappers.sql h1:YpbTX2mpWPb6/u3M0MbJAN3YulMuDBeSlg6v6l7TGsY=
+20261007190929_workload_sweep.sql h1:QHvTJ31veDsJxk7EfbEJM7XDyl6UIIzy4jiJgG+Cv2o=

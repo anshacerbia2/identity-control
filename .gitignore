@@ -3,6 +3,10 @@
 deploy/dev/keys/
 *.pem
 
+# A host's own compose settings (deploy/dev/compose.override.example.yaml shows the shape). They hold
+# that host's subnets and ports, and never belong in the repository.
+deploy/dev/compose.override.yaml
+
 # Coverage profiles are build output. CI produces and uploads them as an artifact, so
 # a committed copy is only ever stale.
 *.out
