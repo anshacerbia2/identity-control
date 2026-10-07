@@ -16,11 +16,12 @@
 #      reconcile recreates it: deletion is how a compromised client is contained
 #   6. a Principal whose Keycloak user is deleted is reported, not recreated, and an operator's
 #      :relink provisions a new user carrying the same principal_id
-#  6b. users made in the console are accounted for (TDD-identity-control-001 1.13.0): one with no
-#      principal_id is unmapped, one carrying an identifier no mapping holds is an orphan, both
-#      disabled under IDENTITY_UNMAPPED_USERS=disable; a second user carrying a Principal's
-#      identifier disables both and quarantines the mapping; no service-account user is a finding;
-#      deleting the users resolves their findings
+#  6b. users made in the console are accounted for (TDD-identity-control-001 1.13.0): the kernel's
+#      user profile refuses a console user with no principal_id, so the unmapped branch is the
+#      fake's to prove; one carrying an identifier no mapping holds is an orphan, disabled under
+#      IDENTITY_UNMAPPED_USERS=disable; a second user carrying a Principal's identifier disables
+#      both and quarantines the mapping; no service-account user is a finding; deleting the users
+#      resolves their findings
 #   7. a workload's keys rotate with an overlap and revoke at once, and a key added in the console
 #      blocks the client until an operator's reconcile puts back exactly the registered keys; its
 #      grants are its last authentication, its owner reviews it, and its client deleted in the
@@ -304,10 +305,13 @@ Record "User deleted in the console" "reported, then relinked by an operator" "s
 Write-Host ""
 Write-Host "6b. users made in the console are accounted for"
 $run6 = [Guid]::NewGuid().ToString("N").Substring(0, 8)
-function Console-User($username, $principalId) {
+function Console-User-Body($username, $principalId) {
     $user = @{ username = $username; enabled = $true; firstName = "Proof"; lastName = "B"; email = "$username@scnehaux.local" }
     if ($principalId) { $user.attributes = @{ scnehaux_principal_id = @($principalId) } }
-    $r = Kc "POST" "/users" ($user | ConvertTo-Json -Compress -Depth 4)
+    return ($user | ConvertTo-Json -Compress -Depth 4)
+}
+function Console-User($username, $principalId) {
+    $r = Kc "POST" "/users" (Console-User-Body $username $principalId)
     if ($r.code -ne 201) { throw "the console could not create $username`: $($r.code) $($r.text)" }
     return @((Kc "GET" "/users?username=$username&exact=true" $null).json)[0].id
 }
@@ -315,27 +319,27 @@ $r = Api "POST" "/v1/principals" "{`"username`":`"proofb.duplicated.$run6`",`"em
 Expect "a Principal to duplicate" $r.code 201
 $duplicated = $r.json.principal_id
 $duplicatedOwn = @(Users-Carrying $duplicated)[0].id
-$stray = Console-User "proofb-stray-$run6" $null
+# The kernel's user profile requires principal_id of an administrator's user (identity-kernel
+# realm/user-profile.json), so the creation path the unmapped branch guards against is closed here too.
+Expect "the kernel refuses a console user with no principal_id" (Kc "POST" "/users" (Console-User-Body "proofb-stray-$run6" $null)).code 400
 $forged = Console-User "proofb-forged-$run6" ([Guid]::NewGuid().ToString())
 $copy = Console-User "proofb-copy-$run6" $duplicated
 $r = Api "POST" "/v1/principals:reconcile" $null $null
 Expect "the sweep ran" $r.code 200
 $open = @((Api "GET" "/v1/principals:unmapped" $null $null).json.unmapped)
 function Finding-For($username) { return @($open | Where-Object { (Get-Prop $_ "username") -eq $username }) }
-Expect "the console user is unmapped" (Finding-For "proofb-stray-$run6")[0].finding_class "unmapped"
 Expect "the forged identifier is an orphan" (Finding-For "proofb-forged-$run6")[0].finding_class "orphan"
 Expect "the second carrier is a duplicate" (Finding-For "proofb-copy-$run6")[0].finding_class "duplicate"
 Expect "naming the Principal" (Get-Prop (Finding-For "proofb-copy-$run6")[0] "principal_id") $duplicated
 Expect "no service-account user is a finding" @($open | Where-Object { "$(Get-Prop $_ 'username')" -like "service-account-*" }).Count 0
-Expect "the unmapped user is disabled" (Kc "GET" "/users/$stray" $null).json.enabled $false
 Expect "the orphan is disabled" (Kc "GET" "/users/$forged" $null).json.enabled $false
 Expect "the duplicate is disabled" (Kc "GET" "/users/$copy" $null).json.enabled $false
 Expect "and so is the Principal's own user" (Kc "GET" "/users/$duplicatedOwn" $null).json.enabled $false
-foreach ($user in @($stray, $forged, $copy)) { [void](Kc "DELETE" "/users/$user" $null) }
+foreach ($user in @($forged, $copy)) { [void](Kc "DELETE" "/users/$user" $null) }
 [void](Api "POST" "/v1/principals:reconcile" $null $null)
 $left = @((Api "GET" "/v1/principals:unmapped" $null $null).json.unmapped | Where-Object { "$(Get-Prop $_ 'username')" -like "proofb-*-$run6" })
 Expect "deleting the users resolves their findings" $left.Count 0
-Record "Users made in the console" "unmapped, orphan and duplicate recorded and disabled" "resolved once the users were deleted"
+Record "Users made in the console" "orphan and duplicate recorded and disabled; no unmapped user can be made" "resolved once the users were deleted"
 
 Write-Host ""
 Write-Host "7. client keys: rotation, revocation, and a key added in the console"

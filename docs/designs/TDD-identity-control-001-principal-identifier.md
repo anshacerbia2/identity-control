@@ -666,7 +666,10 @@ Disabling rather than deleting is deliberate: a false positive caused by a
 reconciler defect is recoverable, while deletion of a Principal is not.
 
 The sweep is the compensating control for the two invariants Keycloak cannot
-enforce — attribute presence and attribute uniqueness. It is defense in depth, not
+enforce — attribute presence and attribute uniqueness. Presence is partly enforced: identity-kernel's
+user profile requires `scnehaux_principal_id` of a user an administrator creates, so the Admin API
+refuses an unmapped user (Proof B scenario 6b). The unmapped branch stays, for the paths that profile
+does not cover: an import, or a profile changed later. It is defense in depth, not
 the primary mechanism. The primary mechanism is closing every unauthorized creation
 path.
 
