@@ -20,7 +20,7 @@ set -euo pipefail
 GRYPE_IMAGE="${GRYPE_IMAGE:-anchore/grype@sha256:e4a44ef45d285b829ce6efe2642980329661bd2d18eab5fc539138d4adaebbbe}"
 CONFIG=.grype.yaml
 WORK="${RUNNER_TEMP:-$(mktemp -d)}/image-scan"
-mkdir -p "$WORK/images" "$WORK/db"
+mkdir -p "$WORK/images" "$WORK/db" "$WORK/tmp"
 
 python3 - "$CONFIG" <<'PY'
 import datetime, re, sys
@@ -59,7 +59,7 @@ done < <(grep -hoE '^[[:space:]]*image:[[:space:]]*[^[:space:]]+@sha256:[0-9a-f]
 grype() {
   docker run --rm --user "$(id -u):$(id -g)" \
     -e GRYPE_DB_CACHE_DIR=/db -e GRYPE_CHECK_FOR_APP_UPDATE=false \
-    -v "$WORK/db:/db" -v "$WORK/images:/images:ro" -v "$PWD/$CONFIG:/config.yaml:ro" \
+    -v "$WORK/db:/db" -v "$WORK/tmp:/tmp" -v "$WORK/images:/images:ro" -v "$PWD/$CONFIG:/config.yaml:ro" \
     "$GRYPE_IMAGE" "$@" --config /config.yaml
 }
 
@@ -69,9 +69,15 @@ for target in "${targets[@]}"; do
   grype "$target" -o table || echo "::warning::the report for $target did not complete"
   echo "::endgroup::"
   echo "== $target: the gate, High or Critical with a fix"
-  if ! grype "$target" --only-fixed --fail-on high -o table; then
-    echo "::error::$target holds a High or Critical vulnerability with a fix (STD-GLB-009 §Container Images rule 4)"
-    status=1
-  fi
+  # Grype exits 2 when it found a vulnerability at or above --fail-on, and 1 when the scan failed.
+  code=0
+  grype "$target" --only-fixed --fail-on high -o table || code=$?
+  case "$code" in
+    0) ;;
+    2) echo "::error::$target holds a High or Critical vulnerability with a fix (STD-GLB-009 §Container Images rule 4)"
+       status=1 ;;
+    *) echo "::error::the scan of $target did not complete (exit $code)"
+       status=1 ;;
+  esac
 done
 exit "$status"
