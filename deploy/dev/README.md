@@ -403,18 +403,38 @@ and the ceremony's grant is the only provider authority (TDD-identity-control-00
 
 `identity-experience-bff` was created by `identity-experience`'s `deploy/dev/create-bff-client.sh`
 before this service could register it, so it is **adopted** (`TDD-identity-control-003` §Adoption):
-a plan first, then the adoption, held to the key it already authenticates with. Until it is, the
+a plan first, then the adoption, held to the keys it already authenticates with. Until it is, the
 sweep reports it `unmanaged`, and the server must stay on `IDENTITY_UNMANAGED_CLIENTS=report`,
 the default, or the BFF is disabled with every open session.
 
 `scripts/dev-adopt-bff.ps1` does both steps, with the caller's credentials from the environment as
-`dev-smoke.ps1` reads them and the BFF's **public** JWK, the one `new-client-key.mjs` wrote beside its
-private key. It plans first and adopts only with `-Apply`:
+`dev-smoke.ps1` reads them and the BFF's **public** JWKs, each the one `new-client-key.mjs` wrote
+beside its private key. It plans first and adopts only with `-Apply`:
 
 ```powershell
 pwsh ./scripts/dev-adopt-bff.ps1 -BffJwkFile ./identity-experience-bff.jwk.json          # the plan
 pwsh ./scripts/dev-adopt-bff.ps1 -BffJwkFile ./identity-experience-bff.jwk.json -Apply   # adopt
 ```
+
+**Every key the client holds is declared.** The plan compares the client's JWKS with `public_keys`
+as a set, so a client given two keys with the kernel's `set-client-key.sh`, one per developer device,
+is declared with both, or the plan shows a `client_keys` difference. Pass them as one comma-separated
+list:
+
+```powershell
+pwsh ./scripts/dev-adopt-bff.ps1 -BffJwkFile ./laptop-a.jwk.json,./laptop-b.jwk.json          # the plan
+pwsh ./scripts/dev-adopt-bff.ps1 -BffJwkFile ./laptop-a.jwk.json,./laptop-b.jwk.json -Apply   # adopt
+```
+
+The API takes one or two keys, the most a client holds (`TDD-identity-control-003` §Adoption) and as
+many as `set-client-key.sh` installs; the script refuses a third before it sends anything.
+
+**The second key does not stay.** The adoption records the first file's key `active` and the
+second's `retiring`, as for a client adopted in the middle of a rotation. The second is removed from
+the client once `IDENTITY_CLIENT_KEY_ROTATION_OVERLAP` ends (168 hours by default), at the next sweep,
+and the device that signs with it stops working. So list first the key that must keep working. A
+registered client holds one active key, and a second only while a rotation overlaps: moving the BFF
+to the other device's key afterwards is a rotation, `POST /v1/registrations/{registration_id}/keys`.
 
 The declaration it sends, with a provider-scope token (`scripts/dev-token.ps1`):
 
@@ -426,14 +446,15 @@ Content-Type: application/json
 {"client_key":"identity-experience-bff","profile":"confidential","audience_class":"privileged",
  "privileged_form":"provider-scope","application_ref":"identity-experience",
  "redirect_uris":["http://127.0.0.1:8090/auth/callback"],"audience":["identity-control-api"],
- "public_keys":[<the public JWK of identity-experience-bff>],
+ "public_keys":[<each public JWK identity-experience-bff holds, one or two>],
  "converge":["token_format","audience_scope"],"dry_run":true}
 ```
 
 `deploy-dev` runs this procedure on every change, against a client made by `create-bff-client.sh`
-the way this server's was (`scripts/dev-bff-adoption-proof.ps1`, STD-GLB-009 1.3.0). It also checks
-that a wrong declaration is refused at the plan, and that the adopted BFF's own token is served on a
-provider route.
+the way this server's was and then given a second device's key with `set-client-key.sh`
+(`scripts/dev-bff-adoption-proof.ps1`, STD-GLB-009 1.3.0). It also checks that a wrong declaration,
+and one declaring only one of the two keys, is refused at the plan, that the first key is adopted
+active and the second retiring, and that the adopted BFF's own token is served on a provider route.
 
 **The class is `privileged`, in the `provider-scope` form, never `internal`.** The script attached
 `scnehaux-provider`, and the Admin Portal's calls are provider routes, which require `acr` and
@@ -449,7 +470,7 @@ at+jwt attribute, no `client_id` mapper) and `audience_scope` (the realm's old d
 put email, names and roles into its access tokens), so name both:
 `"converge":["token_format","audience_scope"]`. A
 `redirect_uris` or `client_keys` difference means the declaration is wrong, and is fixed in the
-declaration, never in the console. Then send the same body without `dry_run` and with an
+declaration, never in the console: for `client_keys`, pass every public JWK the client holds. Then send the same body without `dry_run` and with an
 `Idempotency-Key`. Once the BFF and the caller are adopted, set `IDENTITY_UNMANAGED_CLIENTS=disable`
 in `.env` and recreate the service with `docker compose up -d identity-control`; a restart keeps the
 environment the container was created with. `IDENTITY_TOKEN_TYPE=enforce` goes the same way, once

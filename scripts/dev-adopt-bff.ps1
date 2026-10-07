@@ -3,7 +3,7 @@
 #
 # identity-experience's deploy/dev/create-bff-client.sh made the BFF's client in the kernel before
 # this service could register a confidential client, so it is adopted: a plan first, then, with
-# -Apply, the adoption, held to the key it already authenticates with.
+# -Apply, the adoption, held to the keys it already authenticates with.
 #
 # The declaration is the client create-bff-client.sh made:
 #   - confidential, privileged in the provider-scope form, so it keeps scnehaux-provider and its
@@ -18,15 +18,24 @@
 #   $env:IDENTITY_CALLER_KEY_FILE      the development caller's private key
 #   $env:IDENTITY_CALLER_PASSWORD      the bootstrap operator's password
 #   $env:IDENTITY_OPERATOR_TOTP_FILE   optional, the operator's TOTP file (dev-token.ps1)
-# The BFF's file is its PUBLIC JWK, the one scripts/new-client-key.mjs wrote beside the private key.
-# A file holding a private member is refused, and nothing read from it is printed.
+# Each BFF file is a PUBLIC JWK, the one scripts/new-client-key.mjs wrote beside a private key. A file
+# holding a private member is refused, and nothing read from one is printed.
+#
+# KEYS: every key the client holds, one file each, and no more than two, because an adoption declares
+# exactly the one or two keys the client authenticates with (TDD-identity-control-003 §Adoption): a
+# client given two keys with identity-kernel's set-client-key.sh, one per developer device, is
+# declared with both, or the plan shows a client_keys difference. The first file is recorded active
+# and a second retiring: the second stops working when IDENTITY_CLIENT_KEY_ROTATION_OVERLAP ends,
+# so the key that must keep working goes first.
 #
 # Usage:
 #   pwsh ./scripts/dev-adopt-bff.ps1 -BffJwkFile ./identity-experience-bff.jwk.json           # plan
 #   pwsh ./scripts/dev-adopt-bff.ps1 -BffJwkFile ./identity-experience-bff.jwk.json -Apply    # adopt
+#   pwsh ./scripts/dev-adopt-bff.ps1 -BffJwkFile ./laptop-a.jwk.json,./laptop-b.jwk.json      # two keys
+# The files are a comma-separated list, which also reaches the script whole through pwsh -File.
 
 param(
-    [Parameter(Mandatory = $true)] [string] $BffJwkFile,
+    [Parameter(Mandatory = $true)] [string[]] $BffJwkFile,
     [string] $RedirectUri = "http://127.0.0.1:8090/auth/callback",
     [switch] $Apply
 )
@@ -41,17 +50,24 @@ foreach ($name in @("IDENTITY_CALLER_KEY_FILE", "IDENTITY_CALLER_PASSWORD")) {
     }
 }
 
-$jwk = Get-Content -Raw -Path $BffJwkFile | ConvertFrom-Json
-$members = $jwk.PSObject.Properties.Name
-foreach ($private in @("d", "p", "q", "dp", "dq", "qi")) {
-    if ($members -contains $private) {
-        throw "$BffJwkFile holds a private key member; pass the public JWK, never the private key."
+# pwsh -File hands "a.jwk.json,b.jwk.json" over as one string; a call from a session, as an array.
+$files = @($BffJwkFile | ForEach-Object { $_ -split "," } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+if ($files.Count -lt 1 -or $files.Count -gt 2) {
+    throw "give one or two public JWK files: an adoption declares the 1 to 2 keys the client holds."
+}
+$publicKeys = @(foreach ($file in $files) {
+    $jwk = Get-Content -Raw -Path $file | ConvertFrom-Json
+    $members = $jwk.PSObject.Properties.Name
+    foreach ($private in @("d", "p", "q", "dp", "dq", "qi")) {
+        if ($members -contains $private) {
+            throw "$file holds a private key member; pass the public JWK, never the private key."
+        }
     }
-}
-if ($jwk.kty -ne "RSA" -or -not ($members -contains "n") -or -not ($members -contains "e")) {
-    throw "$BffJwkFile is not an RSA public JWK."
-}
-$public = @{ kty = "RSA"; n = $jwk.n; e = $jwk.e }
+    if ($jwk.kty -ne "RSA" -or -not ($members -contains "n") -or -not ($members -contains "e")) {
+        throw "$file is not an RSA public JWK."
+    }
+    @{ kty = "RSA"; n = $jwk.n; e = $jwk.e }
+})
 
 Add-Type -AssemblyName System.Net.Http
 . "$PSScriptRoot\dev-token.ps1"
@@ -67,7 +83,7 @@ $declaration = @{
     application_ref = "identity-experience"
     redirect_uris   = @($RedirectUri)
     audience        = @("identity-control-api")
-    public_keys     = @($public)
+    public_keys     = $publicKeys
     converge        = @("token_format", "audience_scope")
 }
 
@@ -91,7 +107,7 @@ if ($plan.code -ne 200) {
     throw "the plan was refused with $($plan.code): $($plan.body)"
 }
 $planned = ($plan.body | ConvertFrom-Json).plan
-Write-Host "plan: adoptable=$($planned.adoptable)"
+Write-Host "plan: adoptable=$($planned.adoptable) declared_keys=$($publicKeys.Count)"
 foreach ($difference in $planned.differences) {
     if ($difference.differs) {
         Write-Host ("  differs  {0,-16} {1}" -f $difference.field_class, $difference.policy)
@@ -99,7 +115,7 @@ foreach ($difference in $planned.differences) {
 }
 if (-not $planned.adoptable) {
     if ($planned.PSObject.Properties.Name -contains 'refusal') { Write-Host "refusal: $($planned.refusal)" }
-    throw "the BFF is not adoptable as declared. A redirect_uris or client_keys difference is fixed in the declaration, never in the console."
+    throw "the BFF is not adoptable as declared. A redirect_uris or client_keys difference is fixed in the declaration, never in the console: for client_keys, pass every public JWK the client holds."
 }
 if (-not $Apply) {
     Write-Host "dry run only; run again with -Apply to adopt."

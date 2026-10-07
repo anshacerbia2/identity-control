@@ -235,7 +235,9 @@ jobs:
       # server's was, by identity-experience's create-bff-client.sh, then adopted by
       # scripts/dev-adopt-bff.ps1 exactly as deploy/dev/README.md tells an operator to. A wrong
       # declaration is refused on audience_profile (ADR-IAM-001 §5.12 rule 3), and the adopted BFF's own
-      # token at aal2 is served on a provider route.
+      # token at aal2 is served on a provider route. The client holds two keys, one per developer
+      # device, installed with the kernel's set-client-key.sh, so the adoption declares both and a
+      # declaration of one is refused on client_keys.
       - name: the BFF adoption procedure
         run: |
           set -a; . deploy/dev/.env; set +a
@@ -244,8 +246,12 @@ jobs:
           keys="$RUNNER_TEMP/bff-keys"
           bash .kernel/deploy/dev/new-client-key.sh identity-experience-bff "$keys" "$(id -u):$(id -g)"
           bash .experience/deploy/dev/create-bff-client.sh deploy/dev/.env "$keys/identity-experience-bff.jwk.json"
+          bash .kernel/deploy/dev/new-client-key.sh identity-experience-bff-second-device "$keys" "$(id -u):$(id -g)"
+          bash .kernel/deploy/dev/set-client-key.sh scnehaux identity-experience-bff \
+            "$keys/identity-experience-bff.jwk.json" "$keys/identity-experience-bff-second-device.jwk.json"
           pwsh -NoProfile -File scripts/dev-bff-adoption-proof.ps1 \
-            -BffJwkFile "$keys/identity-experience-bff.jwk.json" -BffKeyFile "$keys/identity-experience-bff.pem"
+            -BffJwkFile "$keys/identity-experience-bff.jwk.json,$keys/identity-experience-bff-second-device.jwk.json" \
+            -BffKeyFile "$keys/identity-experience-bff.pem"
 
       # TDD-identity-control-007: the kernel event record, against this kernel's native store, which the
       # steps above filled with sign-ins and admin changes. Before Proof B, which stops Keycloak.
