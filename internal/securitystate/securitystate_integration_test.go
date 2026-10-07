@@ -810,13 +810,14 @@ func TestTheAppliedHookNamesTheRemovedCredential(t *testing.T) {
 	if err != nil || removed.State != StateApplied {
 		t.Fatalf("removing one's OTP: %+v, %v", removed, err)
 	}
-	revoke := h.command(TypeRevoke, person, 1)
+	// The person's own removal advanced the security version to 2.
+	revoke := h.command(TypeRevoke, person, 2)
 	revoke.Ref, _ = h.refs.Seal(securityref.KindCredential, person, securityref.PurposeAdminRevoke, string(testRealm), "kc-key")
 	revoked, err := h.service.Submit(ctx, revoke)
 	if err != nil || revoked.State != StateApplied {
 		t.Fatalf("revoking the key: %+v, %v", revoked, err)
 	}
-	last := h.command(TypeRevoke, person, 2)
+	last := h.command(TypeRevoke, person, 3)
 	last.Ref, _ = h.refs.Seal(securityref.KindCredential, person, securityref.PurposeAdminRevoke, string(testRealm), "kc-password")
 	if op, err := h.service.Submit(ctx, last); err != nil || op.State != StateRefused {
 		t.Fatalf("revoking the last password: %+v, %v", op, err)
