@@ -309,11 +309,16 @@ Principals created through the API carry none.
 
 ### Week 3 · Event translation and consumption
 
-- Publication of `com.scnehaux.identity.*` through the shared outbox
-- Consumption of `com.scnehaux.organization.membership.*` and `...tenant.*`
-- Deduplication guard on every consumed event
-- Reconciler skeleton reading authority through the published snapshot contract, never
-  through a database connection
+- Publication of `com.scnehaux.identity.*` through the shared outbox. Not built: the canonical
+  events wait until Audit & Evidence consumes them (`TDD-identity-control-007` §Scope; ADR-GLB-018
+  §5.3 retains an outbox event only while a delivery is owed, so with no consumer they would be
+  pruned unread). The kernel event record holds every event meanwhile
+- ✅ Consumption of `com.scnehaux.organization.membership.*` and `...tenant.*`: posted to
+  `POST /v1/deliveries` rather than read from a broker (TDD-identity-control-002 2.0.0, below)
+- ✅ Deduplication guard on every consumed event: foundation-platform's inbox guard in
+  `internal/delivery`
+- ✅ Reconciler reading authority through the published snapshot contract, never through a database
+  connection (`internal/organization`, TDD-identity-control-002 slice 3a and TDD-identity-control-006)
 
 **Exit:** no code path in this service constructs an Organization Database connection,
 asserted by test.
