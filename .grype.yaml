@@ -1,0 +1,7 @@
+# Grype configuration for scripts/image-scan.sh (STD-GLB-009 1.4.0 §Container Images).
+#
+# An ignore rule names the vulnerability and the package. Its reason begins "review-by YYYY-MM-DD:",
+# at most 90 days ahead, and says why the finding does not apply or what it waits for. The scan
+# fails once a rule's date has passed.
+check-for-app-update: false
+ignore: []
