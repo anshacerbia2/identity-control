@@ -308,13 +308,19 @@ func run() error {
 	// in the same transaction (TDD-identity-control-008).
 	requester := securitynotify.NewRequester(logger)
 	kernelEvents.OnRecorded(requester.FromKernelEvent)
-	// A provider's restore, the last step of assisted recovery, requests account_recovered in the
-	// transaction that records it as applied (TDD-identity-control-008 1.3.0).
+	// The security commands request their own notifications in the transaction that records them
+	// applied: a provider's restore, the last step of assisted recovery (TDD-identity-control-008
+	// 1.3.0), and an authenticator removed by the person or a provider, told as who acted (1.4.0).
+	realm := keycloak.Realm(cfg.KeycloakRealm)
 	securityCommands.OnApplied(func(ctx context.Context, tx db.Tx, op securitystate.Applied) error {
-		if op.Type != securitystate.TypeRestore || op.Self {
-			return nil
+		switch {
+		case op.Type == securitystate.TypeRestore && !op.Self:
+			return requester.FromRestore(ctx, tx, op.OperationID, op.Subject)
+		case (op.Type == securitystate.TypeRevoke || op.Type == securitystate.TypeAuthenticatorRemove) &&
+			op.CredentialID != "":
+			return requester.FromRemoval(ctx, tx, realm, op.Subject, op.CredentialID, op.CredentialType, op.Self)
 		}
-		return requester.FromRestore(ctx, tx, op.OperationID, op.Subject)
+		return nil
 	})
 
 	routesConfig := httpapi.RoutesConfig{

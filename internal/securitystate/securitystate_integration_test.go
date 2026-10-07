@@ -791,3 +791,43 @@ func TestTheAppliedHookSeesEachAppliedCommandOnce(t *testing.T) {
 		t.Errorf("%d restore evidence records committed beside a failed hook", n)
 	}
 }
+
+// The applied hook names the credential an authenticator command removed, so the removal is told as
+// whoever asked for it; a refused removal calls nothing (TDD-identity-control-008 1.4.0).
+func TestTheAppliedHookNamesTheRemovedCredential(t *testing.T) {
+	h := newHarness(t)
+	person, user := h.principal("human", "active")
+	h.kernel.SetSecurity(user, keycloakfake.Security{Credentials: []keycloak.Credential{
+		{ID: "kc-password", Type: "password"}, {ID: "kc-otp", Type: "otp"}, {ID: "kc-key", Type: "webauthn"}}})
+	ctx := context.Background()
+	var seen []Applied
+	h.service.OnApplied(func(_ context.Context, _ db.Tx, op Applied) error {
+		seen = append(seen, op)
+		return nil
+	})
+	own, _ := h.refs.Seal(securityref.KindCredential, person, securityref.PurposeSelfAuthenticatorRemove, string(testRealm), "kc-otp")
+	removed, err := h.service.Submit(ctx, h.selfCommand(TypeAuthenticatorRemove, person, own))
+	if err != nil || removed.State != StateApplied {
+		t.Fatalf("removing one's OTP: %+v, %v", removed, err)
+	}
+	revoke := h.command(TypeRevoke, person, 1)
+	revoke.Ref, _ = h.refs.Seal(securityref.KindCredential, person, securityref.PurposeAdminRevoke, string(testRealm), "kc-key")
+	revoked, err := h.service.Submit(ctx, revoke)
+	if err != nil || revoked.State != StateApplied {
+		t.Fatalf("revoking the key: %+v, %v", revoked, err)
+	}
+	last := h.command(TypeRevoke, person, 2)
+	last.Ref, _ = h.refs.Seal(securityref.KindCredential, person, securityref.PurposeAdminRevoke, string(testRealm), "kc-password")
+	if op, err := h.service.Submit(ctx, last); err != nil || op.State != StateRefused {
+		t.Fatalf("revoking the last password: %+v, %v", op, err)
+	}
+	want := []Applied{
+		{OperationID: removed.OperationID, Type: TypeAuthenticatorRemove, Subject: person, Actor: person, Self: true,
+			CredentialID: "kc-otp", CredentialType: "otp"},
+		{OperationID: revoked.OperationID, Type: TypeRevoke, Subject: person, Actor: h.actor,
+			CredentialID: "kc-key", CredentialType: "webauthn"},
+	}
+	if len(seen) != len(want) || seen[0] != want[0] || seen[1] != want[1] {
+		t.Errorf("the hook saw %+v; want %+v", seen, want)
+	}
+}

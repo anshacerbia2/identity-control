@@ -692,6 +692,9 @@ slice:
    - Assisted recovery (1.3.0): a provider's applied restore requests `account_recovered`, method
      `assisted`, to the Principal's active addresses, in the transaction that records the outcome.
      The Identity Experience page for a person's own addresses is in `identity-experience`.
+   - A removal told as who acted (1.4.0): an authenticator a person removes through
+     `/v1/me/authenticators` is told as theirs, with its type, not as an Admin API removal. The
+     command and the sweep share one key per credential, so it is told once.
    - Not yet: the Notification Platform client, which waits on that platform. Until it is in
      production, this remains a production gate.
 

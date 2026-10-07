@@ -173,6 +173,11 @@ type Applied struct {
 	Subject     id.UUID
 	Actor       id.UUID
 	Self        bool
+	// CredentialID and CredentialType name the kernel credential an authenticator command removed, and
+	// are empty when it removed none: the credential was gone already, or another caller deleted it
+	// first.
+	CredentialID   string
+	CredentialType string
 }
 
 // AppliedHook is called for each command whose applied outcome is recorded, in the transaction that

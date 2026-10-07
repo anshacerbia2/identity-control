@@ -2,6 +2,8 @@ package securitynotify
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -63,6 +65,9 @@ func (r *Requester) FromKernelEvent(ctx context.Context, tx db.Tx, realm keycloa
 		return err
 	}
 	sourceKey := fmt.Sprintf("kernel:%s:%s:%s", realm, e.Kind, e.ID)
+	if notified.Credential != "" {
+		sourceKey = RemovalKey(realm, notified.Credential)
+	}
 	// A query rather than QueryRow: no row is the expected answer for a kernel user who is not a
 	// Principal and for an event requested already, and this module reads no driver error type.
 	rows, err := tx.Query(ctx, requestStatement, notified.Subject, string(realm), notificationID.String(), notified.Event,
@@ -96,9 +101,11 @@ func (r *Requester) FromKernelEvent(ctx context.Context, tx db.Tx, realm keycloa
 	return nil
 }
 
-// restoreStatement records the request for a restored Principal, to the addresses it holds now. An
-// operation already requested records nothing.
-const restoreStatement = `WITH a AS (
+// commandStatement records the request for one of this service's own security commands, to the
+// addresses the Principal holds now. A source key already recorded keeps its recipients. Its details
+// are the command's, while it has not been handed over: a removal the sweep read from the kernel
+// before the command finished is told as the command tells it (TDD-identity-control-008 1.4.0).
+const commandStatement = `WITH a AS (
     SELECT coalesce(array_agg(address_id ORDER BY added_at, address_id), '{}'::uuid[]) AS ids
     FROM identity.notification_address
     WHERE principal_id = $2 AND state = 'active'
@@ -108,26 +115,57 @@ INSERT INTO identity.security_notification
 SELECT $1, $2, $3, $4, now(), $5::jsonb, a.ids,
        CASE WHEN cardinality(a.ids) = 0 THEN 'no_address' ELSE 'requested' END
 FROM a
-ON CONFLICT (source_key) DO NOTHING
+ON CONFLICT (source_key) DO UPDATE SET details = EXCLUDED.details
+WHERE identity.security_notification.state = 'requested'
+  AND identity.security_notification.principal_id = EXCLUDED.principal_id
+  AND identity.security_notification.details IS DISTINCT FROM EXCLUDED.details
 RETURNING state`
 
 // FromRestore requests account_recovered for a Principal a provider restored: the last step of
 // assisted recovery (TDD-identity-control-008 1.3.0). It runs in the transaction that records the
 // restore as applied, so the two commit together.
 func (r *Requester) FromRestore(ctx context.Context, tx db.Tx, operationID, principal id.UUID) error {
+	return r.fromCommand(ctx, tx, principal, EventAccountRecovered, "command:operation:"+operationID.String(),
+		map[string]string{"method": "assisted", "actor": ActorAdministrator})
+}
+
+// FromRemoval requests authenticator_removed for a kernel credential this service's own command
+// removed, the person's or a provider's (TDD-identity-control-008 1.4.0). Its source key is the
+// credential's, the one the sweep gives the kernel's admin ACTION for the same removal, so the
+// removal is told once and as the command tells it.
+func (r *Requester) FromRemoval(ctx context.Context, tx db.Tx, realm keycloak.Realm, principal id.UUID,
+	credentialID, credentialType string, self bool) error {
+	details := map[string]string{"actor": ActorAdministrator}
+	if self {
+		details["actor"] = ActorSelf
+	}
+	if t := authenticatorTypes[credentialType]; t != "" {
+		details["authenticator"] = t
+	}
+	return r.fromCommand(ctx, tx, principal, EventAuthenticatorRemoved, RemovalKey(realm, credentialID), details)
+}
+
+// RemovalKey is the source key of a kernel credential's removal. It names the credential by its
+// SHA-256, since a request holds no credential identifier.
+func RemovalKey(realm keycloak.Realm, credentialID string) string {
+	sum := sha256.Sum256([]byte(credentialID))
+	return fmt.Sprintf("credential:%s:%s:removed", realm, hex.EncodeToString(sum[:]))
+}
+
+func (r *Requester) fromCommand(ctx context.Context, tx db.Tx, principal id.UUID, event, sourceKey string,
+	details map[string]string) error {
 	notificationID, err := r.newID()
 	if err != nil {
 		return err
 	}
-	details, err := json.Marshal(map[string]string{"method": "assisted", "actor": ActorAdministrator})
+	encoded, err := json.Marshal(details)
 	if err != nil {
 		return err
 	}
-	sourceKey := "command:operation:" + operationID.String()
-	rows, err := tx.Query(ctx, restoreStatement, notificationID.String(), principal.String(), EventAccountRecovered,
-		sourceKey, string(details))
+	rows, err := tx.Query(ctx, commandStatement, notificationID.String(), principal.String(), event, sourceKey,
+		string(encoded))
 	if err != nil {
-		return fmt.Errorf("securitynotify: request %s for %s: %w", EventAccountRecovered, sourceKey, err)
+		return fmt.Errorf("securitynotify: request %s for %s: %w", event, sourceKey, err)
 	}
 	var state string
 	recorded := rows.Next()
@@ -139,13 +177,12 @@ func (r *Requester) FromRestore(ctx context.Context, tx db.Tx, operationID, prin
 		err = rows.Err()
 	}
 	if err != nil {
-		return fmt.Errorf("securitynotify: request %s for %s: %w", EventAccountRecovered, sourceKey, err)
+		return fmt.Errorf("securitynotify: request %s for %s: %w", event, sourceKey, err)
 	}
 	if !recorded {
 		return nil
 	}
-	attrs := []any{slog.String("notification_id", notificationID.String()), slog.String("principal_id", principal.String()),
-		slog.String("event", EventAccountRecovered), slog.String("operation_id", operationID.String())}
+	attrs := []any{slog.String("principal_id", principal.String()), slog.String("event", event)}
 	if state == StateNoAddress {
 		r.logger.ErrorContext(ctx, "an account security event was recorded for a Principal with no notification address; "+
 			"the person cannot be told", attrs...)

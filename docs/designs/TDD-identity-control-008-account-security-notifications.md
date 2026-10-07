@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-008
   title: Account Security Notifications
   owner: Core Platform Team
-  version: 1.3.0
+  version: 1.4.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -23,7 +23,7 @@ hands it to the Notification Platform (`PAD-PLT-005`) to deliver. The kernel sen
 
 ## Scope
 
-**In scope (1.3.0)**
+**In scope (1.4.0)**
 
 - **Notification addresses.** The address a Principal was created with is its first. The record
   holds more.
@@ -39,6 +39,8 @@ hands it to the Notification Platform (`PAD-PLT-005`) to deliver. The kernel sen
   and removing one, each notified to the addresses held before (`ADR-IAM-007 §5.2`).
 - **Assisted recovery (1.3.0).** A provider's restore of a suspended Principal is notified as an
   account recovered (`ADR-IAM-007 §5.1`).
+- **A removal told as who acted (1.4.0).** An authenticator this service's own command removed is
+  told as the person's or the provider's, with its type, rather than as an Admin API removal.
 
 **Not yet**
 
@@ -60,7 +62,7 @@ every interval. identity-kernel's `compat/notified_events_test.go` records how 2
 | A recovery code used | user `LOGIN`, `credential_type=recovery-authn-codes`, **no** `custom_required_action` | `account_recovered`, `recovery_code` |
 | A password changed | user `UPDATE_CREDENTIAL`, `credential_type=password` | `authenticator_bound`, `password` (1.1.0) |
 | A TOTP, passkey or security key removed by the person | user `REMOVE_CREDENTIAL`, naming the credential type | `authenticator_removed`, by the person (1.1.0) |
-| An authenticator removed through the Admin API | admin `ACTION`, resource `USER`, path `users/{user}/credentials/{credential}` | `authenticator_removed`, by an administrator |
+| An authenticator removed through the Admin API | admin `ACTION`, resource `USER`, path `users/{user}/credentials/{credential}` | `authenticator_removed`, by an administrator, unless this service's command made it (1.4.0) |
 
 Three facts about those marks shape the mapping:
 
@@ -75,6 +77,10 @@ Three facts about those marks shape the mapping:
 - **A removal through the Admin API names its subject in the path.** In an admin event,
   `kc_user_id` is the actor (`TDD-identity-control-007` §Data Model), so the person whose
   authenticator was removed is the `{user}` in `resource_path`.
+- **This service's own removals are admin events too (1.4.0).** A person's
+  `POST /v1/me/authenticators/{security_ref}:remove` and a provider's `:revoke` both delete through
+  the Admin API, as this service's service account. The kernel event cannot tell them apart from a
+  removal in the Admin Console, so the command tells its own (§Removals Told as Who Acted).
 
 ## Data Model
 
@@ -118,7 +124,9 @@ CREATE TABLE identity.security_notification (
   requested, and is delivered to those. Removing an address afterwards does not withdraw a
   notification already owed, so an attacker cannot silence one by changing the addresses first.
 - **One request per event.** The source key is `kernel:{realm}:{kind}:{kc_event_id}`, or for a
-  command, `command:{id}`. A sweep that reads an event twice requests it once.
+  command, `command:{id}`. A removal of a kernel credential is keyed by the credential instead,
+  `credential:{realm}:{sha256 of its id}:removed`, whichever path records it (1.4.0). A sweep that
+  reads an event twice requests it once.
 - **What a request holds.** Its details are bounded: the authenticator type, whether the person or an
   administrator acted, and the recovery method. They hold no credential identifier, no label the
   person typed, and no code.
@@ -180,6 +188,37 @@ the executor records a restore's applied outcome:
   ends, so a restore is never recorded as applied without its notification.
 - **One request per operation.** The source key is the operation's, so an attempt finished twice
   requests once.
+
+### Removals Told as Who Acted (1.4.0)
+
+Telling a person that an administrator removed their authenticator, when they removed it themselves,
+is the alarm NIST SP 800-63B-4 §4.6 asks them to act on: it sends them to the repudiation contact
+for nothing. The command knows who asked, so the command tells it.
+
+```text
+the executor deletes a kernel credential for authenticator.remove (self) or authenticator.revoke:
+    the applied outcome names the credential and its type
+    in the transaction that records it applied, request authenticator_removed
+        details    {"authenticator": otp | webauthn | password, "actor": self | administrator}
+        source     credential:{realm}:{sha256(credential id)}:removed
+the sweep reads the admin ACTION on users/{user}/credentials/{credential}:
+    request authenticator_removed, actor administrator, under the same source key
+```
+
+- **One request per removal.** Both paths use the credential's key. The command finishes in the
+  same moment as its kernel call, before the next sweep, so it is normally first, and the sweep's
+  later insert records nothing.
+- **The sweep can be first.** It can read the event between the kernel call and the finish. The
+  command's insert then replaces the details of the request while it is still `requested`. A request
+  already handed over is never rewritten: the person keeps what they were told.
+- **Only a removal the command made is claimed.** A credential gone before the command deleted it,
+  whether another caller removed it or an earlier attempt of the same command did, names no
+  credential. Its removal is told by the sweep, as an administrator's. A wrong label in that rare
+  case says "administrator" rather than hiding one.
+- **The Admin Console stays an administrator's.** No command names its credential, so the sweep
+  alone records it.
+- **No credential identifier is held.** The key holds the identifier's SHA-256, as the details
+  hold no identifier (§Data Model).
 
 ### The Adapter
 
@@ -247,6 +286,10 @@ POST /v1/me/notification-addresses/{address_id}:remove  self, aal2 recent
 | `IDENTITY_NOTIFICATION_DELIVERY` | empty | `standin` on a development server; refused in production |
 
 ## Testing Strategy
+
+- A person's own removal is told as `self` with its type, and a provider's as `administrator`, once
+  each, whether the command or the sweep records it first. A request already handed over is not
+  rewritten, and a removal in the Admin Console stays an administrator's (1.4.0).
 
 - An applied restore requests `account_recovered`, method `assisted`, to the Principal's active
   addresses, once. A suspension requests nothing, and a hook that fails leaves the restore
