@@ -649,6 +649,12 @@ slice:
    and `organization` optional, so a Tenant administrator's sign-in asks for its Tenant
    (`ADR-ORG-003 §5.3`). The migration records `provider-scope` for every existing `privileged`
    row, and a check holds the form to the class. It stays a provider's to register.
+   - ✅ **The per-sign-in form** (1.32.0, ADR-IAM-008 §5.1, STD-IAM-002 1.7.0 §3.1.1). A
+     `confidential` client alone may name `per-sign-in`: `basic` and `acr` are its defaults, and
+     `scnehaux-provider`, `scnehaux-privileged`, `organization` and `scnehaux-profile` its optional
+     scopes, so Organization Experience is one client whose each sign-in names one form. Both form
+     scopes must be declared to register it, and the reconciler holds its sets closed. Next, in
+     identity-kernel: `compat/` asserts each form from §5.2's requests.
 7. ✅ **An adoption blocks on the claim surface** (`TDD-identity-control-003` 1.30.0, ADR-IAM-001
    §5.12 rule 3). The audience profile scope is a blocking field class, `audience_profile`: a
    declaration naming the wrong class or form is refused at the plan rather than converged into

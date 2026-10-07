@@ -446,8 +446,9 @@ table "client_registration" {
     null = false
     type = text
   }
-  // A privileged registration's form, STD-IAM-002 §3.1.1: provider-scope or tenant-scoped
-  // (TDD-identity-control-003 1.29.0). Set exactly when the class is privileged.
+  // A privileged registration's form, STD-IAM-002 §3.1.1: provider-scope, tenant-scoped
+  // (TDD-identity-control-003 1.29.0) or per-sign-in (ADR-IAM-008, 1.32.0). Set exactly when the
+  // class is privileged.
   column "privileged_form" {
     null = true
     type = text
@@ -546,7 +547,7 @@ table "client_registration" {
   }
 
   check "client_privileged_form_check" {
-    expr = "((audience_class = 'privileged') = (privileged_form IS NOT NULL)) AND ((privileged_form IS NULL) OR (privileged_form IN ('provider-scope', 'tenant-scoped')))"
+    expr = "((audience_class = 'privileged') = (privileged_form IS NOT NULL)) AND ((privileged_form IS NULL) OR (privileged_form IN ('provider-scope', 'tenant-scoped', 'per-sign-in')))"
   }
 
   check "client_signing_algorithm_check" {

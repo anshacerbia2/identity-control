@@ -36,13 +36,14 @@ const (
 
 // tenantClasses are the audience classes that may carry tenant_id (STD-IAM-002 §3.2): internal, and
 // a workload, which is tenant-scoped once its service-account user is a member. privileged carries a
-// Tenant only in its tenant-scoped form (tenantScoped), and external carries no enterprise claim.
+// Tenant only in its tenant-scoped form, or per-sign-in when the sign-in names that form
+// (tenantScoped), and external carries no enterprise claim.
 var tenantClasses = map[string]bool{"internal": true, "workload": true}
 
 // tenantScoped reports whether a client of the class and form may carry tenant_id.
 func tenantScoped(audienceClass, privilegedForm string) bool {
 	if audienceClass == "privileged" {
-		return privilegedForm == FormTenantScoped
+		return privilegedForm == FormTenantScoped || privilegedForm == FormPerSignIn
 	}
 	return tenantClasses[audienceClass]
 }
@@ -55,11 +56,19 @@ type ScopeSets struct {
 
 // DesiredScopes are the closed sets a client of this profile and audience class holds. ok is false
 // for a resource, which is issued no token and whose scopes are not governed.
+//
+// A per-sign-in client (ADR-IAM-008 §5.1) holds both privileged forms' scopes as optional scopes and
+// neither as a default, so a token carries a form only when the sign-in names one.
 func DesiredScopes(profile, audienceClass, privilegedForm string) (ScopeSets, bool) {
 	if profile == ProfileResource {
 		return ScopeSets{}, false
 	}
-	desired := ScopeSets{Default: []string{ScopeBasic, ManagedScope(audienceClass, privilegedForm)}, Optional: []string{}}
+	desired := ScopeSets{Default: []string{ScopeBasic}, Optional: []string{}}
+	if audienceClass == "privileged" && privilegedForm == FormPerSignIn {
+		desired.Optional = append(desired.Optional, formScopes(audienceClass, privilegedForm)...)
+	} else {
+		desired.Default = append(desired.Default, ManagedScope(audienceClass, privilegedForm))
+	}
 	if profile == ProfileWorkload {
 		desired.Default = append(desired.Default, ScopeServiceAccount)
 	} else {
@@ -119,7 +128,8 @@ func LiveScopes(ctx context.Context, kernel ScopeKernel, realm keycloak.Realm, c
 // ConvergeScopes makes the client's sets exactly the desired ones: every scope outside them is
 // detached first, so a scope moving between the sets is never in both, and every missing one is then
 // attached. A scope the realm does not declare is skipped; the caller has already refused a
-// registration whose managed scope is undeclared. Idempotent, so recovery and recreation run it again.
+// registration whose managed scope, or any form scope a per-sign-in client holds, is undeclared
+// (formScopes). Idempotent, so recovery and recreation run it again.
 func ConvergeScopes(ctx context.Context, kernel ScopeKernel, realm keycloak.Realm, client keycloak.ClientUUID,
 	desired ScopeSets, timeout time.Duration) error {
 	live, err := LiveScopes(ctx, kernel, realm, client, timeout)

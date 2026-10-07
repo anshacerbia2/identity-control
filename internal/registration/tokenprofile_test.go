@@ -24,6 +24,10 @@ func TestEachProfileHoldsItsScopeSets(t *testing.T) {
 		// The tenant-scoped form (1.29.0): its own profile scope, and organization to ask for a Tenant.
 		{ProfileConfidential, "privileged", FormTenantScoped, []string{"acr", "basic", "scnehaux-privileged"},
 			[]string{"organization", "scnehaux-profile"}, true},
+		// The per-sign-in form (ADR-IAM-008 §5.1, 1.32.0): no form scope among the defaults, both forms'
+		// scopes and organization as optional ones, so each sign-in names the form it needs.
+		{ProfileConfidential, "privileged", FormPerSignIn, []string{"acr", "basic"},
+			[]string{"organization", "scnehaux-privileged", "scnehaux-profile", "scnehaux-provider"}, true},
 		{ProfilePublic, "external", "", []string{"acr", "basic", "scnehaux-external"}, []string{}, true},
 		{ProfilePublic, "internal", "", []string{"acr", "basic", "scnehaux-internal"}, []string{"organization"}, true},
 		{ProfileWorkload, "workload", "", []string{"basic", "scnehaux-workload", "service_account"}, []string{"organization"}, true},

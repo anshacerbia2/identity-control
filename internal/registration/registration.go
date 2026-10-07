@@ -51,23 +51,65 @@ var managedScopes = map[string]string{
 
 // The privileged forms a registration names (STD-IAM-002 §3.1.1, TDD-identity-control-003 1.29.0).
 // provider-scope is also the claim surface of the resource-scoped form, which carries the same claims.
+// per-sign-in (ADR-IAM-008 §5.1, 1.32.0) holds both forms' scopes as optional scopes, so each sign-in
+// names the one form it needs; only a confidential client may name it.
 const (
 	FormProviderScope = "provider-scope"
 	FormTenantScoped  = "tenant-scoped"
+	FormPerSignIn     = "per-sign-in"
 )
 
 // privilegedScopes maps a privileged form to its managed scope.
+//
+// per-sign-in holds no form scope as a default. Its entry is only the declared scope that Prepare,
+// adoption, recovery and recreation resolve before the client is scoped; convergence then attaches
+// its sets by name (DesiredScopes), and nothing attaches this scope to it as a default. Registration
+// and adoption also check that every form scope it holds is declared (formScopes), because
+// convergence skips an undeclared one.
 var privilegedScopes = map[string]string{
 	FormProviderScope: "scnehaux-provider",
 	FormTenantScoped:  "scnehaux-privileged",
+	FormPerSignIn:     "scnehaux-provider",
 }
 
-// ManagedScope is the one managed client scope a registration of the class and form attaches.
+// ManagedScope is the one managed client scope a registration of the class and form attaches. For
+// per-sign-in it is the scope resolved in its place (privilegedScopes), never a default it holds.
 func ManagedScope(audienceClass, privilegedForm string) string {
 	if audienceClass == "privileged" {
 		return privilegedScopes[privilegedForm]
 	}
 	return managedScopes[audienceClass]
+}
+
+// formScopes are the audience profile scopes a client of the class and form holds, each of which the
+// realm must declare before it is registered: the managed scope, or both forms' scopes for
+// per-sign-in.
+func formScopes(audienceClass, privilegedForm string) []string {
+	if audienceClass == "privileged" && privilegedForm == FormPerSignIn {
+		return []string{privilegedScopes[FormProviderScope], privilegedScopes[FormTenantScoped]}
+	}
+	return []string{ManagedScope(audienceClass, privilegedForm)}
+}
+
+// managedScopeID resolves the managed scope's identifier, checking that the realm declares every
+// form scope the client holds, the managed scope among them. An undeclared one is ErrScopeUndeclared.
+func (s *Service) managedScopeID(ctx context.Context, audienceClass, privilegedForm string) (string, error) {
+	managed, managedID := ManagedScope(audienceClass, privilegedForm), ""
+	for _, name := range formScopes(audienceClass, privilegedForm) {
+		scopeID, err := call(ctx, s.cfg.CallTimeout, func(ctx context.Context) (string, error) {
+			return s.kernel.ClientScopeID(ctx, s.cfg.Realm, name)
+		})
+		if errors.Is(err, keycloak.ErrNotFound) {
+			return "", fmt.Errorf("%w: %s", ErrScopeUndeclared, name)
+		}
+		if err != nil {
+			return "", err
+		}
+		if name == managed {
+			managedID = scopeID
+		}
+	}
+	return managedID, nil
 }
 
 // normalized gives a privileged request that names no form the provider-scope form, which every
@@ -126,8 +168,8 @@ type Request struct {
 	ClientKey     string `json:"client_key"`
 	Profile       string `json:"profile"`
 	AudienceClass string `json:"audience_class"`
-	// PrivilegedForm is a privileged registration's form, provider-scope or tenant-scoped, and empty
-	// for every other class. A privileged request naming none is provider-scope.
+	// PrivilegedForm is a privileged registration's form, provider-scope, tenant-scoped or
+	// per-sign-in, and empty for every other class. A privileged request naming none is provider-scope.
 	PrivilegedForm string   `json:"privileged_form,omitempty"`
 	ApplicationRef string   `json:"application_ref"`
 	LifetimeClass  string   `json:"lifetime_class"`
@@ -286,7 +328,9 @@ func validate(req Request) error {
 	case req.AudienceClass != "privileged" && req.PrivilegedForm != "":
 		return invalid("privileged_form is named only for the privileged audience class")
 	case req.AudienceClass == "privileged" && privilegedScopes[req.PrivilegedForm] == "":
-		return invalid("privileged_form must be provider-scope or tenant-scoped")
+		return invalid("privileged_form must be provider-scope, tenant-scoped or per-sign-in")
+	case req.PrivilegedForm == FormPerSignIn && req.Profile != ProfileConfidential:
+		return invalid("privileged_form per-sign-in is open only to the confidential profile (ADR-IAM-008 §5.1)")
 	}
 	switch {
 	case req.Profile == ProfileWorkload && req.AudienceClass != "workload":
@@ -465,12 +509,7 @@ func (s *Service) Prepare(ctx context.Context, req Request) (Prepared, error) {
 		}
 		prepared.key = &parsed
 	}
-	scopeID, err := call(ctx, s.cfg.CallTimeout, func(ctx context.Context) (string, error) {
-		return s.kernel.ClientScopeID(ctx, s.cfg.Realm, ManagedScope(req.AudienceClass, req.PrivilegedForm))
-	})
-	if errors.Is(err, keycloak.ErrNotFound) {
-		return Prepared{}, fmt.Errorf("%w: %s", ErrScopeUndeclared, ManagedScope(req.AudienceClass, req.PrivilegedForm))
-	}
+	scopeID, err := s.managedScopeID(ctx, req.AudienceClass, req.PrivilegedForm)
 	if err != nil {
 		return Prepared{}, err
 	}
