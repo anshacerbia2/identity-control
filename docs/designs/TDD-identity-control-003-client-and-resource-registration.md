@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-003
   title: Protocol Client and Protected-Resource Registration
   owner: Core Platform Team
-  version: 1.33.0
+  version: 1.34.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -378,10 +378,12 @@ CREATE TABLE identity.registration_state_change (
     registration_id  UUID        NOT NULL REFERENCES identity.client_registration(registration_id),
     from_state       TEXT        NOT NULL,
     to_state         TEXT        NOT NULL,
-    changed_by       UUID        NOT NULL,
+    changed_by       UUID,
+    automatic        BOOLEAN     NOT NULL DEFAULT false,
     reason           TEXT        NOT NULL,
     changed_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT registration_state_change_reason_check CHECK (btrim(reason) <> ''),
+    CONSTRAINT registration_state_change_actor_check CHECK ((changed_by IS NULL) = automatic),
     CONSTRAINT registration_state_change_transition_check CHECK (
         (from_state = 'active' AND to_state IN ('suspended', 'retired'))
         OR (from_state = 'suspended' AND to_state IN ('active', 'retired')))
@@ -394,6 +396,14 @@ the registration already in the state it asks for records nothing, because nothi
 runtime role inserts and reads it, and can neither update nor delete it (`grants.sql`).
 `client_registration.suspended_at` is the latest suspension, kept after a restore; the state says
 whether it is in force.
+
+**An automatic suspension names no person (1.34.0).** The workload sweep suspends a workload that
+has been orphaned past `IDENTITY_WORKLOAD_ORPHAN_SUSPEND_AFTER` (`TDD-identity-control-004` 1.5.0
+§Orphan Handling), and nobody asked for it. Its row is `automatic`, with no `changed_by` and a
+reason naming the rule, and the check holds that every other row names the Principal who asked. A
+reserved identifier standing for the service was rejected for the reason the bootstrap ceremony
+mints an ordinary one (`TDD-identity-control-001` §The Bootstrap Ceremony): a well-known value is
+one an attacker knows in every estate.
 
 ### Client Key Records
 
