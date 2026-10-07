@@ -201,8 +201,10 @@ func TestARestoreRequestsAnAssistedRecoveryOnce(t *testing.T) {
 	p := openPool(t)
 	realm := keycloak.Realm("notify-" + newID(t).String())
 	principal, _ := person(t, p, realm, "first@example.test", "second@example.test")
-	exec(t, p, `INSERT INTO identity.notification_address (address_id, principal_id, channel, address, origin, state)
-	    VALUES ($1, $2, 'email', 'unproven@example.test', 'added', 'pending')`, newID(t).String(), principal.String())
+	exec(t, p, `INSERT INTO identity.notification_address
+	    (address_id, principal_id, channel, address, origin, state, proof_hash, proof_expires_at)
+	    VALUES ($1, $2, 'email', 'unproven@example.test', 'added', 'pending', 'not-a-real-hash', now() + interval '10 minutes')`,
+		newID(t).String(), principal.String())
 	operation := newID(t)
 	r := NewRequester(nil)
 	for range 2 { // an attempt finished twice requests once
