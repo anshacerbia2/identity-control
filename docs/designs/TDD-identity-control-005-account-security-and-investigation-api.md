@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-005
   title: Account Security and Investigation API Mediation
   owner: Core Platform Team
-  version: 2.9.1
+  version: 2.9.2
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -103,9 +103,20 @@ cannot suspend, restore, or revoke an authenticator of, the Principal in its own
 ## Self-Service as Built (2.3.0)
 
 Slice 3 is built in two parts. **3a**, built here, is a person's own sessions and authenticators.
-**3b** is consents. It waits for two things: identity-kernel's compat suite has to prove the consent
-listing and revocation, which needs a client that asks for consent, and a registered client has to
-require consent at all. Until then, `GET /v1/me/consents` is not served.
+**3b** is consents. It waited for two things, and one remains (2.9.2):
+- **The kernel's proof: answered.** identity-kernel's `compat/consent_test.go` proved on 26.7.5
+  (compat run 37607165522):
+  - `GET /admin/realms/{realm}/users/{id}/consents` lists a person's consents.
+  - `DELETE .../consents/{clientId}` withdraws one and refuses the refresh tokens issued on it.
+  - A second withdrawal answers `404`.
+  - A withdrawal needs `manage-users` and is recorded as an admin `ACTION` on
+    `users/{id}/consents/{client}`, which this service's notifications do not take for a credential
+    removal.
+- **A client that asks for consent: open.** The kernel shows the consent page only for client
+  scopes marked "display on consent screen", and every scope the realm declares is not. No
+  registered client here can therefore produce a consent. Which clients ask a person's consent is a
+  decision about third-party access, not a build step. Until it is made, `GET /v1/me/consents` is
+  not served.
 
 **Route class `self`.**
 - The subject is the `principal_id` in the token, and no path segment names it.
