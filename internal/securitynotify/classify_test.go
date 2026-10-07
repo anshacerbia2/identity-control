@@ -1,6 +1,7 @@
 package securitynotify
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/anshacerbia2/identity-control/internal/keycloak"
@@ -64,5 +65,23 @@ func TestEachProvenMarkMapsAsTheTableSays(t *testing.T) {
 				t.Errorf("%s: detail %s is %q, want %q", name, k, got.Details[k], v)
 			}
 		}
+	}
+}
+
+// An admin removal is keyed by its credential, named only by a digest, so the command that made it
+// and the sweep that reads it request one notification (TDD-identity-control-008 1.4.0).
+func TestAnAdminRemovalIsKeyedByItsCredential(t *testing.T) {
+	got, ok := Classify(keycloak.KernelEvent{Kind: keycloak.KindAdminEvent, ID: "a", Type: "ACTION", UserID: "kc-operator",
+		ResourceType: "USER", ResourcePath: "users/kc-subject/credentials/c1"})
+	if !ok || got.Credential != "c1" {
+		t.Fatalf("Classify: %+v, %t; want the credential c1", got, ok)
+	}
+	key := RemovalKey("scnehaux", "c1")
+	if key != RemovalKey("scnehaux", "c1") || key == RemovalKey("scnehaux", "c2") || key == RemovalKey("other", "c1") {
+		t.Errorf("RemovalKey is not one key per realm and credential: %s", key)
+	}
+	// An identifier hex cannot spell, so finding it means it was written out.
+	if k := RemovalKey("scnehaux", "kc-otp-credential"); strings.Contains(k, "kc-otp-credential") {
+		t.Errorf("RemovalKey %s names the credential identifier", k)
 	}
 }

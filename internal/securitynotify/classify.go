@@ -34,6 +34,9 @@ type Notified struct {
 	// event, the {user} in its resource path, since an admin event's user is its actor.
 	Subject string
 	Details map[string]string
+	// Credential is the kernel credential an admin removal names in its path. The request is keyed by
+	// it, so a removal this service's own command made is told once, as the command tells it.
+	Credential string
 }
 
 // The authenticator types a binding names, as the kernel records them.
@@ -80,7 +83,7 @@ func Classify(e keycloak.KernelEvent) (Notified, bool) {
 		if e.Type == "ACTION" && e.ResourceType == "USER" {
 			parts := strings.Split(e.ResourcePath, "/")
 			if len(parts) == 4 && parts[0] == "users" && parts[1] != "" && parts[2] == "credentials" && parts[3] != "" {
-				return Notified{Event: EventAuthenticatorRemoved, Subject: parts[1],
+				return Notified{Event: EventAuthenticatorRemoved, Subject: parts[1], Credential: parts[3],
 					Details: map[string]string{"actor": ActorAdministrator}}, true
 			}
 		}

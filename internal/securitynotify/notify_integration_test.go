@@ -244,3 +244,69 @@ func TestARestoreRequestsAnAssistedRecoveryOnce(t *testing.T) {
 		t.Errorf("a restored Principal with no address: state %q, want no_address", s)
 	}
 }
+
+// A removal this service's command made is told once, as the command tells it, whether the command
+// or the sweep records it first; once handed over it is not rewritten (TDD-identity-control-008 1.4.0).
+func TestARemovalIsToldOnceAsTheCommandTellsIt(t *testing.T) {
+	p := openPool(t)
+	realm := keycloak.Realm("notify-" + newID(t).String())
+	r := NewRequester(nil)
+	removal := func(principal id.UUID, credential string, self bool) {
+		t.Helper()
+		if err := p.InTx(context.Background(), func(ctx context.Context, tx db.Tx) error {
+			return r.FromRemoval(ctx, tx, realm, principal, credential, "otp", self)
+		}); err != nil {
+			t.Fatalf("FromRemoval: %v", err)
+		}
+	}
+	adminAction := func(kcUser, credential string) keycloak.KernelEvent {
+		return keycloak.KernelEvent{Kind: keycloak.KindAdminEvent, ID: newID(t).String(), Time: time.Now().UTC(),
+			Type: "ACTION", UserID: "kc-identity-control", ResourceType: "USER",
+			ResourcePath: "users/" + kcUser + "/credentials/" + credential}
+	}
+	told := func(principal id.UUID) (int, string, string) {
+		t.Helper()
+		var actor, authenticator string
+		n := scalar[int](t, p, `SELECT count(*) FROM identity.security_notification WHERE principal_id = $1`, principal.String())
+		if err := p.InTx(context.Background(), func(ctx context.Context, tx db.Tx) error {
+			return tx.QueryRow(ctx, `SELECT details->>'actor', coalesce(details->>'authenticator', '')
+			    FROM identity.security_notification WHERE principal_id = $1 LIMIT 1`, principal.String()).Scan(&actor, &authenticator)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return n, actor, authenticator
+	}
+
+	// The command first: the sweep's later read of the same removal records nothing.
+	first, firstUser := person(t, p, realm, "first@example.test")
+	removal(first, "cred-1", true)
+	request(t, p, realm, adminAction(firstUser, "cred-1"))
+	if n, actor, authenticator := told(first); n != 1 || actor != ActorSelf || authenticator != "otp" {
+		t.Errorf("command first: %d requests, actor %q, authenticator %q; want 1, self, otp", n, actor, authenticator)
+	}
+
+	// The sweep first, before the command finished: the command's telling replaces it.
+	second, secondUser := person(t, p, realm, "second@example.test")
+	request(t, p, realm, adminAction(secondUser, "cred-2"))
+	removal(second, "cred-2", true)
+	if n, actor, authenticator := told(second); n != 1 || actor != ActorSelf || authenticator != "otp" {
+		t.Errorf("sweep first: %d requests, actor %q, authenticator %q; want 1, self, otp", n, actor, authenticator)
+	}
+
+	// Handed over already: what the person was told stays.
+	third, thirdUser := person(t, p, realm, "third@example.test")
+	request(t, p, realm, adminAction(thirdUser, "cred-3"))
+	exec(t, p, `UPDATE identity.security_notification SET state = 'submitted', submitted_at = now(), platform_ref = 'p'
+	    WHERE principal_id = $1`, third.String())
+	removal(third, "cred-3", true)
+	if n, actor, _ := told(third); n != 1 || actor != ActorAdministrator {
+		t.Errorf("handed over: %d requests, actor %q; want 1, unchanged administrator", n, actor)
+	}
+
+	// A removal no command made, such as one in the Admin Console, is an administrator's.
+	fourth, fourthUser := person(t, p, realm, "fourth@example.test")
+	request(t, p, realm, adminAction(fourthUser, "cred-4"))
+	if n, actor, _ := told(fourth); n != 1 || actor != ActorAdministrator {
+		t.Errorf("the console: %d requests, actor %q; want 1, administrator", n, actor)
+	}
+}

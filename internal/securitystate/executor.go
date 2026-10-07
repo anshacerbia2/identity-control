@@ -67,6 +67,8 @@ type outcome struct {
 	state      string // applied, refused, retrying or unresolved
 	resultCode string
 	errorClass string
+	// removed is the kernel credential an authenticator command deleted; nil when it deleted none.
+	removed *keycloak.Credential
 }
 
 // RunOnce executes every due operation it can claim, up to the batch size, and reports how many.
@@ -189,10 +191,16 @@ func (s *Service) attempt(ctx context.Context, c claimed) outcome {
 	case TypeTerminateAll:
 		err = s.terminateAll(ctx, c.kernelUser)
 	case TypeRevoke, TypeAuthenticatorRemove:
-		var refused string
-		refused, err = s.revoke(ctx, c)
+		var (
+			refused string
+			removed *keycloak.Credential
+		)
+		refused, removed, err = s.revoke(ctx, c)
 		if err == nil && refused != "" {
 			return outcome{state: StateRefused, resultCode: refused}
+		}
+		if err == nil {
+			return outcome{state: StateApplied, resultCode: StateApplied, removed: removed}
 		}
 	case TypeSessionTerminate:
 		var refused string
@@ -333,13 +341,13 @@ var firstFactors = map[string]bool{"password": true, "webauthn-passwordless": tr
 
 // revoke deletes one credential unless it is the last first factor. It returns a refusal's result
 // code, or an error to classify.
-func (s *Service) revoke(ctx context.Context, c claimed) (string, error) {
+func (s *Service) revoke(ctx context.Context, c claimed) (string, *keycloak.Credential, error) {
 	// The handle was checked with its expiry when the command was accepted. Its TTL bounds a
 	// browser's use, not an accepted operation's.
 	kind, purpose := refBinding(c.opType)
 	ref, err := s.refs.OpenAccepted(c.ref, kind, c.subject, purpose)
 	if err != nil {
-		return "reference", nil
+		return "reference", nil, nil
 	}
 	var credentials []keycloak.Credential
 	if err := s.call(ctx, func(ctx context.Context) error {
@@ -347,7 +355,7 @@ func (s *Service) revoke(ctx context.Context, c claimed) (string, error) {
 		credentials, err = s.kernel.UserCredentials(ctx, s.cfg.Realm, c.kernelUser)
 		return err
 	}); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	var target *keycloak.Credential
 	others, otherSecond := 0, 0
@@ -362,10 +370,10 @@ func (s *Service) revoke(ctx context.Context, c claimed) (string, error) {
 		}
 	}
 	if target == nil {
-		return "", nil // already gone: the read-back agrees
+		return "", nil, nil // already gone: the read-back agrees
 	}
 	if firstFactors[target.Type] && others == 0 {
-		return ResultLastAuthenticator, nil
+		return ResultLastAuthenticator, nil, nil
 	}
 	if secondFactors[target.Type] && otherSecond == 0 {
 		// The floor keeps a provider who can sign in at two factors. One the kernel has disabled, by a
@@ -373,37 +381,43 @@ func (s *Service) revoke(ctx context.Context, c claimed) (string, error) {
 		// factor then (ADR-IAM-005 §5.5).
 		u, err := s.readUser(ctx, c.kernelUser)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 		if u.Enabled {
 			floor, err := s.holdsAssuranceFloor(ctx, c.subject)
 			if err != nil {
-				return "", err
+				return "", nil, err
 			}
 			if floor {
-				return ResultAssuranceFloor, nil
+				return ResultAssuranceFloor, nil, nil
 			}
 		}
 	}
 	err = s.call(ctx, func(ctx context.Context) error {
 		return s.kernel.DeleteCredential(ctx, s.cfg.Realm, c.kernelUser, ref.KernelID)
 	})
-	if err != nil && !errors.Is(err, keycloak.ErrNotFound) {
-		return "", err
+	// A credential another caller deleted first was not removed by this command, and is told as that
+	// caller's removal.
+	removed := target
+	if errors.Is(err, keycloak.ErrNotFound) {
+		removed, err = nil, nil
+	}
+	if err != nil {
+		return "", nil, err
 	}
 	if err := s.call(ctx, func(ctx context.Context) error {
 		var err error
 		credentials, err = s.kernel.UserCredentials(ctx, s.cfg.Realm, c.kernelUser)
 		return err
 	}); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	for _, credential := range credentials {
 		if credential.ID == ref.KernelID {
-			return "", fmt.Errorf("%w: the credential is still listed", errReadBack)
+			return "", nil, fmt.Errorf("%w: the credential is still listed", errReadBack)
 		}
 	}
-	return "", nil
+	return "", removed, nil
 }
 
 // terminateOne ends one of the person's sessions, named by its sealed reference. A session already
@@ -487,8 +501,12 @@ func (s *Service) finish(ctx context.Context, c claimed, o outcome) error {
 			return fmt.Errorf("securitystate: record the evidence: %w", err)
 		}
 		if o.state == StateApplied && s.applied != nil {
-			if err := s.applied(ctx, tx, Applied{OperationID: c.operationID, Type: c.opType, Subject: c.subject,
-				Actor: c.actor, Self: c.actor == c.subject}); err != nil {
+			op := Applied{OperationID: c.operationID, Type: c.opType, Subject: c.subject, Actor: c.actor,
+				Self: c.actor == c.subject}
+			if o.removed != nil {
+				op.CredentialID, op.CredentialType = o.removed.ID, o.removed.Type
+			}
+			if err := s.applied(ctx, tx, op); err != nil {
 				return fmt.Errorf("securitystate: the applied hook: %w", err)
 			}
 		}
