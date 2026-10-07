@@ -13,7 +13,7 @@
 //
 // What this package does not do yet, and why:
 //
-//   - Audience scope, signing algorithm and profile are not compared yet.
+//   - Signing algorithm and profile are not compared yet.
 package reconcile
 
 import (
@@ -52,6 +52,10 @@ const (
 
 	// TokenFormat is a client's at+jwt header attribute and its client_id mapper (STD-IAM-002 §3.2).
 	TokenFormat FieldClass = "token_format"
+
+	// Audience is a client's audience mappers: one per resource its registration declares, and no
+	// other (TDD-identity-control-003 1.33.0).
+	Audience FieldClass = "audience"
 )
 
 // FindingClass is what the sweep did about a divergence.
@@ -188,6 +192,9 @@ type registration struct {
 
 	// audienceClass and privilegedForm select the managed scope among the client's scope sets.
 	audienceClass, privilegedForm string
+
+	// audience is the resources the client's tokens name, as registered.
+	audience []string
 }
 
 // comparesTokenProfile reports whether the profile is issued tokens, and so holds a token format
@@ -362,7 +369,7 @@ func (r *Reconciler) Sweep(ctx context.Context) (Run, error) {
 			diverged = diverged || differs
 			continue
 		}
-		for _, field := range []FieldClass{TokenLifespan, RedirectURIs, ClientKeys, AudienceScope, TokenFormat} {
+		for _, field := range []FieldClass{TokenLifespan, RedirectURIs, ClientKeys, AudienceScope, TokenFormat, Audience} {
 			wrote, differs, err := r.reconcileField(ctx, run.ID, reg, client, scopes[reg.client], field, open, exceptions,
 				latest, attribution)
 			if err != nil {
@@ -467,6 +474,20 @@ func (r *Reconciler) reconcileField(
 		observed = map[string]any{"at_jwt": client.RFC9068, "client_id": client.ClientIDClaim}
 		clientKey := reg.clientKey
 		repair.TokenFormat = &clientKey
+	case Audience:
+		applies = reg.comparesTokenProfile()
+		differs = !sameList(client.Audience, reg.audience)
+		if applies && differs {
+			// Confirmed first: an audience change writes the kernel before it commits the audience this
+			// sweep read, and acting on that would record a change nobody made.
+			var err error
+			if reg, client, differs, err = r.confirmAudienceDrift(ctx, reg); err != nil {
+				return false, false, err
+			}
+		}
+		desired, observed = sortedList(reg.audience), sortedList(client.Audience)
+		audience := sortedList(reg.audience)
+		repair.Audience = &audience
 	}
 	if !applies {
 		return false, false, nil
@@ -628,8 +649,43 @@ func (r *Reconciler) apply(ctx context.Context, reg registration, field FieldCla
 		return !after.Enabled && after.NotBefore >= reg.notBefore(), nil
 	case TokenFormat:
 		return after.RFC9068 && after.ClientIDClaim == reg.clientKey, nil
+	case Audience:
+		return sameList(after.Audience, reg.audience), nil
 	}
 	return false, nil
+}
+
+// confirmAudienceDrift reads the registration's audience again under the share lock an audience
+// change's update lock excludes, then the client again, and reports whether they still differ.
+func (r *Reconciler) confirmAudienceDrift(ctx context.Context, reg registration) (registration, keycloak.Client, bool, error) {
+	if err := r.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		return tx.QueryRow(ctx, lockedAudienceStatement, reg.id.String()).Scan(&reg.audience)
+	}); err != nil {
+		return reg, keycloak.Client{}, true, fmt.Errorf("reconcile: read %s's audience again: %w", reg.clientKey, err)
+	}
+	client, err := call(ctx, r.cfg.CallTimeout, func(ctx context.Context) (keycloak.Client, error) {
+		return r.kernel.GetClient(ctx, r.cfg.Realm, reg.client)
+	})
+	if err != nil {
+		return reg, keycloak.Client{}, true, fmt.Errorf("reconcile: read %s again: %w", reg.clientKey, err)
+	}
+	return reg, client, !sameList(client.Audience, reg.audience), nil
+}
+
+// sameList reports whether two lists hold the same values the same number of times. A second mapper
+// for one resource is a difference a set comparison would miss.
+func sameList(a, b []string) bool {
+	return slices.Equal(sortedList(a), sortedList(b))
+}
+
+// sortedList is a sorted copy that keeps repeats, as a list of mappers is recorded.
+func sortedList(values []string) []string {
+	out := slices.Clone(values)
+	if out == nil {
+		out = []string{}
+	}
+	slices.Sort(out)
+	return out
 }
 
 // sortedScopes is a scope sets value as a finding records it.

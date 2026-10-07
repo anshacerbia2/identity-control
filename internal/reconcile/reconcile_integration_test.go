@@ -169,7 +169,7 @@ func (h *harness) caller() registered {
 	r := h.register("identity-control-caller", "confidential", "", []string{"identity-control"}, []string{callbackURI})
 	h.kernel.Put(keycloak.Client{ID: r.client, ClientID: "identity-control-caller", Enabled: true,
 		RedirectURIs: []string{callbackURI}, AccessTokenLifespan: 240, Credential: heldBy(r.key),
-		RFC9068: true, ClientIDClaim: "identity-control-caller"})
+		RFC9068: true, ClientIDClaim: "identity-control-caller", Audience: []string{"identity-control"}})
 	h.holdsItsScopes(r.client, "confidential")
 	return r
 }
@@ -1172,5 +1172,68 @@ func TestAPerSignInClientHoldsNoDefaultForm(t *testing.T) {
 	live, err := clientregistration.LiveScopes(context.Background(), h.kernel, realm, caller.client, time.Second)
 	if err != nil || !clientregistration.SameScopes(live, desired) {
 		t.Errorf("after the sweep the client holds %+v, %v; want %+v", live, err, desired)
+	}
+}
+
+// The audience field class (TDD-identity-control-003 1.33.0): an audience mapper added in the console
+// is repaired when an admin event names who added it, and left for an operator when none does. A
+// second mapper for a declared resource, or one under another name, is a difference too.
+func TestAudienceMappersChangedInTheConsoleAreHeldToTheRegistration(t *testing.T) {
+	h := newHarness(t)
+	caller := h.caller()
+	if run := h.sweep(); run.Outcome != Converged {
+		t.Fatalf("a caller holding its declared audience mapper did not converge: %+v", run)
+	}
+
+	h.tick(time.Second)
+	h.kernel.ConsoleChange(admin, caller.client, func(c *keycloak.Client) {
+		c.Audience = []string{"identity-control", "orders-api"}
+	})
+	h.tick(time.Second)
+	if run := h.sweep(); run.Outcome != Drift {
+		t.Errorf("run = %+v, want drift", run)
+	}
+	if got := h.live(caller.client).Audience; !slices.Equal(got, []string{"identity-control"}) {
+		t.Errorf("the audience is %v after an attributed repair, want exactly the declared one", got)
+	}
+	findings := h.findings(caller.client)
+	if len(findings) != 1 || findings[0].field != string(Audience) || findings[0].class != string(Repaired) ||
+		findings[0].actor != admin || findings[0].convergedAt == nil {
+		t.Fatalf("findings = %+v, want one converged repaired audience finding", findings)
+	}
+
+	// A hand-made mapper under another name, with no admin event: reported, not repaired.
+	h.tick(time.Minute)
+	h.kernel.ConsoleChange("", caller.client, func(c *keycloak.Client) {
+		c.Audience = []string{"identity-control", "mapper:hand-made"}
+	})
+	h.tick(time.Second)
+	h.sweep()
+	if got := h.live(caller.client).Audience; len(got) != 2 {
+		t.Errorf("an unattributed audience change was repaired: %v", got)
+	}
+	open := h.findings(caller.client)
+	last := open[len(open)-1]
+	if last.field != string(Audience) || last.class != string(Unattributed) || last.convergedAt != nil {
+		t.Fatalf("finding = %+v, want an open unattributed audience finding", last)
+	}
+	operator, _ := id.NewV7()
+	if err := h.reconciler.Resolve(context.Background(), Resolution{Findings: []id.UUID{last.id},
+		ResolvedBy: operator, Reason: "the hand-made mapper was reviewed"}); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if got := h.live(caller.client).Audience; !slices.Equal(got, []string{"identity-control"}) {
+		t.Errorf("the operator's reconcile left the audience at %v", got)
+	}
+
+	// Two mappers for the declared resource are not the declared one.
+	h.tick(time.Minute)
+	h.kernel.ConsoleChange(admin, caller.client, func(c *keycloak.Client) {
+		c.Audience = []string{"identity-control", "identity-control"}
+	})
+	h.tick(time.Second)
+	h.sweep()
+	if got := h.live(caller.client).Audience; !slices.Equal(got, []string{"identity-control"}) {
+		t.Errorf("a repeated mapper was kept: %v", got)
 	}
 }

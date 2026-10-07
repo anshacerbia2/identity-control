@@ -373,6 +373,25 @@ func TestGetClientReadsTheTokenFormat(t *testing.T) {
 	}
 }
 
+// A client read back lists its audience mappers: the resource of each one written as the registration
+// path writes it, and any other by its name, so a hand-made mapper is never taken for a declared
+// resource (the audience field class, TDD-identity-control-003 1.33.0).
+func TestGetClientReadsTheAudienceMappers(t *testing.T) {
+	admin, _ := newAdmin(t, &kernel{adminBody: `{"id":"c","clientId":"web","attributes":{},"protocolMappers":[
+	  {"name":"audience-orders","protocolMapper":"oidc-audience-mapper",
+	   "config":{"included.client.audience":"orders","access.token.claim":"true","id.token.claim":"false"}},
+	  {"name":"hand-made","protocolMapper":"oidc-audience-mapper",
+	   "config":{"included.client.audience":"billing","access.token.claim":"true"}},
+	  {"name":"audience-ledger","protocolMapper":"oidc-audience-mapper",
+	   "config":{"included.custom.audience":"ledger","access.token.claim":"true"}},
+	  {"name":"client_id","protocolMapper":"oidc-hardcoded-claim-mapper","config":{"claim.name":"client_id","claim.value":"web"}}]}`})
+	client, err := admin.GetClient(context.Background(), testRealm, "c")
+	want := []string{"mapper:audience-ledger", "mapper:hand-made", "orders"}
+	if err != nil || strings.Join(client.Audience, ",") != strings.Join(want, ",") {
+		t.Errorf("audience = %v (%v), want %v", client.Audience, err, want)
+	}
+}
+
 // The token format is the attribute, through the representation, and the mapper, through its own
 // resource: created when absent, rewritten when it writes another value, left when it is right.
 func TestPatchClientWritesTheTokenFormat(t *testing.T) {

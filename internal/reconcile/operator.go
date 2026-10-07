@@ -260,6 +260,9 @@ func (r *Reconciler) Resolve(ctx context.Context, resolution Resolution) error {
 		case TokenFormat:
 			clientKey := t.reg.clientKey
 			patch.TokenFormat = &clientKey
+		case Audience:
+			audience := sortedList(t.reg.audience)
+			patch.Audience = &audience
 		}
 		converged, err := r.apply(ctx, t.reg, t.field, patch)
 		if err != nil {

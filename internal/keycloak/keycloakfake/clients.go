@@ -229,6 +229,7 @@ func (r *Registry) PatchClient(ctx context.Context, _ keycloak.Realm, client key
 		spec := r.specs[client]
 		spec.Audience = append([]string{}, *patch.Audience...)
 		r.specs[client] = spec
+		stored.Audience = sortedAudience(*patch.Audience)
 	}
 	if patch.Keys != nil {
 		spec := r.specs[client]
@@ -273,7 +274,18 @@ func (r *Registry) ServiceAccountUserID(context.Context) (string, error) {
 	return r.ServiceAccount, nil
 }
 
+// sortedAudience is a client's audience mappers as the kernel's representation lists them, sorted.
+func sortedAudience(resources []string) []string {
+	if len(resources) == 0 {
+		return nil
+	}
+	out := append([]string(nil), resources...)
+	sort.Strings(out)
+	return out
+}
+
 func copyClient(client keycloak.Client) keycloak.Client {
+	client.Audience = sortedAudience(client.Audience)
 	client.RedirectURIs = append([]string(nil), client.RedirectURIs...)
 	client.Credential.Keys = append([]keycloak.JWK(nil), client.Credential.Keys...)
 	return client
@@ -334,6 +346,7 @@ func (r *Registry) createClient(ctx context.Context, _ keycloak.Realm, spec keyc
 	}
 	if !spec.Resource {
 		created.RFC9068, created.ClientIDClaim = true, spec.ClientID
+		created.Audience = sortedAudience(spec.Audience)
 	}
 	r.clients[client] = created
 	r.specs[client] = spec
