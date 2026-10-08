@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-001
   title: Canonical Principal Identifier and Creation Path
   owner: Core Platform Team
-  version: 1.15.0
+  version: 1.16.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -454,7 +454,9 @@ registration.
 this service records for the registration a request names, read for each request
 (`TDD-identity-control-003` §Registration Ownership), and only the routes listed there serve it.
 Every other route answers it 403 before reading anything, so a Principal route, a workload route or
-an adoption is a provider's alone. A workload's token is never an owner's.
+an adoption is a provider's alone. The exception is a workload's owner, which lists and reads the
+workloads it owns and reviews them (`ADR-IAM-003 §5.8`, `TDD-identity-control-004` 1.7.0). A
+workload's token is never an owner's.
 
 **The caller's token is an access token, typed `at+jwt`** (STD-IAM-002 §3.5 step 5, RFC 9068 §4).
 An ID token carries the same issuer and signature, so the header type is what keeps one from

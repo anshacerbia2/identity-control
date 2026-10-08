@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-003
   title: Protocol Client and Protected-Resource Registration
   owner: Core Platform Team
-  version: 1.35.0
+  version: 1.36.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -1289,13 +1289,21 @@ establishes which, and then:
 | `POST /v1/registrations` | any | an application developer, in non-production, within §Application Developers |
 | `POST /v1/registration-requests`, `GET /v1/registration-requests:mine`, `:withdraw` | its own | an application developer, its own |
 | `GET /v1/registration-requests`, `:approve`, `:reject` | yes, not its own request | 403 |
-| `POST /v1/registrations/{id}:retire`, owners, application developers, adoption, reconcile, every Principal and workload route | yes | 403 |
+| `GET /v1/workloads:mine` (1.36.0) | its own owned workloads | its own owned workloads |
+| `GET /v1/workloads/{principal_id}` (1.36.0) | any | owned only |
+| `POST /v1/workloads/{principal_id}:review` | its own workload | its own workload |
+| `POST /v1/registrations/{id}:retire`, owners, application developers, adoption, reconcile, every Principal route, every other workload route | yes | 403 |
 
 An owner route reads the ownership of the registration in its path and answers 404 for one the
 caller does not own, so an owner cannot learn which other registrations exist. Every other route
 refuses an owner before reading a record, in one place, so a route added later is a provider's
 unless it is listed here. An owner's action is recorded under the owner's `principal_id`, as a
 provider's is.
+
+A workload's owner is the workload's own `owner_principal_id`, not an owner of its client's
+registration, and is counted by the same rule: only while its mapping is an active `human` one
+(`ADR-IAM-003 §5.8`, `TDD-identity-control-004` 1.7.0). Its routes answer a workload the caller does
+not own `404`, as an owner route answers a registration.
 
 ### Registration Changes
 
