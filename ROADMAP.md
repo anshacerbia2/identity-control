@@ -850,6 +850,8 @@ Where each stands (2026-10-07):
   - Session removal (TDD-005 2.10.0): `POST /v1/me/sessions:terminate-all`, the operation's
     `applied_at` less its `created_at`, with the kernel's session list empty and the refresh
     refused. `scripts/dev-session-removal-proof.ps1`.
+  - First measured on deploy-dev run 37687521673, 2026-10-07: projection removal 0.762 s and
+    session removal 0.079 s. Both are inside the 2-second share and the 60-second budget.
   - TDD-002's own signal, "delivery to converged", has no metric yet: `identity.tenant_projection.duration`
     times one convergence call, not the delivery. The CI figure stands in until it does.
 - ✅ **Keycloak administration credential rotation, rehearsed.** `deploy/dev/rotate-client-key.sh`

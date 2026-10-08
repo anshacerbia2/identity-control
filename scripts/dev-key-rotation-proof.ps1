@@ -3,7 +3,7 @@
 # "Keycloak administration credential rotation rehearsed"):
 #
 #   1. the kernel issues the client a token for an assertion signed with the new key;
-#   2. it refuses one signed with the previous key, as invalid_client;
+#   2. it refuses one signed with the previous key, as invalid_client (400, as Keycloak answers it);
 #   3. the restarted service reaches the kernel with the credential: identity-control enumerates the
 #      kernel's users on POST /v1/principals:reconcile, and identity-control-registration's sweep on
 #      POST /v1/registrations:reconcile ends converged, not unresolved.
@@ -52,7 +52,9 @@ Write-Host "$Client, after its rotation"
 $r = Client-Token $KeyFile
 Expect "the new key is accepted" $r.code 200
 $r = Client-Token $PreviousKeyFile
-Expect "the previous key is refused" $r.code 401
+# RFC 6749 §5.2 answers invalid_client with 400, or 401 when the client authenticated through the
+# Authorization header. Keycloak answers a refused client assertion with 400; the error is the proof.
+Expect "the previous key is refused" ($r.code -in @(400, 401)) $true
 Expect "as invalid_client" $r.error "invalid_client"
 
 $operatorTotp = if ($env:IDENTITY_OPERATOR_TOTP_FILE) { @{ OperatorTotpFile = $env:IDENTITY_OPERATOR_TOTP_FILE } } else { @{} }
