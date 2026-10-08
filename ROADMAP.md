@@ -476,10 +476,17 @@ Acceptance criteria, also from RESPONSE-4 §4:
      sweep reports the mapping and recreates nothing, a relink without a reason is refused, the
      relink with one leaves the Principal active with exactly one new user carrying the same
      `principal_id`, and a second relink is refused.
-   - The Memberships half of the criterion holds by construction, not by this job:
-     `organization-control` holds Memberships by `principal_id`, and a relink writes identity
-     tables only. The job does not run `organization-control`, so no cross-service test observes
-     it.
+   - The Memberships half of the criterion holds by construction: `organization-control` holds
+     Memberships by `principal_id`, and a relink writes identity tables only. This job does not run
+     `organization-control`. ✅ A cross-service test observes it, landing with organization-control
+     #61: its `deploy-dev` `wiring` job, `scripts/dev-wiring-proof.ps1` step 5, runs both services
+     beside the kernel and checks four things:
+     - the member's Keycloak user is deleted, then this service's `POST /v1/principals:reconcile`
+       and `:relink` run;
+     - exactly one new user carries the same `principal_id`;
+     - the Membership keeps its `principal_id`, `active` status and version in organization-control,
+       and at the same version in this service's Tenant context report;
+     - the new user joins the Tenant's Organization at the next convergence.
 **Found while building, and not part of Proof B:**
 
 - ✅ **Client key registration:** confidential and workload registration by public key (`private_key_jwt`), TDD-003 1.11.0 §Client Key Records, §Client Key Rotation.
@@ -827,7 +834,7 @@ Recorded so scope creep is visible rather than convenient:
 **Design gate.** Every TDD in the status table reaches `1.0.0`, with each open
 proof-of-concept question answered against the pinned Keycloak release.
 
-✅ Met 2026-10-07. All eight TDDs are `approved` at `1.0.0` or later: 001 at 1.13.0, 002 at 2.4.0,
+✅ Met 2026-10-07. All eight TDDs are `approved` at `1.0.0` or later: 001 at 1.14.0, 002 at 2.4.0,
 003 at 1.34.0, 004 at 1.5.0, 005 at 2.10.0, 006 at 1.3.0, 007 at 1.1.0 and 008 at 1.4.0. TDD-001's
 four proof-of-concept questions were answered 2026-09-25, and TDD-002's three by ADR-IAM-006 and
 identity-kernel compat run 37207537199. TDD-003's one open question, the Application reference
@@ -864,6 +871,11 @@ Where each stands (2026-10-07):
   pending-mapping recovery, and projection drift repair, which also covers TDD-002's three
   (a revocation not converged in budget, an `unresolved` Tenant, an extra member or unknown
   Organization). Each names the operator tooling that is not built yet.
+  - ✅ One gap they found is fixed: recovery now completes the creating request's
+    `Idempotency-Key` (TDD-001 1.14.0, migration `20261008065047_principal_creation_claim`). Before,
+    a Principal recovered after a failed create answered its caller's retry with `409`
+    `request-in-progress` for as long as the claim was kept. Proven against PostgreSQL by
+    `TestARetryAfterRecoveryGetsTheRecordedResponse`.
 
 ✅ **This service's own Keycloak clients authenticate with keys**, development included. That
 covers `identity-control`, `identity-control-registration`, and the development caller.

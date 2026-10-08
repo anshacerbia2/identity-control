@@ -113,6 +113,25 @@ table "principal_mapping" {
     default = 1
   }
 
+  // The creating request's idempotency claim, held so recovery can complete it. Without it, a
+  // creation that failed after the claim would leave the caller's key in progress forever
+  // (TDD-identity-control-001 1.14.0). Null for a row written before it, and for a workload's
+  // mapping, whose claim the workload holds.
+  column "idempotency_scope" {
+    null = true
+    type = text
+  }
+
+  column "idempotency_key" {
+    null = true
+    type = text
+  }
+
+  column "request_digest" {
+    null = true
+    type = text
+  }
+
   primary_key {
     columns = [column.principal_id]
   }

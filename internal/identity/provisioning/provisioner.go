@@ -185,6 +185,10 @@ func (p *Provisioner) Create(ctx context.Context, req CreateRequest) (Response, 
 			Email:         req.Email,
 			SubjectType:   req.SubjectType,
 			WorkloadOwner: req.WorkloadOwner,
+			// Held so recovery completes the claim if this request does not (1.14.0).
+			IdempotencyScope: req.CallerScope,
+			IdempotencyKey:   req.IdempotencyKey,
+			RequestDigest:    digest,
 		})
 	})
 	if err != nil {
@@ -298,7 +302,10 @@ func (p *Provisioner) recoverOne(ctx context.Context, mapping Mapping) error {
 	switch {
 	case len(found) == 1:
 		return p.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
-			return p.repo.Activate(ctx, tx, mapping.PrincipalID, found[0].ID)
+			if err := p.repo.Activate(ctx, tx, mapping.PrincipalID, found[0].ID); err != nil {
+				return err
+			}
+			return completeCreation(ctx, tx, mapping)
 		})
 
 	case len(found) == 0:
@@ -317,7 +324,10 @@ func (p *Provisioner) recoverOne(ctx context.Context, mapping Mapping) error {
 			return fmt.Errorf("provisioning: retry kernel create: %w", createErr)
 		}
 		return p.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
-			return p.repo.Activate(ctx, tx, mapping.PrincipalID, userID)
+			if err := p.repo.Activate(ctx, tx, mapping.PrincipalID, userID); err != nil {
+				return err
+			}
+			return completeCreation(ctx, tx, mapping)
 		})
 
 	default:
@@ -330,8 +340,13 @@ func (p *Provisioner) recoverOne(ctx context.Context, mapping Mapping) error {
 			}
 		}
 		if err := p.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
-			return p.repo.Quarantine(ctx, tx, mapping.PrincipalID,
-				fmt.Sprintf("%d kernel users carry this principal_id", len(found)))
+			if err := p.repo.Quarantine(ctx, tx, mapping.PrincipalID,
+				fmt.Sprintf("%d kernel users carry this principal_id", len(found))); err != nil {
+				return err
+			}
+			// The identifier was minted and is durable, so a retry is told which Principal its
+			// request made; its state is quarantined (TDD-identity-control-001 1.14.0).
+			return completeCreation(ctx, tx, mapping)
 		}); err != nil {
 			return err
 		}
@@ -340,6 +355,23 @@ func (p *Provisioner) recoverOne(ctx context.Context, mapping Mapping) error {
 			slog.Int("matches", len(found)))
 		return ErrDuplicateInKernel
 	}
+}
+
+// completeCreation completes the creating request's idempotency claim with the response that request
+// would have returned, in the transaction that resolves its mapping. Without it the caller's retry
+// with the same key answers request-in-progress for as long as the claim is kept. A mapping that
+// holds no claim, written before 1.14.0 or a workload's, completes nothing.
+func completeCreation(ctx context.Context, tx db.Tx, mapping Mapping) error {
+	if mapping.IdempotencyKey == "" {
+		return nil
+	}
+	body, err := json.Marshal(Response{PrincipalID: mapping.PrincipalID, SubjectType: mapping.SubjectType,
+		Realm: mapping.Realm})
+	if err != nil {
+		return fmt.Errorf("provisioning: encode stored response: %w", err)
+	}
+	return idempotency.Complete(ctx, tx, mapping.IdempotencyScope, mapping.IdempotencyKey, mapping.RequestDigest,
+		201, body)
 }
 
 func validateCreate(req CreateRequest) error {

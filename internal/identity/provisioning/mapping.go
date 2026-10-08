@@ -118,6 +118,13 @@ type Mapping struct {
 	QuarantinedAt    time.Time
 	QuarantineReason string
 	Version          int
+
+	// The creating request's idempotency claim, written with the pending row so recovery can
+	// complete it (TDD-identity-control-001 1.14.0). Empty for a row written before it, and for a
+	// workload's mapping, whose claim the workload holds.
+	IdempotencyScope string
+	IdempotencyKey   string
+	RequestDigest    string
 }
 
 // Transactor is the transaction source this package needs.
@@ -136,8 +143,9 @@ type Transactor interface {
 type Repository struct{}
 
 const insertPendingStatement = `INSERT INTO identity.principal_mapping
-    (principal_id, realm, username, email, subject_type, workload_owner, state)
-VALUES ($1, $2, $3, $4, $5, $6, 'pending')
+    (principal_id, realm, username, email, subject_type, workload_owner, state,
+     idempotency_scope, idempotency_key, request_digest)
+VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, $8, $9)
 ON CONFLICT (principal_id) DO NOTHING`
 
 // InsertPending records the intent to create a Principal, before the kernel call.
@@ -172,8 +180,14 @@ func (Repository) InsertPending(ctx context.Context, tx db.Tx, m Mapping) error 
 		email = m.Email
 	}
 
+	var scope, key, digest any
+	if m.IdempotencyKey != "" {
+		scope, key, digest = m.IdempotencyScope, m.IdempotencyKey, m.RequestDigest
+	}
+
 	tag, err := tx.Exec(ctx, insertPendingStatement,
-		m.PrincipalID.String(), string(m.Realm), m.Username, email, string(m.SubjectType), owner)
+		m.PrincipalID.String(), string(m.Realm), m.Username, email, string(m.SubjectType), owner,
+		scope, key, digest)
 	if err != nil {
 		return fmt.Errorf("provisioning: insert pending mapping: %w", err)
 	}
@@ -349,7 +363,10 @@ const pendingStatement = `SELECT principal_id::text,
        subject_type,
        coalesce(workload_owner::text, ''),
        state,
-       version
+       version,
+       coalesce(idempotency_scope, ''),
+       coalesce(idempotency_key, ''),
+       coalesce(request_digest, '')
 FROM identity.principal_mapping
 WHERE state = 'pending' AND created_at < now() - $1::interval
 ORDER BY created_at
@@ -385,14 +402,19 @@ func (Repository) PendingOlderThan(ctx context.Context, tx db.Tx, age time.Durat
 			rawOwner     string
 			state        string
 			version      int
+			scope        string
+			key          string
+			digest       string
 		)
-		if err := rows.Scan(&rawPrincipal, &rawUser, &realm, &username, &email, &subjectType, &rawOwner, &state, &version); err != nil {
+		if err := rows.Scan(&rawPrincipal, &rawUser, &realm, &username, &email, &subjectType, &rawOwner, &state, &version,
+			&scope, &key, &digest); err != nil {
 			return nil, fmt.Errorf("provisioning: scan pending mapping: %w", err)
 		}
 		mapping, decodeErr := decode(row{rawPrincipal, rawUser, realm, username, email, subjectType, rawOwner, state, version})
 		if decodeErr != nil {
 			return nil, decodeErr
 		}
+		mapping.IdempotencyScope, mapping.IdempotencyKey, mapping.RequestDigest = scope, key, digest
 		pending = append(pending, mapping)
 	}
 	if err := rows.Err(); err != nil {

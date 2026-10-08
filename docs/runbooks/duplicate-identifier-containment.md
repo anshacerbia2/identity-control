@@ -26,7 +26,9 @@ Two paths find a duplicate, and they leave different records.
     quarantined`, with `principal_id` and `matches`;
   - then `recovery of one mapping failed; continuing the sweep` for the same `principal_id`.
   - This path quarantines the mapping and disables every matching user. It writes no
-    `principal_finding` row.
+    `principal_finding` row. It completes the creating request's key with the `principal_id`, so
+    the caller's retry learns which Principal its request made, now quarantined
+    (`TDD-identity-control-001` 1.14.0).
 
 `TDD-identity-control-001` §Operational Notes classes a duplicate as **critical**.
 

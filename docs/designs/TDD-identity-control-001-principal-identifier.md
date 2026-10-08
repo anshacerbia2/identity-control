@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-001
   title: Canonical Principal Identifier and Creation Path
   owner: Core Platform Team
-  version: 1.13.0
+  version: 1.14.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-10
-  last_reviewed: 2026-10-07
+  last_reviewed: 2026-10-08
   parent_sad: SAD-001
 ---
 
@@ -219,6 +219,9 @@ CREATE TABLE identity.principal_mapping (
     quarantined_at     TIMESTAMPTZ,
     quarantine_reason  TEXT,
     version            INTEGER     NOT NULL DEFAULT 1,
+    idempotency_scope  TEXT,       -- (1.14.0) the creating request's claim, so recovery completes it
+    idempotency_key    TEXT,
+    request_digest     TEXT,
     CONSTRAINT principal_mapping_state_check
         CHECK (state IN ('pending', 'active', 'suspended', 'quarantined', 'retired')),
     CONSTRAINT principal_mapping_subject_check
@@ -569,6 +572,25 @@ held only in the Control Plane.
 
 A repeated request carrying the same `Idempotency-Key` returns the original
 `principal_id` and performs no remote call.
+
+**Recovery completes the creating request's key (1.14.0).** The claim commits with the pending
+mapping, and only the request's own activation used to complete it. A request that failed after its
+claim left the key in progress, and recovery activated the mapping without completing it. The
+caller's retry with the same key then answered `409` `request-in-progress` for as long as the claim
+was kept, and a retry with a new key would mint a second identifier for one request. The workload
+path never had the defect: `identity.workload` holds its creating claim, and recovery completes it
+(`TDD-identity-control-004`). The mapping now holds the same three values, `idempotency_scope`,
+`idempotency_key` and `request_digest`, written with the pending row. Recovery completes the claim
+in the transaction that resolves the mapping:
+- **Activated**, by adopting the kernel user or by creating it again: `201` with the response the
+  request would have returned.
+- **Quarantined** as a duplicate: also `201` with the same response. The identifier was minted and
+  is durable, so a retry is told which Principal its request made. Its state, `quarantined`, is
+  what `GET /v1/principals/{principal_id}` reports, and the incident is the duplicate runbook's
+  (`docs/runbooks/duplicate-identifier-containment.md`).
+
+A mapping written before 1.14.0 holds no claim, and recovery completes nothing for it, as before. A
+workload's mapping holds none either: its claim is the workload's.
 
 ### Reconciliation Sweep
 

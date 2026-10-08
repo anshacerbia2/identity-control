@@ -37,7 +37,8 @@ It runs before every Principal sweep, at startup and every `IDENTITY_REGISTRATIO
   decision`, and a `dangling` finding in `GET /v1/principals:dangling`. This starts the relink path
   below.
 - **A caller's retry answers `409`** with `request-in-progress` ("An identical request is already in
-  progress; retry after it completes").
+  progress; retry after it completes"). This holds only while the mapping is pending: recovery
+  completes the key (`TDD-identity-control-001` 1.14.0).
 
 `TDD-identity-control-001` §Operational Notes classes pending mappings past the recovery threshold as
 a **warning**.
@@ -64,10 +65,13 @@ A provider, with a token at `aal2`. `:relink` is a command: it also needs `auth_
      Principal's user. Triage it with [unmapped-Principal triage](unmapped-principal-triage.md).
      Recovery succeeds once the username is free.
 3. **Tell the caller what to retry.** A caller that kept its `Idempotency-Key` gets `409`
-   `request-in-progress` while the mapping is pending. Once recovery activates it, the key still
-   answers `409` (see Gaps). Give the caller the `principal_id` from the log line. A provider can confirm the
-   Principal with `GET /v1/principals:search?q=<username>`, which matches the start of a username or
-   email (at least `IDENTITY_ADMIN_SEARCH_MIN_LENGTH` characters, 3 by default).
+   `request-in-progress` while the mapping is pending. Once recovery resolves it, the same key answers
+   `201` with the `principal_id` the request minted, and makes no kernel call
+   (`TDD-identity-control-001` 1.14.0, `completeCreation` in `provisioner.go`). So the caller retries
+   with the same key and never a new one. A mapping written before 1.14.0 holds no key, and its
+   retry keeps answering `409`: give that caller the `principal_id` from the log line. A provider can
+   confirm the Principal with `GET /v1/principals:search?q=<username>`, which matches the start of a
+   username or email (at least `IDENTITY_ADMIN_SEARCH_MIN_LENGTH` characters, 3 by default).
 
 ## Steps: relinking a dangling mapping
 
@@ -115,10 +119,10 @@ so it holds no password and no authenticator (see Gaps).
 
 ## Gaps
 
-- **Recovery does not complete the creating request's `Idempotency-Key`.** The mapping does not
-  record the key, so after recovery activates it a retry with that key still answers `409`
-  `request-in-progress`. The caller learns the `principal_id` only from an operator or a search.
-  Workload recovery completes its key; Principal recovery does not.
+- **Fixed in `TDD-identity-control-001` 1.14.0: recovery completes the creating request's key.**
+  Before it, the mapping did not record the key, so after recovery a retry with that key answered
+  `409` `request-in-progress` for as long as the claim was kept. Mappings written before the fix
+  still hold no key (step 3).
 - **No listing of pending mappings, and no metric.** The warning in §Operational Notes, pending past
   the threshold, has no instrument. Only the log lines show it.
 - **No route abandons a pending mapping** whose create can never succeed.

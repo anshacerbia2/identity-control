@@ -1,4 +1,4 @@
-h1:oG94PhyDpcaPtacEg/YPU76C0r3/o4klITHVRZKV9hY=
+h1:F2fabQzGDL/ROvpv8u+UApcn0h3KDJW7bU9B8E5ZchE=
 20260817151332_baseline_identity_schema.sql h1:GysIRGAJncY8eQTmFIhc3g8FTeFq8dGu9wmdY4kefVQ=
 20260817201931_add_creation_payload.sql h1:ejgDHTQ30FK0/adjz26CYPnLsAJyodOxBHvTI/GOd8M=
 20260820185807_add_bootstrap_ceremony.sql h1:0tiQsqClxrSDiz1Jl+vd6VDStnO/nObLoeKIHBWsX3M=
@@ -34,3 +34,4 @@ h1:oG94PhyDpcaPtacEg/YPU76C0r3/o4klITHVRZKV9hY=
 20261007190438_compare_audience_mappers.sql h1:YpbTX2mpWPb6/u3M0MbJAN3YulMuDBeSlg6v6l7TGsY=
 20261007190929_workload_sweep.sql h1:QHvTJ31veDsJxk7EfbEJM7XDyl6UIIzy4jiJgG+Cv2o=
 20261007210158_drop_projection_cursor.sql h1:BsGDU2/61ZZ5wIA4EmJao3k59MExYKCWGBlJinVtVdg=
+20261008065047_principal_creation_claim.sql h1:ETalUWgCsIk796kwtY+WigZaj0EStQDTi1eDysV4WL0=
