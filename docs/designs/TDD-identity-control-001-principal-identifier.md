@@ -823,6 +823,9 @@ Executed against a Keycloak instance pinned to the release under evaluation:
   the registrations through the restarted service.
 - A second `restore.sh` over the restored database is refused: a restore never replaces a live
   database.
+- The drill's checks are load-bearing. One row of `identity.kernel_event` removed inside a
+  transaction that rolls back must change the fingerprint, and the same dump restored into a
+  cluster without its roles must stop on a role that does not exist.
 
 ### Negative
 
