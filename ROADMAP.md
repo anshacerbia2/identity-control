@@ -870,6 +870,10 @@ Where each stands (2026-10-08):
   migration version, every table's rows and checksum, every sequence and the roles to equal the
   source's, the restarted service to answer `GET /v1/registrations` identically, and the recovery to
   finish inside the 15-minute RTO. The record is the job's `restore-evidence` artifact.
+  - First run, deploy-dev run 37826468245, 2026-10-08: 46 tables and 478 rows equal; the restore
+    took 2.0 s, and the recovery to the verified read 29.1 s, against 900 s. The same dump restored
+    into a cluster without its roles stopped on `role "identity_migrator" does not exist`, which is
+    what the README's old order, restore before any role, would have met.
   - **RPO is not met, and is a recorded gap.** The backup is a daily `pg_dump`, so a restore loses up
     to 24 hours, against `PAD-PLT-001 §6.2`'s 1 minute. That needs continuous WAL archiving with
     point-in-time recovery on the production platform.
