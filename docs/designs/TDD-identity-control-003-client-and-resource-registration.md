@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-003
   title: Protocol Client and Protected-Resource Registration
   owner: Core Platform Team
-  version: 1.36.0
+  version: 1.37.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -39,6 +39,8 @@ enforced.
 - Client public-key registration, rotation, and revocation (`ADR-IAM-001 §5.12`).
 - Drift detection between desired state and Keycloak runtime state.
 - Suspension, restoration, and retirement (`ADR-IAM-001 §5.13`).
+- A confidential client's back-channel logout URI, and front-channel logout held off on every
+  client (`ADR-IAM-009`, 1.37.0).
 
 **Out of scope**
 
@@ -141,6 +143,7 @@ CREATE TABLE identity.client_registration (
     lifetime_class      TEXT,
     audience            TEXT[],
     redirect_uris       TEXT[],
+    backchannel_logout_uri TEXT,
     state               TEXT        NOT NULL,
     version             BIGINT      NOT NULL DEFAULT 1,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -177,7 +180,9 @@ CREATE TABLE identity.client_registration (
     CONSTRAINT client_lifetime_class_required
         CHECK (profile <> 'resource' OR lifetime_class IS NOT NULL),
     CONSTRAINT client_lifetime_class_check
-        CHECK (lifetime_class IS NULL OR lifetime_class IN ('L0','L1','L2','L3'))
+        CHECK (lifetime_class IS NULL OR lifetime_class IN ('L0','L1','L2','L3')),
+    CONSTRAINT client_backchannel_logout_check
+        CHECK (backchannel_logout_uri IS NULL OR profile = 'confidential')
 );
 
 CREATE UNIQUE INDEX client_registration_key
@@ -189,6 +194,13 @@ CREATE UNIQUE INDEX client_registration_key
 protected resource without an assigned lifetime class cannot be stored, so it cannot be
 registered. Leaving that to application validation alone would let a migration or a
 repair script create the one resource whose token lifetime nobody chose.
+
+**`backchannel_logout_uri` (1.37.0)** is where the kernel posts a confidential client's logout
+tokens (`ADR-IAM-009 §5.1`). Only a `confidential` client holds one: the specification defines it
+as an "RP URL that will cause the RP to log itself out", and a `public` client has no back end to
+receive it, while a `workload` or a `resource` holds no person's session. It is null for a client the
+kernel cannot reach, such as a BFF on a developer's machine (`ADR-IAM-009 §5.3`), which is then
+bounded by the refresh path alone. The constraint holds it to `confidential` in the database too.
 
 `audience_class` selects exactly one claim surface and therefore exactly one managed
 client scope, by `identity-kernel`'s names (`realm/client-scopes.json`):
@@ -557,6 +569,13 @@ how a caller retries after a kernel failure. They answer:
 - `503` when the kernel did not confirm the change. A suspension is recorded already, and the sweep
   or a retry finishes it; a restore or a retirement is not recorded, and a retry repeats it.
 
+**`backchannel_logout_uri` (1.37.0).** `POST /v1/registrations`, `POST /v1/registrations:adopt` and
+`POST /v1/registration-requests` take it for a `confidential` profile, and a registration's
+representation carries it when it is set. It is written to the kernel client at creation, recovery,
+recreation and restoration, and converged at adoption when `logout` is named (§Adoption). It is not changed
+after registration: no change kind writes it yet, so a URI is corrected by retiring the
+registration and registering the client again.
+
 **No response ever carries a secret, because none exists.**
 
 - `POST /v1/registrations` for a `confidential` or `workload` profile takes the client's first public
@@ -684,6 +703,16 @@ application registers a `confidential` client for its BFF instead.
 `workload` prohibits refresh tokens because a workload re-authenticates with its own
 credential rather than continuing a session.
 
+**Every client but a resource has front-channel logout off and names its session in a logout token
+(1.37.0, `ADR-IAM-009 §5.1`, §5.2).** The client is written with `frontchannelLogout: false`, the
+`backchannel.logout.session.required` attribute `true` and `backchannel.logout.revoke.offline.tokens`
+`false`, explicitly rather than left to the Admin API's defaults, and with `backchannel.logout.url`
+set to the registration's `backchannel_logout_uri` when it has one. The pinned kernel skips the back
+channel for a client with front-channel logout on, and its back-channel URL "is applicable just if
+Front channel logout option is OFF" (`ADR-IAM-009` [R3], [R4]). An empty value removes the
+attribute, which Keycloak does for an empty attribute, so a client without a URI holds none. A
+resource is issued no token and holds no session, so it is written none of these.
+
 **Every client but a resource is registered as an RFC 9068 issuer's client, and holds a closed set
 of scopes** (STD-IAM-002 §3.2, §3.2.1):
 
@@ -750,6 +779,10 @@ register(request):
     reject a key that carries a private parameter, without logging it
     reject a key whose thumbprint is already registered to any client
     reject if profile = 'resource' and lifetime_class is absent
+    reject a backchannel_logout_uri unless profile = 'confidential' (1.37.0)
+    reject a backchannel_logout_uri that is not absolute, carries a fragment, credentials or a
+        wildcard, or whose scheme is not https or http
+    reject an http backchannel_logout_uri in production
     for each redirect URI:
         reject a wildcard, a path traversal, a fragment, or credentials
         reject a non-https scheme, except http on a loopback host
@@ -802,6 +835,7 @@ adopt(request):
         token_lifespan   repairable
         audience_scope   repairable   exactly the default and optional scopes of §Profiles
         token_format     repairable   the at+jwt attribute and the client_id mapper
+        logout           repairable   front channel off, session required, the declared URI (1.37.0)
         enabled          repairable   the client is enabled
         audience_profile blocking     its audience profile scope is the declaration's (1.30.0)
         redirect_uris    blocking
@@ -1006,6 +1040,7 @@ Each field class has one policy, and the first two are what the drift proof exer
 | `audience_scope` | default and optional client scopes, as the closed sets of §Profiles | repair |
 | `token_format` | `access.token.header.type.rfc9068`, the `client_id` mapper | repair |
 | `audience` (1.33.0) | the client's `oidc-audience-mapper` protocol mappers | repair |
+| `logout` (1.37.0) | `frontchannelLogout`, `backchannel.logout.url`, `backchannel.logout.session.required` | repair |
 | `signing_algorithm` | `access.token.signed.response.alg` | repair |
 | `profile` | `publicClient`, `serviceAccountsEnabled`, `standardFlowEnabled` | repair |
 | `client_keys` | `clientAuthenticatorType`, `use.jwks.string`, `jwks.string` | block |
@@ -1111,6 +1146,21 @@ declared resource, a mapper under another name or one writing a custom audience 
 - **An adopted client is compared like any other.** Adoption does not plan audience mappers
   (§Adoption), so a client adopted with an audience its mappers do not match differs at the first
   sweep, with no admin event to attribute it to, and an operator applies the registered state once.
+
+**`logout` is compared from 1.37.0** (`ADR-IAM-009 §5.2`), for every active client but a resource.
+The desired value is front-channel logout off, "session required" on, and the registration's
+`backchannel_logout_uri`, or no URL. Front-channel logout turned on in the console removes the back
+channel for the client, and a URL removed or moved is a logout that no longer arrives, so either is a
+difference.
+
+- **Repaired, under the attribution rule**, as `token_lifespan` is. A changed logout configuration
+  grants nothing; it delays a revocation to the refresh path. A divergence no admin event names is
+  `unattributed`, and an operator's reconcile applies the registered configuration.
+- **No drift exception covers it.** A drift exception's field classes are unchanged.
+- **Existing clients do not differ.** A client the Admin API created without these fields holds
+  front-channel logout off and "session required" on, which the pinned kernel sets for a client
+  created with no back-channel URL (`ADR-IAM-009` [R4]), so a client registered or adopted before
+  1.37.0 is found in sync.
 
 - **An absent client is held, not recreated.** It is recorded as one open `missing`
   finding naming whoever the deletion's admin event names, and every sweep leaves it
@@ -1318,8 +1368,8 @@ it in production. A change has a `kind`:
   before a resource was registered moves to it: `identity-control-api` replacing this service's
   Admin API client in `aud` (STD-IAM-002 §3.1).
 
-A resource's lifetime class is not changed yet: it changes the derived lifespan of every client
-whose audience names it, so it needs its own design.
+- **`lifetime_class`** (1.37.0, `ADR-IAM-003 §5.9`), a resource's lifetime class, which moves the
+  derived lifespan of every client whose audience names it (STD-IAM-002 §3.3).
 
 **Why an audience is a governed change.** Keycloak's guidance is to "limit the audience on the token
 to make sure that access tokens contain just limited amount of audiences" [R3], and an
@@ -1334,11 +1384,13 @@ CREATE TABLE identity.registration_change (
     registration_id        UUID        NOT NULL REFERENCES identity.client_registration(registration_id),
     base_version           BIGINT      NOT NULL,
     kind                   TEXT        NOT NULL DEFAULT 'redirect_uris'
-        CHECK (kind IN ('redirect_uris', 'audience')),
+        CHECK (kind IN ('redirect_uris', 'audience', 'lifetime_class')),
     previous_redirect_uris TEXT[],
     redirect_uris          TEXT[]      CHECK (cardinality(redirect_uris) > 0),
     previous_audience      TEXT[],
     audience               TEXT[],
+    previous_lifetime_class TEXT,
+    lifetime_class         TEXT,
     approval_required      BOOLEAN     NOT NULL,
     proposed_by            UUID        NOT NULL,
     proposal_reason        TEXT        NOT NULL CHECK (btrim(proposal_reason) <> ''),
@@ -1356,7 +1408,11 @@ CREATE TABLE identity.registration_change (
         CHECK (NOT approval_required OR state <> 'applied' OR decided_by <> proposed_by),
     CONSTRAINT registration_change_kind_check
         CHECK ((kind = 'redirect_uris') = (redirect_uris IS NOT NULL AND previous_redirect_uris IS NOT NULL)
-           AND (kind = 'audience') = (audience IS NOT NULL AND previous_audience IS NOT NULL))
+           AND (kind = 'audience') = (audience IS NOT NULL AND previous_audience IS NOT NULL)
+           AND (kind = 'lifetime_class') = (lifetime_class IS NOT NULL AND previous_lifetime_class IS NOT NULL)),
+    CONSTRAINT registration_change_lifetime_check
+        CHECK ((lifetime_class IS NULL OR lifetime_class IN ('L0','L1','L2','L3'))
+           AND (previous_lifetime_class IS NULL OR previous_lifetime_class IN ('L0','L1','L2','L3')))
 );
 CREATE UNIQUE INDEX registration_change_open
     ON identity.registration_change (registration_id) WHERE state = 'proposed';
@@ -1426,6 +1482,44 @@ apply(audience change), under the registration's row lock:
 - **Compared by the sweep (1.33.0).** The drift sweep reads the audience mappers as the `audience`
   field class (§Drift Reconciliation), so a console edit between changes is found and, attributed,
   repaired.
+
+A lifetime-class change differs again (1.37.0, `ADR-IAM-003 §5.9`):
+
+```text
+propose(resource, lifetime_class, expected_version, reason, caller):
+    refuse unless the registration is an active resource                 400 for any other profile
+    refuse a class other than L0, L1, L2 or L3                          400
+    refuse the registered class                                         400
+    then as above: pinned to expected_version, one open change, applied now or proposed
+
+apply(lifetime change), under the resource's row lock:
+    lock, in registration_id order, every active client whose audience names the resource
+    read each one's derived lifespan; write lifetime_class and version + 1; read each again
+    patch the access token lifespan of each client whose lifespan moved
+    on a kernel failure: put back the lifespans already written, roll back   503, retry
+```
+
+- **An owner of the resource or a provider proposes it.** The route is the owner route every change
+  takes; a resource's owners know whether it moves funds or reads a catalogue (`ADR-IAM-003` [R15]).
+  Adding a caller is not part of it, so the audience rule that an owner adds only its own resources
+  does not apply. In production a provider other than the proposer approves it, shortening and
+  lengthening alike.
+- **The change names a class, never a number.** A lifetime is not configured per client
+  (STD-IAM-002 §3.3). The record's `previous_lifetime_class` and `lifetime_class` are the preview an
+  approver reads, and a console shows each class's access token lifetime and revocation target from
+  the STD-IAM-002 §3.3 table, the increase §3.3 requires to be stated.
+- **The callers move in the same transaction.** Their rows are locked in a fixed order, which an
+  audience change on one of them also takes, so the two serialize and two lifetime changes cannot
+  deadlock. Only a client whose shortest class changes is written: a caller that also names a
+  shorter resource keeps its lifespan. A suspended caller is not written; its restore writes the
+  lifespan its audience then derives.
+- **A partial kernel write is put back.** A kernel that refuses one caller rolls the change back, and
+  the callers already written get their previous lifespan back. One that cannot be reached for that
+  keeps the new lifespan until the sweep compares `token_lifespan` with the classes again, which it
+  does for every client on every sweep.
+- **The version is the resource's.** A proposal is pinned to the resource's version, which the apply
+  moves. A caller's audience change does not move it, so the set of callers a waiting proposal will
+  move is the set at its approval, not at its proposal. No route lists a resource's callers yet.
 
 | Ref | Source |
 | :-- | :-- |
@@ -1636,6 +1730,13 @@ two creates nothing.
 - An audience naming an unregistered resource is refused.
 - A `public` profile supplying a public key is refused. A `confidential` or `workload`
   profile without one is refused.
+- A `backchannel_logout_uri` is accepted for a `confidential` client and refused for any other
+  profile, and refused relative, with a fragment, with credentials or on a scheme other than https
+  and http; an http one is refused in production. The kernel client is created with it, front
+  channel off and the session named, and one registered without it holds no URL (1.37.0).
+- A client created on the real kernel with a `backchannel_logout_uri` receives a logout token naming
+  its session when `POST /v1/me/sessions/{security_ref}:terminate` ends it: `deploy-dev`'s
+  `scripts/dev-back-channel-logout-proof.ps1`, against a receiver on the runner (1.37.0).
 - Every registration receives exactly one managed audience scope.
 - A `privileged` registration naming no form is `provider-scope` and holds `scnehaux-provider`; one
   naming `tenant-scoped` holds `scnehaux-privileged`, with `organization` optional (1.29.0). A form
@@ -1715,6 +1816,8 @@ two creates nothing.
 - The last run's start, finish and outcome are readable through the API.
 - A client whose managed audience scope or signing algorithm drifted is restored to
   desired state.
+- A client given front-channel logout, a removed or a moved back-channel URL, or "session required"
+  off in the console is repaired to its registered logout configuration, attributed (1.37.0).
 - A Keycloak client with no registration is disabled and alerted, not deleted.
 - Reconciliation is idempotent against a consistent state.
 
@@ -1733,7 +1836,9 @@ two creates nothing.
 - A client whose audience profile scope is not the declaration's, or that holds none, is refused
   even with `audience_scope` named in `converge` (1.30.0). A `per-sign-in` client holding its sets
   is adoptable as it is, and one holding `scnehaux-provider` as a default is refused (1.32.0).
-- A repairable difference is refused unless named, and converged when named.
+- A repairable difference is refused unless named, and converged when named. A client with
+  front-channel logout on, or without the declared back-channel URI, differs in `logout`, and is
+  adopted with the declared URI once `logout` is named (1.37.0).
 - A client that does not exist, a client_key already registered, a profile other than
   `confidential`, and a declared key already registered are refused.
 - An adopted client is an active registration with its keys, compared by the next sweep, which
@@ -1782,6 +1887,15 @@ two creates nothing.
   resource, a hand-made one removed, and the lifespan the new audience derives.
 - An owner proposes and withdraws on a registration it owns; it cannot approve or reject, or read
   the queue. A withdrawal by anyone but the proposer is refused.
+- An applied lifetime-class change writes the class and the resource's version, and moves the
+  lifespan of every caller whose shortest class it changes and of no other; lengthening moves a
+  caller with no shorter resource and leaves one with (1.37.0).
+- A lifetime-class change on a client, to a class outside L0 to L3, or to the registered class is
+  refused, and so is one carrying a second kind. A stale version is a version conflict.
+- In production a lifetime-class change waits; its proposer's approval is refused, and another
+  provider's applies it and moves the callers.
+- A kernel that refuses one caller leaves the class and the version unchanged, records no change,
+  and puts back the lifespan of the callers already written.
 
 ### Application Developers
 
@@ -1925,6 +2039,10 @@ compromised client key, expired client key recovery, and registration drift repa
 | Consumed by | `TDD-identity-control-004` — a workload's client registration is created here |
 | Conforms to | STD-GLB-003 §State Metrics (1.1.0) — the key expiry gauge (1.31.0) |
 | Governed by | ADR-IAM-008 §5.1 — the `per-sign-in` privileged form, confidential only, with no form scope as a default (1.32.0) |
+| Governed by | ADR-IAM-009 §5.1–§5.3 — a confidential client's back-channel logout URI, front-channel logout off on every client, none for a client the kernel cannot reach (1.37.0) |
+| Governed by | ADR-IAM-003 §5.9 — a resource's lifetime class changes as a registration change (1.37.0) |
+| Conforms to | STD-IAM-002 1.8.0 §3.3 — a lifetime-class change moves every caller's lifespan, approved in production by a second provider (1.37.0) |
+| Conforms to | STD-IAM-001 2.7.0 §3.4 — back-channel logout for a reachable server-side relying party, no front-channel logout (1.37.0) |
 | Conforms to | STD-IAM-002 1.7.0 §3.1.1 — a `privileged` registration names `provider-scope`, `tenant-scoped` or `per-sign-in` (1.32.0) |
 
 ### Open Questions
