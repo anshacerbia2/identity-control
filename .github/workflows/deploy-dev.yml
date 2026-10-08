@@ -210,12 +210,13 @@ jobs:
       # TDD-identity-control-002 2.3.0, ADR-IAM-006: the Tenant context end to end against this
       # kernel. The script stands in for Organization Control: it registers a delivering workload, the
       # service is restarted to admit it, and Membership and Tenant events posted to /v1/deliveries
-      # must reach a token's tenant_id, and a revocation must refuse that Tenant's refresh.
+      # must reach a token's tenant_id, and a revocation must refuse that Tenant's refresh. The
+      # revocation's accept-to-enforcement delay goes to the job summary (TDD-identity-control-002 2.4.0).
       - name: the Tenant context end to end
         run: |
           set -o pipefail
           set -a; . deploy/dev/.env; set +a
-          export IDENTITY_API_URL=http://127.0.0.1:8082 KC_BASE_URL=https://localhost
+          export IDENTITY_API_URL=http://127.0.0.1:8082 KC_BASE_URL=https://localhost KC_ADMIN_URL=http://localhost:8080
           export IDENTITY_OPERATOR_TOTP_FILE="$RUNNER_TEMP/operator-totp.json"
           state="$RUNNER_TEMP/tenant-proof/state.json"
           mkdir -p "$(dirname "$state")"
@@ -235,7 +236,9 @@ jobs:
       # server's was, by identity-experience's create-bff-client.sh, then adopted by
       # scripts/dev-adopt-bff.ps1 exactly as deploy/dev/README.md tells an operator to. A wrong
       # declaration is refused on audience_profile (ADR-IAM-001 §5.12 rule 3), and the adopted BFF's own
-      # token at aal2 is served on a provider route.
+      # token at aal2 is served on a provider route. The client holds two keys, one per developer
+      # device, installed with the kernel's set-client-key.sh, so the adoption declares both and a
+      # declaration of one is refused on client_keys.
       - name: the BFF adoption procedure
         run: |
           set -a; . deploy/dev/.env; set +a
@@ -244,8 +247,12 @@ jobs:
           keys="$RUNNER_TEMP/bff-keys"
           bash .kernel/deploy/dev/new-client-key.sh identity-experience-bff "$keys" "$(id -u):$(id -g)"
           bash .experience/deploy/dev/create-bff-client.sh deploy/dev/.env "$keys/identity-experience-bff.jwk.json"
+          bash .kernel/deploy/dev/new-client-key.sh identity-experience-bff-second-device "$keys" "$(id -u):$(id -g)"
+          bash .kernel/deploy/dev/set-client-key.sh scnehaux identity-experience-bff \
+            "$keys/identity-experience-bff.jwk.json" "$keys/identity-experience-bff-second-device.jwk.json"
           pwsh -NoProfile -File scripts/dev-bff-adoption-proof.ps1 \
-            -BffJwkFile "$keys/identity-experience-bff.jwk.json" -BffKeyFile "$keys/identity-experience-bff.pem"
+            -BffJwkFile "$keys/identity-experience-bff.jwk.json,$keys/identity-experience-bff-second-device.jwk.json" \
+            -BffKeyFile "$keys/identity-experience-bff.pem"
 
       # TDD-identity-control-007: the kernel event record, against this kernel's native store, which the
       # steps above filled with sign-ins and admin changes. Before Proof B, which stops Keycloak.
@@ -264,6 +271,31 @@ jobs:
           export IDENTITY_API_URL=http://127.0.0.1:8082 KC_BASE_URL=https://localhost
           export IDENTITY_OPERATOR_TOTP_FILE="$RUNNER_TEMP/operator-totp.json"
           pwsh -NoProfile -File scripts/dev-notifications-proof.ps1
+
+      # ROADMAP §Gates, production gate: session removal's accept-to-enforcement delay, measured
+      # against this kernel (TDD-identity-control-005 2.10.0 §Enforcement Delay). It ends the bootstrap
+      # operator's sessions, so it runs after every step that reads them.
+      - name: session removal within budget
+        run: |
+          set -a; . deploy/dev/.env; set +a
+          export IDENTITY_API_URL=http://127.0.0.1:8082 KC_BASE_URL=https://localhost KC_ADMIN_URL=http://localhost:8080
+          export IDENTITY_OPERATOR_TOTP_FILE="$RUNNER_TEMP/operator-totp.json"
+          pwsh -NoProfile -File scripts/dev-session-removal-proof.ps1
+
+      # ROADMAP §Gates, production gate: the Keycloak administration credentials' rotation, rehearsed
+      # with deploy/dev/rotate-client-key.sh exactly as deploy/dev/README.md §Keys tells an operator,
+      # on a kernel that lives for this job. Before Proof B, which then runs on the rotated keys.
+      - name: the Admin API credentials rotate
+        run: |
+          set -a; . deploy/dev/.env; set +a
+          export IDENTITY_API_URL=http://127.0.0.1:8082 KC_BASE_URL=https://localhost
+          export IDENTITY_OPERATOR_TOTP_FILE="$RUNNER_TEMP/operator-totp.json"
+          for client in identity-control identity-control-registration; do
+            ROTATE_KEEP_PREVIOUS=1 bash deploy/dev/rotate-client-key.sh "$client"
+            pwsh -NoProfile -File scripts/dev-key-rotation-proof.ps1 -Client "$client" \
+              -KeyFile "deploy/dev/keys/$client.pem" -PreviousKeyFile "deploy/dev/keys/$client-previous.pem"
+            rm -f "deploy/dev/keys/$client-previous.pem" "deploy/dev/keys/$client-previous.jwk.json"
+          done
 
       # identity-control ROADMAP §Proof B: both drift scenarios, a drift exception and its expiry,
       # and Keycloak stopped then started, against this live kernel. Each convergence time lands in

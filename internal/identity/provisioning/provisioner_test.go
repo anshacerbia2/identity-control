@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -283,6 +284,7 @@ func TestCrashBetweenRemoteCallAndCommitRecoversWithoutASecondPrincipal(t *testi
 	pending := &dbtest.Tx{Rows: [][]any{{
 		orphan.PrincipalID.String(), "", "scnehaux", "operator", "operator@example.com",
 		string(keycloak.SubjectHuman), "", string(provisioning.StatePending), 1,
+		"principal:caller", "key-0001", "digest-0001",
 	}}}
 	recovering := &fakeTx{txs: []*dbtest.Tx{pending, claimed()}}
 
@@ -301,10 +303,41 @@ func TestCrashBetweenRemoteCallAndCommitRecoversWithoutASecondPrincipal(t *testi
 		t.Errorf("kernel holds %d users, want 1: a second Principal was created", kernel.Count())
 	}
 
-	// Adoption is an activation carrying the kernel identifier.
-	activation := recovering.txs[1].Only(t)
-	if activation.Args[1] != string(orphan.ID) {
-		t.Errorf("activation recorded %v, want the existing kernel identifier %q", activation.Args[1], orphan.ID)
+	// Adoption is an activation carrying the kernel identifier, and the creating request's key is
+	// completed in the same transaction (TDD-identity-control-001 1.14.0).
+	calls := recovering.txs[1].Calls()
+	if len(calls) != 2 {
+		t.Fatalf("the adopting transaction made %d calls, want the activation and the completion", len(calls))
+	}
+	if calls[0].Args[1] != string(orphan.ID) {
+		t.Errorf("activation recorded %v, want the existing kernel identifier %q", calls[0].Args[1], orphan.ID)
+	}
+	assertCompleted(t, calls[1], orphan.PrincipalID)
+}
+
+// assertCompleted holds that a call completes the creating request's key, "key-0001" in scope
+// "principal:caller", with 201 and the identifier the request minted.
+func assertCompleted(t *testing.T, call dbtest.Call, principalID id.UUID) {
+	t.Helper()
+	if !strings.Contains(call.SQL, "idempotency_key") {
+		t.Fatalf("the call is not the key's completion: %s", call.SQL)
+	}
+	var sawKey, saw201, sawBody bool
+	for _, arg := range call.Args {
+		switch v := arg.(type) {
+		case string:
+			sawKey = sawKey || v == "key-0001"
+			sawBody = sawBody || strings.Contains(v, principalID.String())
+		case int:
+			saw201 = saw201 || v == 201
+		case []byte:
+			sawBody = sawBody || strings.Contains(string(v), principalID.String())
+		case json.RawMessage:
+			sawBody = sawBody || strings.Contains(string(v), principalID.String())
+		}
+	}
+	if !sawKey || !saw201 || !sawBody {
+		t.Errorf("completion args %v: want key-0001, 201 and a body naming %s", call.Args, principalID)
 	}
 }
 
@@ -330,6 +363,7 @@ func TestRecoveryRetriesTheCreateWithTheOriginalIdentifier(t *testing.T) {
 	pending := &dbtest.Tx{Rows: [][]any{{
 		principalID.String(), "", "scnehaux", "nightly-job", "job@example.com",
 		string(keycloak.SubjectWorkload), mustUUID(t).String(), string(provisioning.StatePending), 1,
+		"", "", "",
 	}}}
 	tx := &fakeTx{txs: []*dbtest.Tx{pending, claimed()}}
 
@@ -366,6 +400,7 @@ func TestRecoveryQuarantinesADuplicateAndDisablesBoth(t *testing.T) {
 	pending := &dbtest.Tx{Rows: [][]any{{
 		principalID.String(), "", "scnehaux", "one", "",
 		string(keycloak.SubjectHuman), "", string(provisioning.StatePending), 1,
+		"principal:caller", "key-0001", "digest-0001",
 	}}}
 	quarantine := claimed()
 	tx := &fakeTx{txs: []*dbtest.Tx{pending, quarantine}}
@@ -389,10 +424,15 @@ func TestRecoveryQuarantinesADuplicateAndDisablesBoth(t *testing.T) {
 		}
 	}
 
-	call := quarantine.Only(t)
-	if call.Args[1] == "" {
+	calls := quarantine.Calls()
+	if len(calls) != 2 {
+		t.Fatalf("the quarantining transaction made %d calls, want the quarantine and the completion", len(calls))
+	}
+	if calls[0].Args[1] == "" {
 		t.Error("quarantine recorded no reason")
 	}
+	// The identifier is durable, so a retry is told which Principal its request made (1.14.0).
+	assertCompleted(t, calls[1], principalID)
 }
 
 func TestRecoverySkipsOneFailureAndContinuesTheSweep(t *testing.T) {
@@ -400,8 +440,8 @@ func TestRecoverySkipsOneFailureAndContinuesTheSweep(t *testing.T) {
 	kernel.FailFind = keycloak.ErrUnavailable
 
 	pending := &dbtest.Tx{Rows: [][]any{
-		{mustUUID(t).String(), "", "scnehaux", "a", "", string(keycloak.SubjectHuman), "", string(provisioning.StatePending), 1},
-		{mustUUID(t).String(), "", "scnehaux", "b", "", string(keycloak.SubjectHuman), "", string(provisioning.StatePending), 1},
+		{mustUUID(t).String(), "", "scnehaux", "a", "", string(keycloak.SubjectHuman), "", string(provisioning.StatePending), 1, "", "", ""},
+		{mustUUID(t).String(), "", "scnehaux", "b", "", string(keycloak.SubjectHuman), "", string(provisioning.StatePending), 1, "", "", ""},
 	}}
 	tx := &fakeTx{txs: []*dbtest.Tx{pending}}
 

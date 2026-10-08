@@ -64,7 +64,9 @@ beyond `foundation-platform`.
 - ✅ Atlas migrations for the `identity` schema; the `platform` schema applied from the
   shared module rather than re-authored here
 - ✅ `identity.principal_mapping` with its state machine and partial unique index
-- ✅ `identity.projection_cursor` as this service's own consumer position
+- ✅ `identity.projection_cursor` as this service's own consumer position. Dropped 2026-10-07: no
+  version ever wrote it, and TDD-identity-control-002 2.0.0's delivery path has no stream to
+  follow (TDD-002 2.4.0, migration `20261007210158_drop_projection_cursor`)
 - ✅ `identity_migrator` and `identity_runtime` roles, asserted against the catalog
 
 **Exit:** the runtime role owns no table, holds no `SUPERUSER`, no `BYPASSRLS`, and no
@@ -320,8 +322,12 @@ Principals created through the API carry none.
 - ✅ Reconciler reading authority through the published snapshot contract, never through a database
   connection (`internal/organization`, TDD-identity-control-002 slice 3a and TDD-identity-control-006)
 
-**Exit:** no code path in this service constructs an Organization Database connection,
-asserted by test.
+✅ **Exit:** no code path in this service constructs an Organization Database connection,
+asserted by test. archcheck's `deniedImports` (`arch.json`) keep `pgx` and `database/sql` out of
+every package, so foundation-platform's `db.Open` is the only way to connect. archcheck cannot
+see which database that opens, so `internal/controldb`'s `TestOnlyTheControlDatabaseIsOpened` holds
+the rest. Every `db.Open` is in a `cmd/` composition root, its DSN is the Control Database's, and
+the only database URLs read are `IDENTITY_DATABASE_URL` and `IDENTITY_MIGRATION_DATABASE_URL`.
 
 ## Proof B · Keycloak drift
 
@@ -367,16 +373,18 @@ Acceptance criteria, also from RESPONSE-4 §4:
 
 **What is missing:**
 
-- Clients are not declared anywhere. The two scenario targets sit on `identity-control-caller`,
-  which imperative scripts create (`deploy/dev/create-kernel-clients.sh`,
-  `scripts/dev-keycloak.ps1`): redirect URI `http://127.0.0.1:8099/callback`,
-  `access.token.lifespan` 240.
+- ✅ Clients were not declared anywhere: the two scenario targets sat on `identity-control-caller`,
+  which imperative scripts create. Superseded: clients are declared through the registration API in
+  `identity.client_registration` (TDD-003), and the caller is adopted by
+  `scripts/dev-adopt-caller.ps1`.
 - ✅ This service had no scheduler, no reconciler, and no last-run record. The registration sweep
   now runs on a schedule and records each run in `identity.reconcile_run` (step 4).
-  `identity.projection_cursor.last_reconciled_at` is the Membership projection's and is still
-  unwritten.
-- Its Keycloak credential holds `manage-users` and `view-users` only. It cannot read or change
-  clients, and cannot read admin events, which need `view-events`.
+  `identity.projection_cursor.last_reconciled_at` was never written, and the table is dropped
+  (TDD-002 2.4.0): the Tenant context sweep is observed through its log line and
+  `identity.tenant_projection.*`.
+- ✅ Its Keycloak credential held `manage-users` and `view-users` only. Superseded by the separate
+  registration credential, `identity-control-registration`, with `manage-clients`, `view-clients`
+  and `view-events` (`deploy/dev/create-registration-client.sh`).
 - ✅ Admin events were not enabled in `identity-kernel`'s realm definition. They now are, with
   representation and 7-day retention (identity-kernel #16).
 - The mapping state machine has no way back from `active`. A blanked `keycloak_user_id` on an
@@ -468,10 +476,17 @@ Acceptance criteria, also from RESPONSE-4 §4:
      sweep reports the mapping and recreates nothing, a relink without a reason is refused, the
      relink with one leaves the Principal active with exactly one new user carrying the same
      `principal_id`, and a second relink is refused.
-   - The Memberships half of the criterion holds by construction, not by this job:
-     `organization-control` holds Memberships by `principal_id`, and a relink writes identity
-     tables only. The job does not run `organization-control`, so no cross-service test observes
-     it.
+   - The Memberships half of the criterion holds by construction: `organization-control` holds
+     Memberships by `principal_id`, and a relink writes identity tables only. This job does not run
+     `organization-control`. ✅ A cross-service test observes it, landing with organization-control
+     #61: its `deploy-dev` `wiring` job, `scripts/dev-wiring-proof.ps1` step 5, runs both services
+     beside the kernel and checks four things:
+     - the member's Keycloak user is deleted, then this service's `POST /v1/principals:reconcile`
+       and `:relink` run;
+     - exactly one new user carries the same `principal_id`;
+     - the Membership keeps its `principal_id`, `active` status and version in organization-control,
+       and at the same version in this service's Tenant context report;
+     - the new user joins the Tenant's Organization at the next convergence.
 **Found while building, and not part of Proof B:**
 
 - ✅ **Client key registration:** confidential and workload registration by public key (`private_key_jwt`), TDD-003 1.11.0 §Client Key Records, §Client Key Rotation.
@@ -521,7 +536,7 @@ Acceptance criteria, also from RESPONSE-4 §4:
     - `POST /v1/workloads/{id}:rebuild` recreates a deleted workload client from desired state with its keys, writes the identity on the new service-account user and binds the mapping there under the same `principal_id`, recorded in `principal_relink`, in one transaction that deletes the client again on failure.
     - Proof B scenario 7 proves the last authentication, the review and the rebuild against the live kernel.
     - Not built: telling the owner's administrative chain and the Tenant's administrators, which needs the Notification Platform and organization-control's knowledge of who administers a Tenant; the log alerts and listings stand in.
-  - Not built yet: agent delegation, which needs the human's Membership and scope (organization-control) and an `act` claim the kernel issues (identity-kernel). `identity-experience`'s admin form that creates a workload through `POST /v1/principals` must move to `POST /v1/workloads`.
+  - Not built yet: agent delegation, which needs the human's Membership and scope (organization-control) and an `act` claim the kernel issues (identity-kernel). ✅ `identity-experience`'s admin form creates a workload through `POST /v1/workloads` on its own Workloads page (identity-experience e25a809); the Principals form no longer offers one.
 - ✅ **Registration ownership, first slice** (ADR-IAM-003; TDD-003 1.19.0 §Registration Ownership; TDD-001 1.8.0 §Caller Token): `identity.registration_owner`, granted and revoked by a provider with a reason, insert-only but for its revocation columns.
   - An owner is an active human Principal, counted only while its mapping is active, so a Principal retired or quarantined confers nothing at the next request. In production (`IDENTITY_ENVIRONMENT`, `production` by default) a registration keeps at least two owners.
   - A token without `provider_scope` is an owner's, the `resource-scoped` form of STD-IAM-002 §3.1.1: a person, with `acr` and `auth_time`. Every route is wrapped in `providerOnly` or `owned`, and a test fails on an unwrapped one: an owner reads, rotates and revokes keys of, and suspends and restores, a registration it owns, answers 404 for any other, and 403 on every provider route before anything is read. `GET /v1/registrations:mine` lists what the caller owns.
@@ -554,7 +569,7 @@ Acceptance criteria, also from RESPONSE-4 §4:
   - One open request per client_key, and the same request retried returns it. Only the proposer withdraws.
   - Outside production nothing is requested: a developer registers directly. In production a developer no longer registers directly.
   - Decided 2026-10-02 (ADR-IAM-003 §5.3, §5.7; TDD-003 1.24.0): a provider still registers directly, as Entra's Application Administrator does. Each direct production registration, through registration, the workload path or adoption, logs a WARN with its path, client and registrant.
-  - Backlog, needing its own decision (ADR-IAM-003 §5.7): eligible provider authority. A provider grant would be activated for a bounded time with another provider's approval, as Entra PIM's "Require approval to activate". It changes how organization-control and this service hold provider grants (ADR-ORG-001 §5.11), and is what puts a second person in front of everything a provider does, not only registration.
+  - ✅ Decided and built: eligible provider authority. ADR-ORG-002 decided it, and `internal/providerauthority/decision.go` honors an activation in force only while the projection is fresh (TDD-006). Was: backlog, needing its own decision (ADR-IAM-003 §5.7), eligible provider authority. A provider grant would be activated for a bounded time with another provider's approval, as Entra PIM's "Require approval to activate". It changes how organization-control and this service hold provider grants (ADR-ORG-001 §5.11), and is what puts a second person in front of everything a provider does, not only registration.
   - The screens are identity-experience#24.
 - ✅ **Workload lifecycle** (TDD-004 1.4.0 §Suspension, Restoration, and Retirement): `POST /v1/workloads/{id}:suspend`, `:restore` and `:retire`, each with a reason.
   - The client and the Principal stop together: the workload lifecycle holds the workload's row lock and changes its registration in the same transaction, through the registration package's `…WorkloadWithin` seams, because the registration lifecycle still refuses a workload's client.
@@ -661,10 +676,10 @@ slice:
   belongs to a Tenant. organization-control checks its own Membership, Tenant and administration
   grant (ADR-ORG-003 §5.3). foundation-reference decides from its projection and refuses a token
   issued for another Tenant than the route names.
-- **Next:** a Tenant administrator's sign-in asks for its Tenant. Its console is SAD-012's
-  Organization Experience, not identity-experience, whose SAD rejects Tenant and Membership
-  administration there; that repository is not decided yet. The token it needs is registrable now:
-  a `tenant-scoped` `privileged` client (item 6).
+- ✅ A Tenant administrator's sign-in asks for its Tenant. Its console is SAD-012's Organization
+  Experience, not identity-experience: the `organization-experience` repository exists, and its BFF
+  signs in per sign-in, asking `openid scnehaux-privileged organization:<tenant_id>` of one
+  `per-sign-in` client (`bff/src/auth/oidc.ts`, item 6).
 
 6. ✅ **The tenant-scoped privileged form** (`TDD-identity-control-003` 1.29.0). A `privileged`
    registration names `privileged_form`: `provider-scope`, the default and what every earlier one
@@ -676,8 +691,8 @@ slice:
      `confidential` client alone may name `per-sign-in`: `basic` and `acr` are its defaults, and
      `scnehaux-provider`, `scnehaux-privileged`, `organization` and `scnehaux-profile` its optional
      scopes, so Organization Experience is one client whose each sign-in names one form. Both form
-     scopes must be declared to register it, and the reconciler holds its sets closed. Next, in
-     identity-kernel: `compat/` asserts each form from §5.2's requests.
+     scopes must be declared to register it, and the reconciler holds its sets closed. ✅ identity-kernel's
+     `compat/per_sign_in_test.go` asserts each form from §5.2's requests (identity-kernel 93fc927).
 7. ✅ **An adoption blocks on the claim surface** (`TDD-identity-control-003` 1.30.0, ADR-IAM-001
    §5.12 rule 3). The audience profile scope is a blocking field class, `audience_profile`: a
    declaration naming the wrong class or form is refused at the plan rather than converged into
@@ -819,11 +834,48 @@ Recorded so scope creep is visible rather than convenient:
 **Design gate.** Every TDD in the status table reaches `1.0.0`, with each open
 proof-of-concept question answered against the pinned Keycloak release.
 
+✅ Met 2026-10-07. All eight TDDs are `approved` at `1.0.0` or later: 001 at 1.14.0, 002 at 2.4.0,
+003 at 1.34.0, 004 at 1.5.0, 005 at 2.10.0, 006 at 1.3.0, 007 at 1.1.0 and 008 at 1.4.0. TDD-001's
+four proof-of-concept questions were answered 2026-09-25, and TDD-002's three by ADR-IAM-006 and
+identity-kernel compat run 37207537199. TDD-003's one open question, the Application reference
+authority, waits for Software Catalog and is not a proof-of-concept question.
+
 **Production gate.** The design gate, plus: restore evidence for the Control Database,
 measured accept-to-enforcement delay inside budget for projection removal and session
 removal, Keycloak administration credential rotation rehearsed, and runbooks written
 for unmapped-Principal triage, duplicate-identifier containment, pending-mapping
 recovery, and projection drift repair.
+
+Where each stands (2026-10-07):
+- **Restore evidence for the Control Database.** Not covered here.
+- ✅ **Accept-to-enforcement delay, measured.** `deploy-dev` measures both on every run against the
+  live kernel and writes them to the job summary. Above the 60-second propagation budget
+  (`SAD-001 §7.7`) the job fails, and above this service's 2-second share it warns.
+  - Projection removal (TDD-002 2.4.0): a priority Membership revocation, from the `202` at
+    `POST /v1/deliveries` to the kernel's Organization no longer listing the member.
+    `scripts/dev-tenant-proof.ps1`.
+  - Session removal (TDD-005 2.10.0): `POST /v1/me/sessions:terminate-all`, the operation's
+    `applied_at` less its `created_at`, with the kernel's session list empty and the refresh
+    refused. `scripts/dev-session-removal-proof.ps1`.
+  - First measured on deploy-dev run 37687521673, 2026-10-07: projection removal 0.762 s and
+    session removal 0.079 s. Both are inside the 2-second share and the 60-second budget.
+  - TDD-002's own signal, "delivery to converged", has no metric yet: `identity.tenant_projection.duration`
+    times one convergence call, not the delivery. The CI figure stands in until it does.
+- ✅ **Keycloak administration credential rotation, rehearsed.** `deploy/dev/rotate-client-key.sh`
+  runs README §Keys' five steps for `identity-control` and `identity-control-registration`.
+  `deploy-dev` runs it for both on every run, then proves the new key accepted, the previous one
+  refused as `invalid_client`, and the restarted service still reaching the kernel
+  (`scripts/dev-key-rotation-proof.ps1`). Proof B then runs on the rotated keys. It is never run
+  against the development server by CI.
+- ✅ **Runbooks.** `docs/runbooks/`: unmapped-Principal triage, duplicate-identifier containment,
+  pending-mapping recovery, and projection drift repair, which also covers TDD-002's three
+  (a revocation not converged in budget, an `unresolved` Tenant, an extra member or unknown
+  Organization). Each names the operator tooling that is not built yet.
+  - ✅ One gap they found is fixed: recovery now completes the creating request's
+    `Idempotency-Key` (TDD-001 1.14.0, migration `20261008065047_principal_creation_claim`). Before,
+    a Principal recovered after a failed create answered its caller's retry with `409`
+    `request-in-progress` for as long as the claim was kept. Proven against PostgreSQL by
+    `TestARetryAfterRecoveryGetsTheRecordedResponse`.
 
 ✅ **This service's own Keycloak clients authenticate with keys**, development included. That
 covers `identity-control`, `identity-control-registration`, and the development caller.

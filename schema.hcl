@@ -113,6 +113,25 @@ table "principal_mapping" {
     default = 1
   }
 
+  // The creating request's idempotency claim, held so recovery can complete it. Without it, a
+  // creation that failed after the claim would leave the caller's key in progress forever
+  // (TDD-identity-control-001 1.14.0). Null for a row written before it, and for a workload's
+  // mapping, whose claim the workload holds.
+  column "idempotency_scope" {
+    null = true
+    type = text
+  }
+
+  column "idempotency_key" {
+    null = true
+    type = text
+  }
+
+  column "request_digest" {
+    null = true
+    type = text
+  }
+
   primary_key {
     columns = [column.principal_id]
   }
@@ -380,47 +399,6 @@ table "bootstrap_ceremony" {
 
   check "bootstrap_ceremony_operator_named" {
     expr = "btrim(operator) <> '' AND btrim(reason) <> ''"
-  }
-}
-
-// This service's own consumer position. The publisher registry lives in the Organization
-// Database and is never read from here.
-table "projection_cursor" {
-  schema  = schema.identity
-  comment = "Per-stream consumer watermark. TDD-identity-control-002."
-
-  column "stream" {
-    null = false
-    type = text
-  }
-
-  column "projection_version" {
-    null = false
-    type = text
-  }
-
-  // An observability watermark, not a delivery checkpoint. The priority lane may deliver
-  // a later position before an earlier lifecycle event, so delivery progress belongs to
-  // the durable broker consumer and deduplication identity stays event_id in
-  // platform.processed_event.
-  column "max_applied_stream_position" {
-    null    = false
-    type    = bigint
-    default = 0
-  }
-
-  column "last_snapshot_mark" {
-    null = true
-    type = bigint
-  }
-
-  column "last_reconciled_at" {
-    null = true
-    type = timestamptz
-  }
-
-  primary_key {
-    columns = [column.stream]
   }
 }
 

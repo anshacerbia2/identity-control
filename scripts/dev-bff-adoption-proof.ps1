@@ -4,18 +4,21 @@
 #
 #   1. a wrong declaration, internal, is refused at the plan on audience_profile
 #      (ADR-IAM-001 §5.12 rule 3, TDD-identity-control-003 1.30.0);
-#   2. dev-adopt-bff.ps1 plans, then adopts with -Apply;
+#   2. dev-adopt-bff.ps1 plans, then adopts with -Apply. Given two keys, as a client holding one per
+#      developer device is, it first proves that declaring only one of them is refused at the plan on
+#      client_keys, and after the adoption that the first key is active and the second retiring;
 #   3. the adopted BFF's own token, from the kernel's login at aal2, carries acr and auth_time, names
 #      identity-control-api, and is served on a provider route;
 #   4. a second run of the procedure finds the BFF registered and changes nothing.
 #
-# SECRETS: read from the environment, as dev-smoke.ps1 reads them. The BFF's key pair is the one
-# identity-kernel's new-client-key.sh made for the stack; nothing read from either file is printed.
+# SECRETS: read from the environment, as dev-smoke.ps1 reads them. The BFF's key pairs are the ones
+# identity-kernel's new-client-key.sh made for the stack; nothing read from any file is printed.
+# -BffKeyFile is the private key of the first public JWK.
 #
-# Usage: pwsh ./scripts/dev-bff-adoption-proof.ps1 -BffJwkFile <public JWK> -BffKeyFile <private PEM>
+# Usage: pwsh ./scripts/dev-bff-adoption-proof.ps1 -BffJwkFile <public JWK>[,<public JWK>] -BffKeyFile <private PEM>
 
 param(
-    [Parameter(Mandatory = $true)] [string] $BffJwkFile,
+    [Parameter(Mandatory = $true)] [string[]] $BffJwkFile,
     [Parameter(Mandatory = $true)] [string] $BffKeyFile
 )
 
@@ -57,13 +60,17 @@ function Expect($label, $got, $want) {
     }
 }
 
-$jwk = Get-Content -Raw -Path $BffJwkFile | ConvertFrom-Json
-$public = @{ kty = "RSA"; n = $jwk.n; e = $jwk.e }
+# pwsh -File hands "a.jwk.json,b.jwk.json" over as one string, as dev-adopt-bff.ps1 reads it.
+$files = @($BffJwkFile | ForEach-Object { $_ -split "," } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+$publicKeys = @(foreach ($file in $files) {
+    $jwk = Get-Content -Raw -Path $file | ConvertFrom-Json
+    @{ kty = "RSA"; n = $jwk.n; e = $jwk.e }
+})
 
 Write-Host "1. a wrong declaration is refused at the plan"
 $wrong = @{ client_key = "identity-experience-bff"; profile = "confidential"; audience_class = "internal"
     application_ref = "identity-experience"; redirect_uris = @("http://127.0.0.1:8090/auth/callback")
-    audience = @("identity-control-api"); public_keys = @($public)
+    audience = @("identity-control-api"); public_keys = $publicKeys
     converge = @("token_format", "audience_scope"); dry_run = $true } | ConvertTo-Json -Compress -Depth 5
 $r = Send "POST" "/v1/registrations:adopt" $wrong $token
 Expect "planned" $r.code 200
@@ -73,10 +80,40 @@ if ($r.code -eq 200) {
     Expect "refused on audience_profile" ($plan.refusal -like "audience_profile*") $true
 }
 
+if ($publicKeys.Count -eq 2) {
+    Write-Host ""
+    Write-Host "1b. a declaration missing one of the client's two keys is refused at the plan"
+    $partial = @{ client_key = "identity-experience-bff"; profile = "confidential"; audience_class = "privileged"
+        privileged_form = "provider-scope"; application_ref = "identity-experience"
+        redirect_uris = @("http://127.0.0.1:8090/auth/callback"); audience = @("identity-control-api")
+        public_keys = @($publicKeys[0]); converge = @("token_format", "audience_scope"); dry_run = $true } |
+        ConvertTo-Json -Compress -Depth 5
+    $r = Send "POST" "/v1/registrations:adopt" $partial $token
+    Expect "planned" $r.code 200
+    if ($r.code -eq 200) {
+        $plan = ($r.body | ConvertFrom-Json).plan
+        Expect "not adoptable" $plan.adoptable $false
+        Expect "refused on client_keys" ($plan.refusal -like "client_keys*") $true
+    }
+}
+
 Write-Host ""
 Write-Host "2. the procedure plans, then adopts"
-& "$PSScriptRoot\dev-adopt-bff.ps1" -BffJwkFile $BffJwkFile
-& "$PSScriptRoot\dev-adopt-bff.ps1" -BffJwkFile $BffJwkFile -Apply
+& "$PSScriptRoot\dev-adopt-bff.ps1" -BffJwkFile $files
+$adoptedLines = & "$PSScriptRoot\dev-adopt-bff.ps1" -BffJwkFile $files -Apply 6>&1 | ForEach-Object { "$_" }
+$adoptedLines | ForEach-Object { Write-Host $_ }
+$registrationId = ($adoptedLines | Select-String -Pattern 'registration_id=(\S+)' | Select-Object -First 1).Matches.Groups[1].Value
+$r = Send "GET" "/v1/registrations/$registrationId/keys" $null $token
+Expect "keys read" $r.code 200
+if ($r.code -eq 200) {
+    $keys = @(($r.body | ConvertFrom-Json).keys)
+    $active = @($keys | Where-Object { $_.state -eq "active" })
+    $retiring = @($keys | Where-Object { $_.state -eq "retiring" })
+    Expect "every declared key is registered" $keys.Count $publicKeys.Count
+    Expect "one active key" $active.Count 1
+    Expect "the first declared key is the active one" ($active.Count -eq 1 -and $active[0].public_jwk.n -eq $publicKeys[0].n) $true
+    Expect "the second declared key, if any, is retiring" $retiring.Count ($publicKeys.Count - 1)
+}
 
 Write-Host ""
 Write-Host "3. the adopted BFF's own token is a provider's"
@@ -96,7 +133,7 @@ Expect "served on a provider route" $r.code 200
 
 Write-Host ""
 Write-Host "4. a second run changes nothing"
-& "$PSScriptRoot\dev-adopt-bff.ps1" -BffJwkFile $BffJwkFile
+& "$PSScriptRoot\dev-adopt-bff.ps1" -BffJwkFile $files
 
 if ($failures -gt 0) {
     Write-Host ""

@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-002
   title: Tenant Context Projection into the Kernel, and Its Reconciliation
   owner: Core Platform Team
-  version: 2.3.1
+  version: 2.4.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-11
-  last_reviewed: 2026-10-06
+  last_reviewed: 2026-10-07
   parent_sad: SAD-001
 ---
 
@@ -30,6 +30,10 @@ the kernel is found and repaired.
 
 2.0.0 also takes delivery the way `TDD-identity-control-006` built it for provider authority:
 Organization Control posts each event to this service, rather than this service reading a broker.
+
+2.4.0 drops `identity.projection_cursor`, the broker consumer's watermark that 2.0.0 left behind
+(§Data Model), and measures the revocation's accept-to-enforcement delay on every `deploy-dev` run
+(§Testing Strategy).
 
 ## Scope
 
@@ -228,6 +232,21 @@ follows an event does not write one, because that change was expected. An `extra
 - An unknown Organization is one the authority never created.
 
 Either is the shape a privilege-escalation defect takes, and the record is the evidence.
+
+### What 1.0.0 Left Behind (2.4.0)
+
+`identity.projection_cursor` was 1.0.0's per-stream watermark for a broker consumer: a stream, a
+`projection_version`, the highest stream position applied, the last snapshot mark and
+`last_reconciled_at`. 2.0.0 has no stream to follow:
+- delivery is a post to `POST /v1/deliveries`, deduplicated by `inbox.Guard`;
+- order is decided by the versions, "not delivery order or `streamposition`" [R3];
+- convergence is observed through `tenant_convergence` and the metrics in §Operational Notes, and a
+  sweep through its log line and `identity.tenant_projection.findings`.
+
+No version of this service ever read or wrote the table, so migration
+`20261007210158_drop_projection_cursor` drops it. It is the contract step of `STD-GLB-002`'s
+"expand/migrate/contract" with nothing left to migrate: no running version reads it, so the drop
+cannot break a deployment in progress or a rollback [R4].
 
 ## API / Interface
 
@@ -466,9 +485,14 @@ events order. Without it, a snapshot could not safely say whether a Tenant was s
   - a repair for another consumer is acknowledged and applies nothing.
 - **Against the real kernel.** The `deploy-dev` stack:
   - grants a Membership, and a token for its Tenant carries `tenant_id`;
-  - revokes it, and the refresh is refused with `invalid_grant`.
+  - revokes it, and the refresh is refused with `invalid_grant`;
+  - measures the revocation's accept-to-enforcement delay (2.4.0): from the delivery's `202` to the
+    kernel's Organization no longer listing the member, read through the Admin API every 50 ms. The
+    figure goes to the job summary against this service's 2-second share. Above the share is a
+    warning, and above `SAD-001 §7.7`'s 60-second propagation budget the job fails [R5].
 - **Negative:**
-  - no code path constructs an Organization database connection;
+  - no code path constructs an Organization database connection: `internal/controldb`'s
+    `TestOnlyTheControlDatabaseIsOpened`, beside archcheck's denied driver imports (2.4.0);
   - no repair writes to the kernel's database.
 
 ## Security Notes
@@ -562,3 +586,9 @@ Runbooks required before production:
     consumer repairs toward, in the shape of a Membership event's payload … Null when authority holds
     no Membership by this identifier, which tells the consumer to remove the row."
   - Re-registering with other types "clears `snapshot_mark`".
+- **[R4]** `STD-GLB-002` 3.0.0, Enterprise Database & Persistence Standard: "Destructive or
+  incompatible changes require expand/migrate/contract or another explicitly reviewed migration
+  sequence".
+- **[R5]** `SAD-001` §7.7, Revocation Classes and Enforcement: "The propagation budget is 60 seconds
+  as the planning figure, against an operational target below 10 seconds", and "the production gate
+  MUST include measured acceptance-to-enforcement evidence for every class in the table above."

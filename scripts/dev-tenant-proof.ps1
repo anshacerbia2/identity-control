@@ -8,7 +8,10 @@
 #   1. a Tenant activated and a Membership granted: a token asked for organization:<tenant> carries
 #      that tenant_id, flat;
 #   2. the Membership revoked: a new token for the Tenant carries no tenant_id, and the refresh token
-#      issued for it is refused.
+#      issued for it is refused. The revocation's accept-to-enforcement delay is measured, from the
+#      delivery's 202 to the kernel's Organization no longer listing the member, read through the
+#      Admin API every 50 ms, and goes to the job summary against this service's 2-second share
+#      (TDD-identity-control-002 2.4.0). Above 60 s, SAD-001 §7.7's propagation budget, it fails.
 #
 # Two phases, because the service reads its delivering workload at start:
 #
@@ -17,7 +20,9 @@
 #   pwsh ./scripts/dev-tenant-proof.ps1 -Phase prove -State <file>
 #
 # Environment: as scripts/dev-smoke.ps1 (IDENTITY_API_URL, KC_BASE_URL, IDENTITY_CALLER_KEY_FILE,
-# IDENTITY_CALLER_PASSWORD, IDENTITY_OPERATOR_TOTP_FILE). Keys are made for each run in the state
+# IDENTITY_CALLER_PASSWORD, IDENTITY_OPERATOR_TOTP_FILE). The prove phase also reads the kernel as its
+# console administrator, as dev-proof-b.ps1 does: KC_ADMIN_URL, KC_BOOTSTRAP_ADMIN_USERNAME and
+# KC_BOOTSTRAP_ADMIN_PASSWORD. Keys are made for each run in the state
 # file's directory, because a registered key is never registered again. None is printed.
 
 param(
@@ -176,6 +181,32 @@ function Tenant-Of($response) {
     return $claims.tenant_id
 }
 
+$kcAdmin   = if ($env:KC_ADMIN_URL) { $env:KC_ADMIN_URL } else { "http://127.0.0.1:8081" }
+$adminUser = if ($env:KC_BOOTSTRAP_ADMIN_USERNAME) { $env:KC_BOOTSTRAP_ADMIN_USERNAME } else { "admin" }
+if ([string]::IsNullOrWhiteSpace($env:KC_BOOTSTRAP_ADMIN_PASSWORD)) { throw "KC_BOOTSTRAP_ADMIN_PASSWORD is required." }
+$script:adminToken = $null
+$script:adminTokenAt = [datetime]::MinValue
+# Kc reads the kernel as its console administrator. Master-realm admin tokens live a minute.
+function Kc([string] $path) {
+    if (((Get-Date) - $script:adminTokenAt).TotalSeconds -gt 30) {
+        $form = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+        $form["grant_type"] = "password"
+        $form["client_id"] = "admin-cli"
+        $form["username"] = $adminUser
+        $form["password"] = $env:KC_BOOTSTRAP_ADMIN_PASSWORD
+        $response = $client.PostAsync("$kcAdmin/realms/master/protocol/openid-connect/token",
+            (New-Object System.Net.Http.FormUrlEncodedContent($form))).Result
+        if (-not $response.IsSuccessStatusCode) { throw "the console administrator could not log in: $([int]$response.StatusCode)" }
+        $script:adminToken = ($response.Content.ReadAsStringAsync().Result | ConvertFrom-Json).access_token
+        $script:adminTokenAt = Get-Date
+    }
+    $request = New-Object System.Net.Http.HttpRequestMessage("GET", "$kcAdmin/admin/realms/$realm$path")
+    $request.Headers.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", $script:adminToken)
+    $response = $client.SendAsync($request).Result
+    if (-not $response.IsSuccessStatusCode) { throw "the kernel answered $([int]$response.StatusCode) to GET $path" }
+    return @($response.Content.ReadAsStringAsync().Result | ConvertFrom-Json)
+}
+
 $tenant = New-UuidV7
 $membership = New-UuidV7
 
@@ -207,10 +238,46 @@ Expect "no nested organization claim" ($claims.PSObject.Properties.Name -contain
 Expect "a refresh token was issued" ([bool]$granted.refresh_token) $true
 
 Write-Host "4. the Membership revoked"
-$r = Deliver "com.scnehaux.organization.membership.security.revoked" @{ membership_id = $membership
-    principal_id = $s.operator; tenant_id = $tenant; workspace_id = $null; membership_status = "revoked"
-    membership_version = 2; tenant_security_version = 1 }
+# The Tenant's Organization is named by its tenant_id (TDD-identity-control-002 §Converging a Tenant).
+$organization = @(Kc "/organizations?search=$tenant&exact=true" | Where-Object { $_.name -eq $tenant -or $_.alias -eq $tenant })
+Expect "the kernel holds the Tenant's Organization" $organization.Count 1
+$userId = @(Kc "/users?username=bootstrap-operator&exact=true")[0].id
+function Is-Member { return @(Kc "/organizations/$($organization[0].id)/members?first=0&max=1000" | Where-Object { $_.id -eq $userId }).Count -gt 0 }
+Expect "the operator is a member" (Is-Member) $true
+$token = Get-DeliveryToken
+$watch = [System.Diagnostics.Stopwatch]::StartNew()
+$script:position++
+$envelope = @{ specversion = "1.0"; id = (New-UuidV7); source = "/systems/organization-control"
+    type = "com.scnehaux.organization.membership.security.revoked"
+    time = [DateTimeOffset]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"); datacontenttype = "application/json"
+    streamposition = $script:position; data = @{ membership_id = $membership; principal_id = $s.operator
+        tenant_id = $tenant; workspace_id = $null; membership_status = "revoked"; membership_version = 2
+        tenant_security_version = 1 } } | ConvertTo-Json -Compress -Depth 6
+$r = Send-Json "POST" "/v1/deliveries" $envelope $token $null
+$acceptedAfter = $watch.Elapsed.TotalSeconds
 Expect "membership revocation accepted" $r.code 202
+# Accepted is the 202: the event and the Tenant's mark are committed by then. Enforced is the kernel
+# no longer listing the member, which is what refuses the Tenant's refresh (ADR-IAM-006 §5.5).
+$accepted = [System.Diagnostics.Stopwatch]::StartNew()
+$removed = $false
+while ($accepted.Elapsed.TotalSeconds -lt 90) {
+    if (-not (Is-Member)) { $removed = $true; break }
+    Start-Sleep -Milliseconds 50
+}
+$delay = [math]::Round($accepted.Elapsed.TotalSeconds, 3)
+Expect "the kernel removed the member" $removed $true
+Write-Host "        accepted to enforced: $delay s (the delivery was answered after $([math]::Round($acceptedAfter, 3)) s)"
+if ($delay -gt 60) {
+    Write-Host "  FAIL  the revocation took $delay s, over SAD-001 §7.7's 60 s propagation budget"
+    $failures++
+} elseif ($delay -gt 2) {
+    Write-Host "::warning::the revocation took $delay s, over this service's 2 s share (TDD-identity-control-002)"
+}
+$summary = @("## Accept-to-enforcement · projection removal", "",
+    "| Class | Accepted | Enforced | Delay | Bound |", "| :-- | :-- | :-- | :-- | :-- |",
+    ('| Contextual Membership (priority revocation) | `/v1/deliveries` answered 202 | kernel Organization no longer lists the member | ' +
+        "$delay s" + ' | 2 s share (TDD-identity-control-002); 60 s propagation budget (SAD-001 §7.7) |'))
+if ($env:GITHUB_STEP_SUMMARY) { $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8 }
 $after = $null
 for ($i = 0; $i -lt 30; $i++) {
     $after = Sign-InFor $tenant

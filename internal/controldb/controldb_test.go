@@ -74,7 +74,6 @@ func TestGrantsStageGuardsItsOrdering(t *testing.T) {
 
 	for _, object := range []string{
 		"identity.principal_mapping",
-		"identity.projection_cursor",
 		"platform.outbox",
 	} {
 		if !strings.Contains(body, object) {
