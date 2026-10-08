@@ -71,7 +71,9 @@ func TestEveryProviderRouteRefusesAnOwner(t *testing.T) {
 		{http.MethodPost, "/v1/principals"},
 		{http.MethodGet, "/v1/principals:dangling"},
 		{http.MethodPost, "/v1/workloads"},
-		{http.MethodGet, "/v1/workloads/" + owner.String()},
+		{http.MethodPost, "/v1/workloads:sweep"},
+		{http.MethodGet, "/v1/workloads:orphaned"},
+		{http.MethodGet, "/v1/workloads:reviews-overdue"},
 	} {
 		r := asOwner(httptest.NewRequest(c.method, c.path, strings.NewReader(`{}`)), owner)
 		r.Header.Set(httpapi.AdministrativeReasonHeader, "r")
@@ -112,8 +114,15 @@ func TestEveryAPIRouteIsWrapped(t *testing.T) {
 			}
 			continue // route class self: the caller's own Principal, named by no path segment
 		}
-		if pattern == "POST /v1/workloads/{target}" && strings.HasPrefix(handler, "ownedWorkload(") {
-			continue // :review is the workload owner's, every other action a provider's
+		if (pattern == "POST /v1/workloads/{target}" || pattern == "GET /v1/workloads/{target}") &&
+			strings.HasPrefix(handler, "ownedWorkload(") {
+			continue // the read and :review are the workload owner's too, every other action a provider's
+		}
+		if pattern == "GET /v1/workloads:mine" {
+			if !strings.HasPrefix(handler, "s(") {
+				t.Errorf("%s is the caller's own workloads served by %s, not selfOnly", pattern, handler)
+			}
+			continue // the workloads the caller owns, for any caller
 		}
 		if !strings.HasPrefix(handler, "p(") && !strings.HasPrefix(handler, "owned(") {
 			t.Errorf("%s is served by %s, neither providerOnly nor owned", pattern, handler)

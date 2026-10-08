@@ -61,6 +61,13 @@ func (s *Service) Review(ctx context.Context, req ReviewRequest) (Workload, erro
 		if locked.Owner != req.ReviewedBy {
 			return ErrNotOwner
 		}
+		// The owner counts only while its mapping is an active human one, as its read does
+		// (TDD-identity-control-004 1.7.0): a retired owner is anyone else, not a late reviewer.
+		if err := s.ownerEligible(ctx, tx, locked.Owner); errors.Is(err, ErrOwnerNotEligible) {
+			return ErrNotOwner
+		} else if err != nil {
+			return err
+		}
 		if locked.State != StateActive {
 			return fmt.Errorf("%w: only an active workload is reviewed; this one is %s", ErrInvalidTransition, locked.State)
 		}

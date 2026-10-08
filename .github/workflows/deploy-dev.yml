@@ -14,6 +14,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The restore drill runs on every change, and weekly so it runs when nothing changes: STD-GLB-007
+  # asks for a drill at least every 90 days (STD-GLB-002 §Restore Evidence).
+  schedule:
+    - cron: "41 3 * * 1"
   # Run by hand with a kernel branch, to prove this service against a kernel change before it merges.
   workflow_dispatch:
     inputs:
@@ -306,6 +310,33 @@ jobs:
           export IDENTITY_API_URL=http://127.0.0.1:8082 KC_BASE_URL=https://localhost KC_ADMIN_URL=http://localhost:8080
           export IDENTITY_OPERATOR_TOTP_FILE="$RUNNER_TEMP/operator-totp.json"
           pwsh -NoProfile -File scripts/dev-proof-b.ps1
+      # ROADMAP §Gates, production gate: restore evidence for the Control Database (STD-GLB-002
+      # §Restore Evidence, TDD-identity-control-001 §Restore Evidence). The stack every step above
+      # filled is backed up with deploy/dev/backup.sh, its volume deleted, and restored with
+      # deploy/dev/restore.sh; schema, migration, every table, sequence and role are compared, the
+      # service restarted and read, and the recovery timed against the 15-minute RTO. Last, because it
+      # deletes the database.
+      - name: the Control Database restores from its backup
+        run: |
+          set -a; . deploy/dev/.env; set +a
+          export IDENTITY_API_URL=http://127.0.0.1:8082 KC_BASE_URL=https://localhost
+          export IDENTITY_OPERATOR_TOTP_FILE="$RUNNER_TEMP/operator-totp.json"
+          bash scripts/dev-restore-drill.sh "$RUNNER_TEMP/restore-drill"
+
+      # The evidence, never the backup: the dump and the roles file hold role password hashes.
+      - name: keep the restore evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: restore-evidence
+          path: |
+            ${{ runner.temp }}/restore-drill/*.json
+            ${{ runner.temp }}/restore-drill/*.txt
+            ${{ runner.temp }}/restore-drill/*.sql
+            !${{ runner.temp }}/restore-drill/backup/**
+          if-no-files-found: ignore
+          retention-days: 90
+
       - name: stack logs
         if: failure()
         run: |

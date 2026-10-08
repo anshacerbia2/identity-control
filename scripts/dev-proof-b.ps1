@@ -444,6 +444,12 @@ if ($PSVersionTable.PSEdition -ne 'Core') {
         $r = Api "POST" "/v1/workloads/${jobPrincipal}:review" $null @{ "X-Administrative-Reason" = "proof-b: still needed, purpose and owner hold" }
         Expect "its owner reviews it" $r.code 200
         Expect "and the review is recorded" ($null -ne (Get-Prop $r.json "last_reviewed_at")) $true
+        # TDD-identity-control-004 1.7.0: the owner lists what it reviews, with the next review's date.
+        $r = Api "GET" "/v1/workloads:mine" $null $null
+        Expect "its owner lists the workloads it owns" $r.code 200
+        $listed = @($r.json.workloads | Where-Object { $_.principal_id -eq $jobPrincipal })
+        Expect "the reviewed workload among them" $listed.Count 1
+        Expect "with its last review and the next one's date" (($null -ne (Get-Prop $listed[0] "last_reviewed_at")) -and ($null -ne (Get-Prop $listed[0] "review_due_at"))) $true
         $r = Api "POST" "/v1/workloads:sweep" $null $null
         Expect "the workload sweep ran" $r.code 200
         Expect "and orphaned nothing" (Get-Prop $r.json "orphaned") 0

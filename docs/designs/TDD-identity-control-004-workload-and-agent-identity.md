@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-004
   title: Workload and Bounded Agent Identity
   owner: Core Platform Team
-  version: 1.6.0
+  version: 1.7.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -285,7 +285,7 @@ it.
 
 ```text
 POST   /v1/workloads                                   built
-GET    /v1/workloads/{principal_id}                    built
+GET    /v1/workloads/{principal_id}                    built; its owner's too (1.7.0)
 POST   /v1/workloads/{principal_id}:reassign           built
 POST   /v1/workloads/{principal_id}:suspend           built
 POST   /v1/workloads/{principal_id}:restore           built
@@ -295,6 +295,7 @@ POST   /v1/workloads/{principal_id}:rebuild           built (1.5.0)
 GET    /v1/workloads:orphaned                          built (1.5.0)
 GET    /v1/workloads:unused                            built (1.5.0)
 GET    /v1/workloads:reviews-overdue                   built (1.5.0)
+GET    /v1/workloads:mine                              built (1.7.0), any caller: its own
 POST   /v1/workloads:sweep                             built (1.5.0)
 
 POST   /v1/agents/{principal_id}/delegations
@@ -328,6 +329,28 @@ refused until bounded delegation is built. `:reassign` takes `{"owner_principal_
   `{"orphaned", "reclaimed", "suspended", "unused", "reviews_overdue"}`.
 
 A workload also carries `last_reviewed_at` and `review_due_at`.
+
+1.7.0 lets the owner read what it reviews (`ADR-IAM-003 §5.8`). Before it, every read was a
+provider's, so an owner who was not a provider could attest to a workload it could not see:
+
+- **The owner is the workload's `owner_principal_id`, counted only while that Principal's mapping is
+  an active `human` one**, the predicate the sweep orphans by. A retired, quarantined or suspended
+  owner reads nothing from the next request, as a registration's owner does
+  (`TDD-identity-control-003` §Registration Ownership). No registration owner is granted on a
+  workload's client.
+- **`GET /v1/workloads:mine`** lists the workloads the caller owns, in every state, oldest first, each
+  as `GET /v1/workloads/{principal_id}` answers it, with `last_reviewed_at` and `review_due_at`:
+  `{"workloads": [...]}`, `[]` when there are none. Any authenticated caller reaches it; a provider
+  sees the workloads it owns, not every workload.
+- **`GET /v1/workloads/{principal_id}`** serves a provider at `aal2` any workload, as before, and any
+  other caller only a workload it owns. One query reads the workload together with the owner
+  predicate, so a workload owned by someone else and one that does not exist are the same `404`,
+  reached the same way: a caller cannot learn which workloads exist (OWASP API1:2023, RFC 9110
+  §15.5.4, `ADR-IAM-003` [R9][R10]). A provider who owns the workload reads it as a provider.
+- **`:review` counts the owner by the same predicate.** An owner whose mapping is no longer active is
+  answered `404`, as anyone else is, rather than having its review recorded before the sweep orphans
+  the workload.
+- Every other workload route stays a provider's, refused to an owner before anything is read.
 
 ### Token Shape
 
@@ -565,6 +588,10 @@ record and its schedule are built in 1.5.0:
   things hold. One that does not hold is changed by what changes it: `:reassign` for the owner, a
   provider's `:suspend` and `:retire` for a workload no longer needed. A review is an owner's word,
   recorded with who gave it, which is what CIS 5.5's review date stands for.
+- **The owner sees what it attests to** (1.7.0): `GET /v1/workloads:mine` and
+  `GET /v1/workloads/{principal_id}` answer the owner with the workload, its last review and the date
+  the next is due, so the Developer Console offers the review where the owner works
+  (`ADR-IAM-003 §5.8`, `TDD-identity-experience-004` §Ownership).
 - **A review is due** `IDENTITY_WORKLOAD_REVIEW_INTERVAL` after the last one, or after activation.
   Past it, the sweep opens a `review_overdue` finding and logs a `WARN` for the owner; seven days past
   it (`IDENTITY_WORKLOAD_ORPHAN_ESCALATE_AFTER`), an `ERROR` for the Tenant's administrators, on the
@@ -682,6 +709,12 @@ Pending-workload recovery runs on the registration sweep's schedule
   successful `CLIENT_LOGIN` moves `last_seen_at`.
 - A review is the owner's alone, is recorded insert-only, and resolves an overdue finding; an overdue
   review suspends nothing.
+- The owner lists and reads its own workloads with `last_reviewed_at` and `review_due_at`; another
+  owner's workload, and one whose owner's mapping is no longer active, is not found; an owner whose
+  mapping is retired reads and reviews nothing (1.7.0, `internal/workload/owner_integration_test.go`).
+- An owner token reaches `GET /v1/workloads/{principal_id}` and `GET /v1/workloads:mine` and answers
+  `404` for a workload it does not own, the same as for none; every other workload route but `:review`
+  refuses it `403` before anything is read (`internal/httpapi/workloads_test.go`).
 - A rebuild refuses while the client exists, creates one holding the registered keys, binds the
   mapping to its service-account user under the same `principal_id`, and leaves nothing behind when
   it fails.
@@ -771,6 +804,7 @@ credential compromise, agent delegation review, and unused workload retirement.
 | Parent system | SAD-001 — Scnehaux Identity Runtime |
 | Realizes capability | PAD-PLT-001 — machine, service, workload, and bounded agent identity |
 | Governed by | ADR-IAM-001 — the kernel owns credential storage and protocol grants |
+| Governed by | ADR-IAM-003 §5.8 — the workload's owner lists, reads and reviews it, and another's workload is not found |
 | Conforms to | STD-IAM-001 §3.7 — explicit owner, audience, rotation, lifecycle; distinguishable in audit; no shared human credentials |
 | Conforms to | STD-IAM-002 §3.1, §3.2 — the `workload` audience class carries `principal_id`, `subject_type`, and `workload_owner` |
 | Enterprise constraint | EAD-006 — agents receive bounded delegated authority, not unrestricted user power |

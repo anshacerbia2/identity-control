@@ -539,39 +539,52 @@ deletes it**, and with it every mapping, registration and record: nothing outsid
 `principal_id`. Back it up daily to storage outside the Docker volume, and keep `.env` and `keys/`
 with it, because a restored database is useless without the keys its clients authenticate with.
 
-The dump, from this directory. The password is read from `.env` when the command runs and never
-written anywhere else:
+`./backup.sh <directory>` writes two files: `globals-<date>.sql`, the cluster's roles from
+`pg_dumpall --globals-only`, and `identity_control-<date>.dump`, the database from
+`pg_dump --format=custom`. A database dump holds no roles, and the roles must exist before the
+objects they own or are granted are restored. Both files hold role password hashes, so the script
+makes them readable by their owner alone. It connects over the container's local socket, which the
+image trusts, so no password is typed or written anywhere. The service keeps running.
 
 ```sh
 cd identity-control/deploy/dev
-set -a; . ./.env; set +a
-backup=/mnt/backups/identity-control                    # outside the Docker volume; yours may differ
-mkdir -p "$backup"
-docker compose exec -T -e PGPASSWORD="$POSTGRES_PASSWORD" postgres \
-  pg_dump -h 127.0.0.1 -U postgres -d identity_control --format=custom \
-  > "$backup/identity_control-$(date +%F).dump"
+./backup.sh /mnt/backups/identity-control              # outside the Docker volume; yours may differ
 ```
 
 Daily, from the operator's crontab (`crontab -e`), with the checkout's path:
 
 ```cron
-15 2 * * * cd /home/development/apps/identity-control/deploy/dev && set -a && . ./.env && set +a && docker compose exec -T -e PGPASSWORD="$POSTGRES_PASSWORD" postgres pg_dump -h 127.0.0.1 -U postgres -d identity_control --format=custom > /mnt/backups/identity-control/identity_control-$(date +\%F).dump
+15 2 * * * /home/development/apps/identity-control/deploy/dev/backup.sh /mnt/backups/identity-control >/dev/null
 ```
 
 `keys/` belongs to `KEYS_OWNER`, the container's user, so it is copied with `sudo`:
-`sudo tar -C . -czf "$backup/keys-$(date +%F).tgz" keys .env`. Keep the archive as private as the keys.
+`sudo tar -C . -czf "/mnt/backups/identity-control/keys-$(date +%F).tgz" keys .env`. Keep the archive as private as the keys.
 
-To restore into an empty stack, start `postgres` alone, restore, then start the rest:
+To restore into an empty volume, put `.env` and `keys/` back first, then:
 
 ```sh
-docker compose up -d postgres
-docker compose exec -T -e PGPASSWORD="$POSTGRES_PASSWORD" postgres \
-  pg_restore -h 127.0.0.1 -U postgres -d postgres --create --clean --if-exists < "$backup/identity_control-<date>.dump"
+./restore.sh /mnt/backups/identity-control/globals-<date>.sql \
+             /mnt/backups/identity-control/identity_control-<date>.dump
 docker compose up -d --build
+curl -fsS http://127.0.0.1:8082/readyz
 ```
 
-The migrate job then finds the schema at its revision and changes nothing, and the ceremony record in
-the dump keeps a second ceremony refused.
+`restore.sh` starts `postgres` alone and refuses a cluster that already holds `identity_control`:
+replacing a live database is a decision, made by deleting the volume, never a side effect. It applies
+the roles, allowing only the bootstrap superuser's harmless "role already exists", then restores the
+database whole with `pg_restore --create --exit-on-error`, which stops at the first error. The
+migrate job that `up` runs then finds the schema at its revision, applies anything newer, and sets
+`identity_app`'s password from `.env` again. The ceremony record in the dump keeps a second ceremony
+refused.
+
+**What is proven, and what is not.** `deploy-dev` runs both scripts on every change and weekly, as
+the restore drill `scripts/dev-restore-drill.sh` (STD-GLB-002 §Restore Evidence): it backs the filled
+stack up, deletes its volume, restores, compares schema, migration version, every table, sequence and
+role with the source, then starts the service and reads the registrations through the API. The
+recovery is timed against the 15-minute RTO, and the evidence is the job's `restore-evidence`
+artifact. A daily dump loses up to 24 hours of changes, against the 1-minute RPO of
+`PAD-PLT-001 §6.2`; meeting it needs WAL archiving on the production platform. The runbook is
+[`docs/runbooks/control-database-restore.md`](../../docs/runbooks/control-database-restore.md).
 
 ## Never do
 

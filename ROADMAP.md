@@ -535,6 +535,7 @@ Acceptance criteria, also from RESPONSE-4 §4:
     - `POST /v1/workloads/{id}:review` is the owner's attestation (CIS 5.5, AC-2(j)), the reason as its statement, recorded insert-only in `identity.workload_review`; anyone else is answered 404. A review is due 90 days after the last one or activation; overdue, the sweep alerts and suspends nothing. `GET /v1/workloads:reviews-overdue`; a workload carries `last_reviewed_at` and `review_due_at`.
     - `POST /v1/workloads/{id}:rebuild` recreates a deleted workload client from desired state with its keys, writes the identity on the new service-account user and binds the mapping there under the same `principal_id`, recorded in `principal_relink`, in one transaction that deletes the client again on failure.
     - Proof B scenario 7 proves the last authentication, the review and the rebuild against the live kernel.
+    - ✅ The owner reads what it reviews (ADR-IAM-003 §5.8; TDD-identity-control-004 1.7.0, TDD-identity-control-003 1.36.0, TDD-identity-control-001 1.17.0), in `internal/workload/owner.go`: `GET /v1/workloads:mine` lists the workloads the caller owns, and `GET /v1/workloads/{id}` serves an owner its own, each with `last_reviewed_at` and `review_due_at`. Another's workload is the same 404 as none, read in one query with the ownership. The owner counts only while its mapping is an active human one, for `:review` too. Every other workload route still refuses an owner 403 before anything is read. Proof B scenario 7 lists the reviewed workload. The Developer Console offers the review (identity-experience#50).
     - Not built: telling the owner's administrative chain and the Tenant's administrators, which needs the Notification Platform and organization-control's knowledge of who administers a Tenant; the log alerts and listings stand in.
   - Not built yet: agent delegation, which needs the human's Membership and scope (organization-control) and an `act` claim the kernel issues (identity-kernel). ✅ `identity-experience`'s admin form creates a workload through `POST /v1/workloads` on its own Workloads page (identity-experience e25a809); the Principals form no longer offers one.
 - ✅ **Registration ownership, first slice** (ADR-IAM-003; TDD-003 1.19.0 §Registration Ownership; TDD-001 1.8.0 §Caller Token): `identity.registration_owner`, granted and revoked by a provider with a reason, insert-only but for its revocation columns.
@@ -861,8 +862,24 @@ removal, Keycloak administration credential rotation rehearsed, and runbooks wri
 for unmapped-Principal triage, duplicate-identifier containment, pending-mapping
 recovery, and projection drift repair.
 
-Where each stands (2026-10-07):
-- **Restore evidence for the Control Database.** Not covered here.
+Where each stands (2026-10-08):
+- ✅ **Restore evidence for the Control Database** (`STD-GLB-002` §Restore Evidence,
+  TDD-identity-control-001 1.16.0 §Restore Evidence). `deploy-dev`'s last step,
+  `scripts/dev-restore-drill.sh`, runs on every change and weekly. It backs the filled stack up with
+  `deploy/dev/backup.sh`, deletes its volume, and restores with `deploy/dev/restore.sh` (roles, then
+  `pg_restore --create --exit-on-error`). It then requires the schema with owners and grants, the
+  migration version, every table's rows and checksum, every sequence and the roles to equal the
+  source's, the restarted service to answer `GET /v1/registrations` identically, and the recovery to
+  finish inside the 15-minute RTO. The record is the job's `restore-evidence` artifact.
+  - First run, deploy-dev run 37826468245, 2026-10-08: 46 tables and 478 rows equal; the restore
+    took 2.0 s, and the recovery to the verified read 29.1 s, against 900 s. The same dump restored
+    into a cluster without its roles stopped on `role "identity_migrator" does not exist`, which is
+    what the README's old order, restore before any role, would have met.
+  - **RPO is not met, and is a recorded gap.** The backup is a daily `pg_dump`, so a restore loses up
+    to 24 hours, against `PAD-PLT-001 §6.2`'s 1 minute. That needs continuous WAL archiving with
+    point-in-time recovery on the production platform.
+  - A restore to an older point than the kernel's is not drilled. `docs/runbooks/control-database-restore.md`
+    says what the service then reads as drift, and what an operator does.
 - ✅ **Accept-to-enforcement delay, measured.** `deploy-dev` measures both on every run against the
   live kernel and writes them to the job summary. Above the 60-second propagation budget
   (`SAD-001 §7.7`) the job fails, and above this service's 2-second share it warns.

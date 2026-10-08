@@ -237,9 +237,11 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	api.HandleFunc("GET /v1/registration-requests:mine", creator(cfg.Registrations.MyRequests))
 	api.HandleFunc("POST /v1/registration-requests/{request_action}", creator(k.replay(cfg.Registrations.RequestAction)))
 	api.HandleFunc("POST /v1/workloads", p(k.cmd(cfg.Workloads.CreateWorkload)))
-	api.HandleFunc("GET /v1/workloads/{target}", p(cfg.Workloads.GetWorkload))
-	// :review is the workload owner's; every other action a provider's (TDD-identity-control-004 1.5.0).
+	// The read and :review are the workload owner's too, and every other action a provider's
+	// (TDD-identity-control-004 1.5.0, 1.7.0; ADR-IAM-003 §5.8). :mine is the caller's own.
 	ownedWorkload := cfg.Workloads.owned(cfg.Assurance)
+	api.HandleFunc("GET /v1/workloads/{target}", ownedWorkload(cfg.Workloads.GetWorkload))
+	api.HandleFunc("GET /v1/workloads:mine", s(cfg.Workloads.Mine))
 	api.HandleFunc("POST /v1/workloads/{target}", ownedWorkload(k.replay(cfg.Workloads.WorkloadAction)))
 	api.HandleFunc("POST /v1/workloads:sweep", p(cfg.Workloads.Sweep))
 	api.HandleFunc("GET /v1/workloads:orphaned", p(cfg.Workloads.Orphaned))
