@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-004
   title: Workload and Bounded Agent Identity
   owner: Core Platform Team
-  version: 1.5.0
+  version: 1.6.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-11
-  last_reviewed: 2026-10-07
+  last_reviewed: 2026-10-08
   parent_sad: SAD-001
 ---
 
@@ -317,6 +317,9 @@ refused until bounded delegation is built. `:reassign` takes `{"owner_principal_
   so a caller cannot learn which workloads exist. The workload must be `active`.
 - **`:rebuild`** takes an `X-Administrative-Reason` (§Rebuilding a Workload's Client) and answers the
   workload.
+- **Every action requires an `Idempotency-Key` (1.6.0)**, and a retry with it is answered the
+  first response (`TDD-identity-control-003` §The Idempotency-Key on Every Command). `POST
+  /v1/workloads:sweep` needs none: a repeat finds the same stage.
 - **`:orphaned`**, **`:unused`** and **`:reviews-overdue`** list the workloads in each condition,
   oldest first, each with its `principal_id`, `client_key`, `display_name`, owner and the instant the
   condition began: `{"workloads": [...]}`. An orphaned workload carries its `stage`, `reminder`,

@@ -820,6 +820,21 @@ Two decisions are recorded here:
   the scan enforces. A registry and image signing for the production path remain production-gate
   items.
 
+- ✅ **An `Idempotency-Key` on every command** (STD-GLB-001 1.4.0; TDD-003 1.35.0 §The
+  Idempotency-Key on Every Command). Every mutating route is classified in
+  `internal/httpapi/commands.go`, and `TestEveryMutatingRouteIsClassified` fails on one left out:
+  - nine commands whose service claims the key, as before, and the adoption, which requires one
+    except for its plan;
+  - sixteen routes keyed here, each replayed from `platform.idempotency_key`: owners, keys,
+    changes, standings, requests, the registration and workload lifecycles, re-drive and
+    notification addresses. `:relink` is replayed the same way inside its route's dispatch. All
+    but adding an address are new requirements; adding one required a key before and recorded
+    nothing;
+  - six routes that need none, each with its reason: the two reconciles, the two sweeps, enroll and
+    deliveries.
+
+  The scripts and `deploy-dev` send a key on every command.
+
 ## Not this service
 
 Recorded so scope creep is visible rather than convenient:
@@ -834,8 +849,8 @@ Recorded so scope creep is visible rather than convenient:
 **Design gate.** Every TDD in the status table reaches `1.0.0`, with each open
 proof-of-concept question answered against the pinned Keycloak release.
 
-✅ Met 2026-10-07. All eight TDDs are `approved` at `1.0.0` or later: 001 at 1.14.0, 002 at 2.4.0,
-003 at 1.34.0, 004 at 1.5.0, 005 at 2.10.0, 006 at 1.3.0, 007 at 1.1.0 and 008 at 1.4.0. TDD-001's
+✅ Met 2026-10-07. All eight TDDs are `approved` at `1.0.0` or later: 001 at 1.15.0, 002 at 2.4.0,
+003 at 1.35.0, 004 at 1.6.0, 005 at 2.11.0, 006 at 1.3.0, 007 at 1.1.0 and 008 at 1.5.0. TDD-001's
 four proof-of-concept questions were answered 2026-09-25, and TDD-002's three by ADR-IAM-006 and
 identity-kernel compat run 37207537199. TDD-003's one open question, the Application reference
 authority, waits for Software Catalog and is not a proof-of-concept question.
