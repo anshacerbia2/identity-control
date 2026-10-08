@@ -24,8 +24,8 @@ WHERE NOT EXISTS (
 
 const insertPendingStatement = `INSERT INTO identity.client_registration
     (registration_id, realm, client_key, profile, application_authority, application_ref, registered_by,
-     audience_class, lifetime_class, audience, redirect_uris, state, privileged_form)
-VALUES ($1, $2, $3, $4, 'manual', $5, $6, $7, $8, $9, $10, 'pending', $11)`
+     audience_class, lifetime_class, audience, redirect_uris, state, privileged_form, backchannel_logout_uri)
+VALUES ($1, $2, $3, $4, 'manual', $5, $6, $7, $8, $9, $10, 'pending', $11, $12)`
 
 // insertPending records the registration pending and, for a confidential or workload client, its
 // first key as the active key: the key is desired state from the start, so recovery creates the
@@ -67,7 +67,7 @@ func (s *Service) insertPending(ctx context.Context, tx db.Tx, req Request, key 
 	redirects := append([]string{}, req.RedirectURIs...)
 	if _, err := tx.Exec(ctx, insertPendingStatement, registrationID.String(), string(s.cfg.Realm), req.ClientKey,
 		req.Profile, req.ApplicationRef, req.RegisteredBy.String(), req.AudienceClass, lifetime, audience,
-		redirects, nullableForm(req.PrivilegedForm)); err != nil {
+		redirects, nullableForm(req.PrivilegedForm), nullableText(req.BackChannelLogoutURI)); err != nil {
 		return Registration{}, fmt.Errorf("registration: insert pending registration: %w", err)
 	}
 	if key != nil {
@@ -83,7 +83,8 @@ func (s *Service) insertPending(ctx context.Context, tx db.Tx, req Request, key 
 var registrationColumns = `r.realm, r.client_key, r.profile, r.audience_class, r.application_authority,
        r.application_ref, r.registered_by::text, r.signing_algorithm, coalesce(r.lifetime_class, ''),
        coalesce(r.audience, '{}'::text[]), coalesce(r.redirect_uris, '{}'::text[]), r.state, r.version,
-       r.created_at, coalesce(r.privileged_form, ''), ` + LifespanSQL("r.realm", "r.audience")
+       r.created_at, coalesce(r.privileged_form, ''), ` + LifespanSQL("r.realm", "r.audience") + `,
+       coalesce(r.backchannel_logout_uri, '')`
 
 // readStatement reads one registration.
 var readStatement = `SELECT ` + registrationColumns + `
@@ -113,7 +114,7 @@ func (s *scannedRow) targets() []any {
 	r := &s.registration
 	return []any{&r.Realm, &r.ClientKey, &r.Profile, &r.AudienceClass, &r.ApplicationAuthority, &r.ApplicationRef,
 		&s.registeredBy, &r.SigningAlgorithm, &r.LifetimeClass, &r.Audience, &r.RedirectURIs, &r.State, &r.Version,
-		&s.createdAt, &r.PrivilegedForm, &s.lifespan}
+		&s.createdAt, &r.PrivilegedForm, &s.lifespan, &r.BackChannelLogoutURI}
 }
 
 func (s *scannedRow) finish() (Registration, error) {
@@ -248,4 +249,12 @@ func nullableForm(form string) any {
 		return nil
 	}
 	return form
+}
+
+// nullableText stores an optional text column as NULL when it is empty.
+func nullableText(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
 }

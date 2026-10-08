@@ -31,6 +31,9 @@ const (
 	ClassRedirectURIs  = "redirect_uris"
 	ClassClientKeys    = "client_keys"
 	ClassTokenFormat   = "token_format"
+	// ClassLogout is the client's front-channel logout setting and back-channel logout URL
+	// (ADR-IAM-009 §5.1, §5.2). It repairs: a difference is a notification that would not arrive.
+	ClassLogout = "logout"
 	// ClassAudienceProfile is the audience profile scope among the client's default scopes: its claim
 	// surface (STD-IAM-002 §3.2.1). It blocks (ADR-IAM-001 §5.12 rule 3, TDD-identity-control-003
 	// 1.30.0): a difference means the declaration names the wrong class or form, and converging it
@@ -63,7 +66,7 @@ func heldProfiles(scopes ScopeSets) []string {
 }
 
 // convergeable are the repairable classes an adoption may converge when the request names them.
-var convergeable = []string{ClassTokenLifespan, ClassAudienceScope, ClassEnabled, ClassTokenFormat}
+var convergeable = []string{ClassTokenLifespan, ClassAudienceScope, ClassEnabled, ClassTokenFormat, ClassLogout}
 
 var (
 	// ErrNotAdoptable is an adoption the plan refuses: a blocking class differs, or a repairable one
@@ -108,8 +111,10 @@ type Plan struct {
 	Refusal     string       `json:"refusal,omitempty"`
 	Differences []Difference `json:"differences"`
 
-	// The declaration's profile and audience class, which the scope sets are derived from.
+	// The declaration's profile and audience class, which the scope sets are derived from, and the
+	// back-channel logout URI the logout class converges to.
 	profile, audienceClass, privilegedForm string
+	backChannelLogoutURI                   string
 }
 
 // AdoptResult is the plan, and the registration when the client was adopted.
@@ -135,11 +140,14 @@ func (s *Service) Adopt(ctx context.Context, req AdoptRequest) (AdoptResult, err
 	}
 	for _, class := range req.Converge {
 		if !slices.Contains(convergeable, class) {
-			return AdoptResult{}, invalid("converge names only token_lifespan, audience_scope, enabled or token_format")
+			return AdoptResult{}, invalid("converge names only token_lifespan, audience_scope, enabled, token_format or logout")
 		}
 	}
 	req.Request = req.Request.normalized()
 	if err := validate(req.Request); err != nil {
+		return AdoptResult{}, err
+	}
+	if err := s.checkBackChannelLogout(req.Request); err != nil {
 		return AdoptResult{}, err
 	}
 	keys := make([]PublicKey, 0, len(req.PublicKeys))
@@ -336,7 +344,7 @@ func planAdoption(req AdoptRequest, client keycloak.Client, scopes ScopeSets, li
 	// holds both forms' scopes as optional ones.
 	desiredProfile, observedProfile := heldProfiles(desiredScopes), heldProfiles(scopes)
 	plan := Plan{ClientKey: req.ClientKey, profile: req.Profile, audienceClass: req.AudienceClass,
-		privilegedForm: req.PrivilegedForm, Differences: []Difference{
+		privilegedForm: req.PrivilegedForm, backChannelLogoutURI: req.BackChannelLogoutURI, Differences: []Difference{
 			{FieldClass: ClassTokenLifespan, Policy: PolicyRepair, Desired: lifespan, Observed: client.AccessTokenLifespan,
 				Differs: client.AccessTokenLifespan != lifespan},
 			{FieldClass: ClassAudienceScope, Policy: PolicyRepair, Desired: sortedSets(desiredScopes),
@@ -345,6 +353,8 @@ func planAdoption(req AdoptRequest, client keycloak.Client, scopes ScopeSets, li
 				Desired:  map[string]any{"at_jwt": true, "client_id": req.ClientKey},
 				Observed: map[string]any{"at_jwt": client.RFC9068, "client_id": client.ClientIDClaim},
 				Differs:  !client.RFC9068 || client.ClientIDClaim != req.ClientKey},
+			{FieldClass: ClassLogout, Policy: PolicyRepair, Desired: keycloak.DesiredLogout(req.BackChannelLogoutURI),
+				Observed: client.Logout, Differs: client.Logout != keycloak.DesiredLogout(req.BackChannelLogoutURI)},
 			{FieldClass: ClassEnabled, Policy: PolicyRepair, Desired: true, Observed: client.Enabled, Differs: !client.Enabled},
 			{FieldClass: ClassAudienceProfile, Policy: PolicyBlock, Desired: desiredProfile, Observed: observedProfile,
 				Differs: !slices.Equal(desiredProfile, observedProfile)},
@@ -402,6 +412,11 @@ func (s *Service) converge(ctx context.Context, plan Plan, client keycloak.Clien
 			_, err = call(ctx, s.cfg.CallTimeout, func(ctx context.Context) (struct{}, error) {
 				return struct{}{}, s.kernel.PatchClient(ctx, s.cfg.Realm, client.ID, keycloak.ClientPatch{TokenFormat: &clientKey})
 			})
+		case ClassLogout:
+			target := plan.backChannelLogoutURI
+			_, err = call(ctx, s.cfg.CallTimeout, func(ctx context.Context) (struct{}, error) {
+				return struct{}{}, s.kernel.PatchClient(ctx, s.cfg.Realm, client.ID, keycloak.ClientPatch{BackChannelLogoutURL: &target})
+			})
 		case ClassEnabled:
 			enabled := true
 			_, err = call(ctx, s.cfg.CallTimeout, func(ctx context.Context) (struct{}, error) {
@@ -418,8 +433,9 @@ func (s *Service) converge(ctx context.Context, plan Plan, client keycloak.Clien
 
 const insertAdoptedStatement = `INSERT INTO identity.client_registration
     (registration_id, kc_client_id, realm, client_key, profile, application_authority, application_ref, registered_by,
-     audience_class, lifetime_class, audience, redirect_uris, state, activated_at, privileged_form)
-VALUES ($1, $2, $3, $4, $5, 'manual', $6, $7, $8, $9, $10, $11, 'active', now(), $12)`
+     audience_class, lifetime_class, audience, redirect_uris, state, activated_at, privileged_form,
+     backchannel_logout_uri)
+VALUES ($1, $2, $3, $4, $5, 'manual', $6, $7, $8, $9, $10, $11, 'active', now(), $12, $13)`
 
 const insertAdoptionStatement = `INSERT INTO identity.registration_adoption
     (adoption_id, registration_id, kc_client_id, adopted_by, reason, observed, converged)
@@ -442,7 +458,7 @@ func (s *Service) insertAdopted(ctx context.Context, tx db.Tx, req AdoptRequest,
 	if _, err := tx.Exec(ctx, insertAdoptedStatement, registrationID.String(), string(client.ID), string(s.cfg.Realm),
 		req.ClientKey, req.Profile, req.ApplicationRef, req.RegisteredBy.String(), req.AudienceClass, lifetime,
 		append([]string{}, req.Audience...), append([]string{}, req.RedirectURIs...),
-		nullableForm(req.PrivilegedForm)); err != nil {
+		nullableForm(req.PrivilegedForm), nullableText(req.BackChannelLogoutURI)); err != nil {
 		return Registration{}, fmt.Errorf("registration: record the adopted registration: %w", err)
 	}
 	now := s.now()

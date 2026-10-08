@@ -1,7 +1,8 @@
 package registration
 
-// Registration changes (ADR-IAM-003 §5.2, TDD-identity-control-003 §Registration Changes): a
-// change to a registration's redirect URIs or its audience, proposed by an owner or a provider. In non-production
+// Registration changes (ADR-IAM-003 §5.2, §5.9, TDD-identity-control-003 §Registration Changes): a
+// change to a registration's redirect URIs, its audience, or a resource's lifetime class, proposed
+// by an owner or a provider. In non-production
 // it is applied at once. In production it waits until a provider other than its proposer approves
 // it, a rule the database holds as well as this code. A change is pinned to the version it was
 // proposed against, so what the approver sees is what the proposer saw, and nothing is deleted: a
@@ -40,9 +41,13 @@ const (
 
 // The kinds of change.
 const (
-	ChangeRedirectURIs = "redirect_uris"
-	ChangeAudience     = "audience"
+	ChangeRedirectURIs  = "redirect_uris"
+	ChangeAudience      = "audience"
+	ChangeLifetimeClass = "lifetime_class"
 )
+
+// LifetimeClasses are the classes of STD-IAM-002 §3.3 a resource may carry.
+var LifetimeClasses = []string{"L0", "L1", "L2", "L3"}
 
 // The decisions on a proposed change.
 const (
@@ -85,31 +90,39 @@ var (
 
 // Change is one proposed change, open or decided.
 type Change struct {
-	ID                   id.UUID    `json:"change_id"`
-	Registration         id.UUID    `json:"registration_id"`
-	ClientKey            string     `json:"client_key"`
-	BaseVersion          int64      `json:"base_version"`
-	Kind                 string     `json:"kind"`
-	PreviousRedirectURIs []string   `json:"previous_redirect_uris"`
-	RedirectURIs         []string   `json:"redirect_uris"`
-	PreviousAudience     []string   `json:"previous_audience"`
-	Audience             []string   `json:"audience"`
-	ApprovalRequired     bool       `json:"approval_required"`
-	ProposedBy           id.UUID    `json:"proposed_by"`
-	ProposalReason       string     `json:"proposal_reason"`
-	ProposedAt           time.Time  `json:"proposed_at"`
-	State                string     `json:"state"`
-	DecidedBy            *id.UUID   `json:"decided_by"`
-	DecisionReason       string     `json:"decision_reason,omitempty"`
-	DecidedAt            *time.Time `json:"decided_at"`
+	ID                   id.UUID  `json:"change_id"`
+	Registration         id.UUID  `json:"registration_id"`
+	ClientKey            string   `json:"client_key"`
+	BaseVersion          int64    `json:"base_version"`
+	Kind                 string   `json:"kind"`
+	PreviousRedirectURIs []string `json:"previous_redirect_uris"`
+	RedirectURIs         []string `json:"redirect_uris"`
+	PreviousAudience     []string `json:"previous_audience"`
+	Audience             []string `json:"audience"`
+
+	// PreviousLifetimeClass and LifetimeClass are a lifetime_class change's before and after, and
+	// null for every other kind (ADR-IAM-003 §5.9).
+	PreviousLifetimeClass *string `json:"previous_lifetime_class"`
+	LifetimeClass         *string `json:"lifetime_class"`
+
+	ApprovalRequired bool       `json:"approval_required"`
+	ProposedBy       id.UUID    `json:"proposed_by"`
+	ProposalReason   string     `json:"proposal_reason"`
+	ProposedAt       time.Time  `json:"proposed_at"`
+	State            string     `json:"state"`
+	DecidedBy        *id.UUID   `json:"decided_by"`
+	DecisionReason   string     `json:"decision_reason,omitempty"`
+	DecidedAt        *time.Time `json:"decided_at"`
 }
 
-// Proposal is a change asked for: the redirect URIs or the audience the registration should have,
-// the version the caller read, who asks and why. Exactly one of RedirectURIs and Audience is set.
+// Proposal is a change asked for: the redirect URIs, the audience or the lifetime class the
+// registration should have, the version the caller read, who asks and why. Exactly one of
+// RedirectURIs, Audience and LifetimeClass is set.
 type Proposal struct {
 	RegistrationID  id.UUID
 	RedirectURIs    []string
 	Audience        *[]string
+	LifetimeClass   *string
 	ExpectedVersion int64
 	ProposedBy      id.UUID
 	Reason          string
@@ -121,7 +134,10 @@ type Proposal struct {
 
 // kind is what the proposal changes.
 func (p Proposal) kind() string {
-	if p.Audience != nil {
+	switch {
+	case p.LifetimeClass != nil:
+		return ChangeLifetimeClass
+	case p.Audience != nil:
 		return ChangeAudience
 	}
 	return ChangeRedirectURIs
@@ -135,8 +151,12 @@ func (p Proposal) validate() error {
 		return fmt.Errorf("%w: expected_version is the registration's version as read, and is required", ErrInvalid)
 	case strings.TrimSpace(p.Reason) == "":
 		return fmt.Errorf("%w: a change requires a reason", ErrInvalid)
-	case p.Audience != nil && p.RedirectURIs != nil:
-		return fmt.Errorf("%w: a change is to redirect_uris or to audience, not both", ErrInvalid)
+	case (p.Audience != nil && p.RedirectURIs != nil) || (p.LifetimeClass != nil && (p.Audience != nil || p.RedirectURIs != nil)):
+		return fmt.Errorf("%w: a change is to one of redirect_uris, audience or lifetime_class", ErrInvalid)
+	case p.LifetimeClass != nil && !slices.Contains(LifetimeClasses, *p.LifetimeClass):
+		return fmt.Errorf("%w: a lifetime class is L0, L1, L2 or L3 (STD-IAM-002 §3.3)", ErrInvalid)
+	case p.LifetimeClass != nil:
+		return nil
 	case p.Audience != nil:
 		return validateAudience(*p.Audience)
 	case len(p.RedirectURIs) == 0:
@@ -200,7 +220,8 @@ func (d Decision) validate() error {
 }
 
 const lockChangedRegistrationStatement = `SELECT profile, state, coalesce(kc_client_id, ''), version,
-       coalesce(redirect_uris, '{}'::text[]), client_key, coalesce(audience, '{}'::text[])
+       coalesce(redirect_uris, '{}'::text[]), client_key, coalesce(audience, '{}'::text[]),
+       coalesce(lifetime_class, '')
 FROM identity.client_registration
 WHERE registration_id = $1 AND realm = $2
 FOR UPDATE`
@@ -213,6 +234,7 @@ type changedRegistration struct {
 	redirectURIs []string
 	clientKey    string
 	audience     []string
+	lifetime     string
 }
 
 func (s *Service) lockChanged(ctx context.Context, tx db.Tx, registrationID id.UUID) (changedRegistration, error) {
@@ -232,7 +254,7 @@ func (s *Service) lockChanged(ctx context.Context, tx db.Tx, registrationID id.U
 		client string
 	)
 	if err := rows.Scan(&locked.profile, &locked.state, &client, &locked.version, &locked.redirectURIs,
-		&locked.clientKey, &locked.audience); err != nil {
+		&locked.clientKey, &locked.audience, &locked.lifetime); err != nil {
 		return changedRegistration{}, fmt.Errorf("registration: scan the registration: %w", err)
 	}
 	locked.client = keycloak.ClientUUID(client)
@@ -242,7 +264,7 @@ func (s *Service) lockChanged(ctx context.Context, tx db.Tx, registrationID id.U
 
 var changeColumns = `c.change_id::text, c.registration_id::text, r.client_key, c.base_version, c.kind,
        c.previous_redirect_uris, c.redirect_uris, c.previous_audience, c.audience,
-       c.approval_required, c.proposed_by::text,
+       c.previous_lifetime_class, c.lifetime_class, c.approval_required, c.proposed_by::text,
        c.proposal_reason, c.proposed_at, c.state, coalesce(c.decided_by::text, ''),
        coalesce(c.decision_reason, ''), c.decided_at`
 
@@ -271,8 +293,9 @@ ORDER BY c.proposed_at, c.change_id`
 
 const insertChangeStatement = `INSERT INTO identity.registration_change
     (change_id, registration_id, base_version, kind, previous_redirect_uris, redirect_uris,
-     previous_audience, audience, approval_required, proposed_by, proposal_reason, proposed_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`
+     previous_audience, audience, previous_lifetime_class, lifetime_class, approval_required, proposed_by,
+     proposal_reason, proposed_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`
 
 const decideChangeStatement = `UPDATE identity.registration_change
 SET state = $2, decided_by = $3, decision_reason = $4, decided_at = $5
@@ -286,6 +309,26 @@ const changeAudienceStatement = `UPDATE identity.client_registration
 SET audience = $2, version = version + 1
 WHERE registration_id = $1`
 
+const changeLifetimeStatement = `UPDATE identity.client_registration
+SET lifetime_class = $2, version = version + 1
+WHERE registration_id = $1`
+
+// lockCallersStatement locks, in a fixed order, every active client whose audience names the
+// resource: the clients a lifetime-class change moves. An audience change locks the same rows, so
+// the two serialize, and the order keeps two lifetime changes from deadlocking on them.
+const lockCallersStatement = `SELECT registration_id::text FROM identity.client_registration
+WHERE realm = $1 AND profile <> 'resource' AND state = 'active' AND kc_client_id IS NOT NULL
+  AND $2::text = ANY (audience)
+ORDER BY registration_id
+FOR UPDATE`
+
+// callerLifespansStatement is each locked caller's kernel client and the lifespan its audience
+// derives as this transaction sees the resources.
+var callerLifespansStatement = `SELECT r.registration_id::text, r.kc_client_id, ` + LifespanSQL("r.realm", "r.audience") + `
+FROM identity.client_registration r
+WHERE r.registration_id = ANY ($1::uuid[])
+ORDER BY r.registration_id`
+
 // audienceLifespanStatement is the lifespan an audience derives (STD-IAM-002 §3.3), read before the
 // kernel is patched with it.
 var audienceLifespanStatement = `SELECT ` + LifespanSQL("$1", "$2::text[]")
@@ -298,7 +341,7 @@ func scanChange(row interface{ Scan(dest ...any) error }) (Change, error) {
 	)
 	if err := row.Scan(&changeID, &registrationID, &change.ClientKey, &change.BaseVersion, &change.Kind,
 		&change.PreviousRedirectURIs, &change.RedirectURIs, &change.PreviousAudience, &change.Audience,
-		&change.ApprovalRequired, &proposer,
+		&change.PreviousLifetimeClass, &change.LifetimeClass, &change.ApprovalRequired, &proposer,
 		&change.ProposalReason, &change.ProposedAt, &change.State, &decidedBy,
 		&change.DecisionReason, &change.DecidedAt); err != nil {
 		return Change{}, err
@@ -356,7 +399,8 @@ func readChange(ctx context.Context, tx db.Tx, statement string, args ...any) (C
 	return changes[0], nil
 }
 
-// ProposeChange records a change to a registration's redirect URIs. It answers the change and
+// ProposeChange records a change to a registration's redirect URIs, its audience or, for a resource,
+// its lifetime class. It answers the change and
 // whether it was recorded now: an open proposal by the same caller with the same URIs is the same
 // change, retried after a lost answer, and is returned as it is. In non-production the change is
 // applied before it returns.
@@ -378,18 +422,25 @@ func (s *Service) ProposeChange(ctx context.Context, proposal Proposal) (Change,
 		if kind == ChangeAudience {
 			audience = sortedAudience(*proposal.Audience)
 		}
+		lifetime := ""
+		if kind == ChangeLifetimeClass {
+			lifetime = *proposal.LifetimeClass
+		}
 		switch {
 		case kind == ChangeRedirectURIs && locked.profile != ProfilePublic && locked.profile != ProfileConfidential:
 			return fmt.Errorf("%w: only a public or confidential client has redirect URIs", ErrInvalid)
 		case kind == ChangeAudience && locked.profile == ProfileResource:
 			return fmt.Errorf("%w: a resource has no audience", ErrInvalid)
+		case kind == ChangeLifetimeClass && locked.profile != ProfileResource:
+			return fmt.Errorf("%w: only a resource carries a lifetime class; a client's lifespan is derived from its audience (STD-IAM-002 §3.3)", ErrInvalid)
 		case locked.state != StateActive:
 			return fmt.Errorf("%w: only an active registration is changed; this one is %s", ErrInvalidTransition, locked.state)
 		}
 		open, err := readChange(ctx, tx, openChangeStatement, proposal.RegistrationID.String())
 		switch {
 		case err == nil && open.ProposedBy == proposal.ProposedBy && open.Kind == kind &&
-			slices.Equal(open.RedirectURIs, proposal.RedirectURIs) && slices.Equal(open.Audience, audience):
+			slices.Equal(open.RedirectURIs, proposal.RedirectURIs) && slices.Equal(open.Audience, audience) &&
+			stringOf(open.LifetimeClass) == lifetime:
 			change = open
 			return nil
 		case err == nil:
@@ -405,6 +456,8 @@ func (s *Service) ProposeChange(ctx context.Context, proposal Proposal) (Change,
 			return fmt.Errorf("%w: these are the registered redirect URIs already", ErrInvalid)
 		case kind == ChangeAudience && slices.Equal(locked.audience, audience):
 			return fmt.Errorf("%w: this is the registered audience already", ErrInvalid)
+		case kind == ChangeLifetimeClass && locked.lifetime == lifetime:
+			return fmt.Errorf("%w: this is the registered lifetime class already", ErrInvalid)
 		}
 		if kind == ChangeAudience {
 			if err := s.admitAudience(ctx, tx, locked, audience, proposal); err != nil {
@@ -417,21 +470,27 @@ func (s *Service) ProposeChange(ctx context.Context, proposal Proposal) (Change,
 			return fmt.Errorf("registration: mint change_id: %w", err)
 		}
 		at := s.now()
-		var previousRedirects, redirects, previousAudience, nextAudience any
-		if kind == ChangeRedirectURIs {
+		var previousRedirects, redirects, previousAudience, nextAudience, previousLifetime, nextLifetime any
+		switch kind {
+		case ChangeRedirectURIs:
 			previousRedirects, redirects = locked.redirectURIs, proposal.RedirectURIs
-		} else {
+		case ChangeAudience:
 			previousAudience, nextAudience = locked.audience, audience
+		case ChangeLifetimeClass:
+			previousLifetime, nextLifetime = locked.lifetime, lifetime
 		}
 		if _, err := tx.Exec(ctx, insertChangeStatement, changeID.String(), proposal.RegistrationID.String(),
-			locked.version, kind, previousRedirects, redirects, previousAudience, nextAudience, s.cfg.Production,
-			proposal.ProposedBy.String(), strings.TrimSpace(proposal.Reason), at); err != nil {
+			locked.version, kind, previousRedirects, redirects, previousAudience, nextAudience, previousLifetime,
+			nextLifetime, s.cfg.Production, proposal.ProposedBy.String(), strings.TrimSpace(proposal.Reason), at); err != nil {
 			return fmt.Errorf("registration: record the change: %w", err)
 		}
 		created = true
 		if !s.cfg.Production {
 			// No approval is required, so the proposer's own reason is the decision's.
 			pending := Change{Kind: kind, RedirectURIs: proposal.RedirectURIs, Audience: audience}
+			if kind == ChangeLifetimeClass {
+				pending.LifetimeClass = &lifetime
+			}
 			if err := s.apply(ctx, tx, locked, proposal.RegistrationID, pending); err != nil {
 				return err
 			}
@@ -581,8 +640,11 @@ func (s *Service) admitAudience(ctx context.Context, tx db.Tx, locked changedReg
 // holds. The kernel is written before the commit, as a restore writes it: a kernel that refuses or
 // does not answer rolls the change back, and the caller retries.
 func (s *Service) apply(ctx context.Context, tx db.Tx, locked changedRegistration, registrationID id.UUID, change Change) error {
-	if change.Kind == ChangeAudience {
+	switch change.Kind {
+	case ChangeAudience:
 		return s.applyAudience(ctx, tx, locked, registrationID, change.Audience)
+	case ChangeLifetimeClass:
+		return s.applyLifetime(ctx, tx, locked, registrationID, stringOf(change.LifetimeClass))
 	}
 	uris := change.RedirectURIs
 	if _, err := tx.Exec(ctx, changeRedirectsStatement, registrationID.String(), uris); err != nil {
@@ -621,6 +683,114 @@ func (s *Service) applyAudience(ctx context.Context, tx db.Tx, locked changedReg
 		return fmt.Errorf("registration: write the audience to the client: %w", err)
 	}
 	return nil
+}
+
+// caller is one client a lifetime-class change moves: its kernel client and the lifespan its audience
+// derives before and after the change.
+type caller struct {
+	client        keycloak.ClientUUID
+	before, after int
+}
+
+// applyLifetime writes a resource's lifetime class and moves the lifespan of every active client
+// whose audience names it, under those clients' row locks (ADR-IAM-003 §5.9, STD-IAM-002 §3.3). The
+// kernel is written before the commit, as every change apply writes it. A kernel that refuses one
+// client rolls the change back: the clients already written get their previous lifespan back, and
+// what cannot be put back is left for the sweep, which compares every lifespan with the classes.
+func (s *Service) applyLifetime(ctx context.Context, tx db.Tx, locked changedRegistration, registrationID id.UUID, class string) error {
+	rows, err := tx.Query(ctx, lockCallersStatement, string(s.cfg.Realm), locked.clientKey)
+	if err != nil {
+		return fmt.Errorf("registration: lock the resource's callers: %w", err)
+	}
+	var ids []string
+	for rows.Next() {
+		var registration string
+		if err := rows.Scan(&registration); err != nil {
+			rows.Close()
+			return fmt.Errorf("registration: scan a caller: %w", err)
+		}
+		ids = append(ids, registration)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("registration: lock the resource's callers: %w", err)
+	}
+	before, err := callerLifespans(ctx, tx, ids)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, changeLifetimeStatement, registrationID.String(), class); err != nil {
+		return fmt.Errorf("registration: write the lifetime class: %w", err)
+	}
+	after, err := callerLifespans(ctx, tx, ids)
+	if err != nil {
+		return err
+	}
+	var moved []caller
+	for _, key := range ids {
+		if before[key].after == after[key].after {
+			continue
+		}
+		moved = append(moved, caller{client: after[key].client, before: before[key].after, after: after[key].after})
+	}
+	for i, c := range moved {
+		lifespan := c.after
+		if _, err := call(ctx, s.cfg.CallTimeout, func(ctx context.Context) (struct{}, error) {
+			return struct{}{}, s.kernel.PatchClient(ctx, s.cfg.Realm, c.client, keycloak.ClientPatch{AccessTokenLifespan: &lifespan})
+		}); err != nil {
+			s.restoreLifespans(ctx, locked.clientKey, moved[:i])
+			return fmt.Errorf("registration: write the lifespan a lifetime class derives to a caller: %w", err)
+		}
+	}
+	return nil
+}
+
+// callerLifespans reads each caller's kernel client and the lifespan its audience derives now.
+func callerLifespans(ctx context.Context, tx db.Tx, ids []string) (map[string]caller, error) {
+	out := map[string]caller{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := tx.Query(ctx, callerLifespansStatement, ids)
+	if err != nil {
+		return nil, fmt.Errorf("registration: derive the callers' lifespans: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			registration, client string
+			lifespan             int
+		)
+		if err := rows.Scan(&registration, &client, &lifespan); err != nil {
+			return nil, fmt.Errorf("registration: scan a caller's lifespan: %w", err)
+		}
+		out[registration] = caller{client: keycloak.ClientUUID(client), after: lifespan}
+	}
+	return out, rows.Err()
+}
+
+// restoreLifespans puts back the lifespan of the callers a failed lifetime-class change already
+// wrote. It is best effort: the transaction rolls back whatever it does, and a caller it cannot
+// reach keeps the new lifespan until the sweep compares it with the classes again.
+func (s *Service) restoreLifespans(ctx context.Context, resource string, written []caller) {
+	for _, c := range written {
+		lifespan := c.before
+		if _, err := call(ctx, s.cfg.CallTimeout, func(ctx context.Context) (struct{}, error) {
+			return struct{}{}, s.kernel.PatchClient(ctx, s.cfg.Realm, c.client, keycloak.ClientPatch{AccessTokenLifespan: &lifespan})
+		}); err != nil {
+			s.logger.ErrorContext(ctx, "a caller's lifespan was not put back after a lifetime-class change failed; the sweep compares it",
+				slog.String("resource", resource), slog.String("kc_client_id", string(c.client)),
+				slog.String("error", err.Error()))
+		}
+	}
+}
+
+// stringOf is a nullable column's value, or "".
+func stringOf(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 // Changes lists one registration's changes, newest first, at most 100.

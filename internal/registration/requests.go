@@ -77,6 +77,8 @@ type document struct {
 	Audience       []string        `json:"audience,omitempty"`
 	RedirectURIs   []string        `json:"redirect_uris,omitempty"`
 	PublicKey      json.RawMessage `json:"public_key,omitempty"`
+
+	BackChannelLogoutURI string `json:"backchannel_logout_uri,omitempty"`
 }
 
 func (p RegistrationProposal) validate() error {
@@ -199,7 +201,7 @@ func readRequest(ctx context.Context, tx db.Tx, statement string, args ...any) (
 func documentOf(req Request) (json.RawMessage, error) {
 	doc := document{ClientKey: req.ClientKey, Profile: req.Profile, AudienceClass: req.AudienceClass,
 		PrivilegedForm: req.PrivilegedForm, ApplicationRef: strings.TrimSpace(req.ApplicationRef), LifetimeClass: req.LifetimeClass,
-		Audience: req.Audience, RedirectURIs: req.RedirectURIs}
+		Audience: req.Audience, RedirectURIs: req.RedirectURIs, BackChannelLogoutURI: req.BackChannelLogoutURI}
 	if keyed(req.Profile) {
 		parsed, err := parsePublicKey(req.PublicKey)
 		if err != nil {
@@ -221,7 +223,7 @@ func requestOf(raw json.RawMessage) (Request, error) {
 	}
 	return Request{ClientKey: doc.ClientKey, Profile: doc.Profile, AudienceClass: doc.AudienceClass,
 		PrivilegedForm: doc.PrivilegedForm, ApplicationRef: doc.ApplicationRef, LifetimeClass: doc.LifetimeClass, Audience: doc.Audience,
-		RedirectURIs: doc.RedirectURIs, PublicKey: doc.PublicKey}, nil
+		RedirectURIs: doc.RedirectURIs, PublicKey: doc.PublicKey, BackChannelLogoutURI: doc.BackChannelLogoutURI}, nil
 }
 
 // eligibleOwners refuses an owner that is not an active person.
@@ -268,6 +270,9 @@ func (s *Service) ProposeRegistration(ctx context.Context, proposal Registration
 	}
 	req := proposal.Request.normalized()
 	if err := validate(req); err != nil {
+		return RegistrationRequest{}, false, err
+	}
+	if err := s.checkBackChannelLogout(req); err != nil {
 		return RegistrationRequest{}, false, err
 	}
 	if req.Developer {

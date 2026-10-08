@@ -40,6 +40,10 @@ type Registry struct {
 
 	Patches int
 
+	// FailPatchOf, when it names a client, is returned by PatchClient for that client alone: a kernel
+	// that accepts one client's change and refuses another's.
+	FailPatchOf map[keycloak.ClientUUID]error
+
 	// FailCreate is returned by CreateClient when set. With AmbiguousCreateSucceeds, the client is
 	// created anyway: a response lost after the kernel committed.
 	FailCreate              error
@@ -92,10 +96,16 @@ func (r *Registry) now() time.Time {
 	return time.Now().UTC()
 }
 
-// Put stores a client as it stands, recording no admin event: the state before the test begins.
+// Put stores a client as it stands, recording no admin event: the state before the test begins. A
+// client given no logout configuration holds what the Admin API gives a client created without one:
+// front channel off and "session required" on (Keycloak 26.7.5 OIDCLoginProtocolFactory, ADR-IAM-009
+// [R4]).
 func (r *Registry) Put(client keycloak.Client) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if client.Logout == (keycloak.Logout{}) {
+		client.Logout = keycloak.DesiredLogout("")
+	}
 	r.clients[client.ID] = copyClient(client)
 }
 
@@ -206,6 +216,9 @@ func (r *Registry) PatchClient(ctx context.Context, _ keycloak.Realm, client key
 	if r.FailPatch != nil {
 		return r.FailPatch
 	}
+	if err := r.FailPatchOf[client]; err != nil {
+		return err
+	}
 	stored, ok := r.clients[client]
 	if !ok {
 		return keycloak.ErrNotFound
@@ -221,6 +234,13 @@ func (r *Registry) PatchClient(ctx context.Context, _ keycloak.Realm, client key
 	}
 	if patch.NotBefore != nil {
 		stored.NotBefore = *patch.NotBefore
+	}
+	if patch.BackChannelLogoutURL != nil {
+		spec := r.specs[client]
+		if spec.Public && *patch.BackChannelLogoutURL != "" {
+			return errors.New("keycloakfake: a public client has no back-channel logout URL")
+		}
+		stored.Logout = keycloak.DesiredLogout(*patch.BackChannelLogoutURL)
 	}
 	if patch.TokenFormat != nil {
 		stored.RFC9068, stored.ClientIDClaim = true, *patch.TokenFormat
@@ -347,6 +367,7 @@ func (r *Registry) createClient(ctx context.Context, _ keycloak.Realm, spec keyc
 	if !spec.Resource {
 		created.RFC9068, created.ClientIDClaim = true, spec.ClientID
 		created.Audience = sortedAudience(spec.Audience)
+		created.Logout = keycloak.DesiredLogout(spec.BackChannelLogoutURL)
 	}
 	r.clients[client] = created
 	r.specs[client] = spec

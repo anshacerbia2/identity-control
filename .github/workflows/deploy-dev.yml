@@ -25,6 +25,10 @@ on:
         description: identity-kernel branch, tag or commit to run beside this service
         required: false
         default: main
+      experience_ref:
+        description: identity-experience branch, tag or commit whose create-bff-client.sh the adoption runs against
+        required: false
+        default: main
 
 permissions:
   contents: read
@@ -50,6 +54,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: anshacerbia2/identity-experience
+          ref: ${{ inputs.experience_ref || 'main' }}
           path: .experience
 
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
@@ -285,6 +290,32 @@ jobs:
           export IDENTITY_API_URL=http://127.0.0.1:8082 KC_BASE_URL=https://localhost KC_ADMIN_URL=http://localhost:8080
           export IDENTITY_OPERATOR_TOTP_FILE="$RUNNER_TEMP/operator-totp.json"
           pwsh -NoProfile -File scripts/dev-session-removal-proof.ps1
+
+      # ADR-IAM-009, TDD-identity-control-003 1.37.0: a confidential client registered from zero with a
+      # backchannel_logout_uri, as a BFF the kernel can reach is, receives a signed logout token naming
+      # its session when the Identity Control API ends that session. The receiver stands where a BFF's
+      # POST /auth/back-channel-logout stands, on the kernel network's gateway, which is the address the
+      # kernel's container reaches this runner on. After the session removal proof, which ends every
+      # session of the operator, so the session it ends is its own.
+      - name: back-channel logout reaches a registered client
+        run: |
+          set -a; . deploy/dev/.env; set +a
+          export IDENTITY_API_URL=http://127.0.0.1:8082 KC_BASE_URL=https://localhost
+          export IDENTITY_OPERATOR_TOTP_FILE="$RUNNER_TEMP/operator-totp.json"
+          network="$(docker inspect -f '{{range $name, $_ := .NetworkSettings.Networks}}{{println $name}}{{end}}' scnehaux-identity-dev-keycloak-1 | head -n 1)"
+          gateway="$(docker network inspect -f '{{range .IPAM.Config}}{{println .Gateway}}{{end}}' "$network" | head -n 1)"
+          [ -n "$gateway" ] || { echo "::error::no gateway for the kernel's network $network"; exit 1; }
+          work="$RUNNER_TEMP/back-channel-logout"
+          mkdir -p "$work"
+          python3 scripts/dev-logout-receiver.py 0.0.0.0 8199 "$work/received.jsonl" &
+          receiver=$!
+          trap 'kill "$receiver"' EXIT
+          for i in $(seq 1 50); do
+            curl -s -o /dev/null -X POST "http://127.0.0.1:8199/ready" && break
+            sleep 0.2
+          done
+          pwsh -NoProfile -File scripts/dev-back-channel-logout-proof.ps1 \
+            -ReceiverUrl "http://$gateway:8199/back-channel-logout" -Received "$work/received.jsonl" -WorkDir "$work"
 
       # ROADMAP §Gates, production gate: the Keycloak administration credentials' rotation, rehearsed
       # with deploy/dev/rotate-client-key.sh exactly as deploy/dev/README.md §Keys tells an operator,

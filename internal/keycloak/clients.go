@@ -35,6 +35,16 @@ const AttrAccessTokenLifespan = "access.token.lifespan"
 // (RFC 9068 §2.1). It is a per-client setting, off by default (Keycloak 26.2 release notes).
 const AttrRFC9068HeaderType = "access.token.header.type.rfc9068"
 
+// The client attributes of back-channel logout (ADR-IAM-009 §5.1). Keycloak sends a logout token to
+// the URL, names the session by sid when "session required" is on, and asks the client to revoke its
+// offline sessions only when the third is on. The URL "is applicable just if Front channel logout
+// option is OFF", so frontchannelLogout is written false beside them.
+const (
+	AttrBackChannelLogoutURL             = "backchannel.logout.url"
+	AttrBackChannelLogoutSessionRequired = "backchannel.logout.session.required"
+	AttrBackChannelLogoutRevokeOffline   = "backchannel.logout.revoke.offline.tokens"
+)
+
 // ClientIDMapper is the name of the mapper that writes client_id into a client's access tokens. The
 // kernel writes it only into a service-account token, and RFC 9068 §2.2 requires it in every access
 // token, so each client carries its own (STD-IAM-002 §3.2).
@@ -75,6 +85,25 @@ type Client struct {
 	// mapper is never mistaken for a declared resource (the audience field class,
 	// TDD-identity-control-003 1.33.0).
 	Audience []string
+
+	// Logout is how the kernel tells the client a session ended (the logout field class,
+	// TDD-identity-control-003 1.37.0).
+	Logout Logout
+}
+
+// Logout is a client's logout configuration as the kernel holds it (ADR-IAM-009): whether it uses
+// front-channel logout, which no registered client does, the URL its logout tokens are posted to, or
+// "" for none, and whether a logout token names the session by sid.
+type Logout struct {
+	FrontChannel    bool   `json:"front_channel"`
+	BackChannelURL  string `json:"back_channel_url"`
+	SessionRequired bool   `json:"session_required"`
+}
+
+// DesiredLogout is the logout configuration of a registered client with the given back-channel
+// logout URL, or "" for none: no front channel, and a logout token that names its session.
+func DesiredLogout(backChannelURL string) Logout {
+	return Logout{BackChannelURL: backChannelURL, SessionRequired: true}
 }
 
 // ClientCredential is a client's authentication configuration as the kernel holds it.
@@ -136,6 +165,10 @@ type ClientPatch struct {
 	// (TDD-identity-control-003 §Registration Changes). An empty list is a client whose tokens name
 	// no resource.
 	Audience *[]string
+
+	// BackChannelLogoutURL makes the client's logout configuration DesiredLogout of this URL: front
+	// channel off, session required, and this back-channel URL, removed when it is "".
+	BackChannelLogoutURL *string
 }
 
 // JWK is one public key a confidential or workload client authenticates with: RSA, for signatures,
@@ -297,6 +330,10 @@ type ClientSpec struct {
 
 	// Keys are a confidential or workload client's public keys: one, or two during a rotation.
 	Keys []JWK
+
+	// BackChannelLogoutURL is where the kernel posts a confidential client's logout tokens, or ""
+	// for none (ADR-IAM-009 §5.1).
+	BackChannelLogoutURL string
 }
 
 // MaxClientKeys is how many keys a client holds at once: the active one, and during a rotation the
@@ -327,6 +364,8 @@ func (s ClientSpec) Validate() error {
 		return fmt.Errorf("keycloak: a confidential or workload client holds 1 to %d keys", MaxClientKeys)
 	case !keyed && len(s.Keys) > 0:
 		return errors.New("keycloak: only a confidential or workload client holds keys")
+	case !s.Confidential && s.BackChannelLogoutURL != "":
+		return errors.New("keycloak: only a confidential client has a back-channel logout URL")
 	}
 	return nil
 }
@@ -351,6 +390,7 @@ func (s ClientSpec) representation() map[string]any {
 		AttrAccessTokenLifespan:            strconv.Itoa(s.AccessTokenLifespan),
 		AttrRFC9068HeaderType:              "true",
 	}
+	logoutAttributes(representation, attributes, s.BackChannelLogoutURL)
 	switch {
 	case s.Public:
 		representation["publicClient"] = true
@@ -384,6 +424,17 @@ func (s ClientSpec) representation() map[string]any {
 	}
 	representation["protocolMappers"] = mappers
 	return representation
+}
+
+// logoutAttributes writes DesiredLogout of target into a client's representation and attributes.
+// Written explicitly, not left to the Admin API's defaults, because the sweep compares them
+// (ADR-IAM-009 §5.2). Keycloak stores no attribute with an empty value and removes one updated to
+// it, so an empty target is a client with no back-channel URL.
+func logoutAttributes(representation, attributes map[string]any, target string) {
+	representation["frontchannelLogout"] = false
+	attributes[AttrBackChannelLogoutSessionRequired] = "true"
+	attributes[AttrBackChannelLogoutRevokeOffline] = "false"
+	attributes[AttrBackChannelLogoutURL] = target
 }
 
 // audienceMapperType is Keycloak's audience mapper. Its Included Client Audience adds "the client ID
@@ -471,6 +522,17 @@ func (a *Admin) PatchClient(ctx context.Context, realm Realm, client ClientUUID,
 	}
 	if patch.NotBefore != nil {
 		representation["notBefore"] = *patch.NotBefore
+	}
+	if patch.BackChannelLogoutURL != nil {
+		if public, _ := representation["publicClient"].(bool); public && *patch.BackChannelLogoutURL != "" {
+			return errors.New("keycloak: a public client has no back-channel logout URL")
+		}
+		attributes, _ := representation["attributes"].(map[string]any)
+		if attributes == nil {
+			attributes = map[string]any{}
+		}
+		logoutAttributes(representation, attributes, *patch.BackChannelLogoutURL)
+		representation["attributes"] = attributes
 	}
 	if patch.TokenFormat != nil {
 		attributes, _ := representation["attributes"].(map[string]any)
@@ -700,6 +762,9 @@ func clientFrom(representation map[string]any) (Client, error) {
 	attributes, _ := representation["attributes"].(map[string]any)
 	client.Credential = credentialFrom(representation, attributes)
 	client.RFC9068 = attributes[AttrRFC9068HeaderType] == "true"
+	client.Logout.FrontChannel, _ = representation["frontchannelLogout"].(bool)
+	client.Logout.BackChannelURL, _ = attributes[AttrBackChannelLogoutURL].(string)
+	client.Logout.SessionRequired = attributes[AttrBackChannelLogoutSessionRequired] == "true"
 	for _, mapper := range listOfMaps(representation["protocolMappers"]) {
 		if stringField(mapper, "name") == ClientIDMapper {
 			client.ClientIDClaim = clientIDValue(mapper)

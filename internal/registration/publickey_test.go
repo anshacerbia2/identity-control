@@ -194,6 +194,39 @@ func TestValidationRefusesAProfileItsShapeContradicts(t *testing.T) {
 		"a public client with a null key": {func(r *Request) {
 			r.Profile, r.RedirectURIs, r.PublicKey = ProfilePublic, []string{"https://a.example.com/cb"}, json.RawMessage(`null`)
 		}, true},
+		// ADR-IAM-009 §5.1: a back end that holds sessions receives logout tokens, at an absolute URI
+		// with no fragment (OpenID Connect Back-Channel Logout 1.0 §2.2).
+		"a confidential client with a back-channel logout URI": {func(r *Request) {
+			r.Profile, r.RedirectURIs = ProfileConfidential, []string{"https://a.example.com/cb"}
+			r.BackChannelLogoutURI = "https://a.example.com/auth/back-channel-logout"
+		}, true},
+		"a confidential client with an http back-channel logout URI": {func(r *Request) {
+			r.Profile, r.RedirectURIs = ProfileConfidential, []string{"https://a.example.com/cb"}
+			r.BackChannelLogoutURI = "http://bff.internal:8090/auth/back-channel-logout"
+		}, true},
+		"a public client with a back-channel logout URI": {func(r *Request) {
+			r.Profile, r.RedirectURIs = ProfilePublic, []string{"https://a.example.com/cb"}
+			r.BackChannelLogoutURI = "https://a.example.com/logout"
+		}, false},
+		"a workload with a back-channel logout URI": {func(r *Request) {
+			r.Profile, r.AudienceClass, r.BackChannelLogoutURI = ProfileWorkload, "workload", "https://a.example.com/logout"
+		}, false},
+		"a back-channel logout URI with a fragment": {func(r *Request) {
+			r.Profile, r.RedirectURIs = ProfileConfidential, []string{"https://a.example.com/cb"}
+			r.BackChannelLogoutURI = "https://a.example.com/logout#x"
+		}, false},
+		"a relative back-channel logout URI": {func(r *Request) {
+			r.Profile, r.RedirectURIs = ProfileConfidential, []string{"https://a.example.com/cb"}
+			r.BackChannelLogoutURI = "/auth/back-channel-logout"
+		}, false},
+		"a back-channel logout URI with credentials": {func(r *Request) {
+			r.Profile, r.RedirectURIs = ProfileConfidential, []string{"https://a.example.com/cb"}
+			r.BackChannelLogoutURI = "https://user:pw@a.example.com/logout"
+		}, false},
+		"a back-channel logout URI on another scheme": {func(r *Request) {
+			r.Profile, r.RedirectURIs = ProfileConfidential, []string{"https://a.example.com/cb"}
+			r.BackChannelLogoutURI = "ftp://a.example.com/logout"
+		}, false},
 	} {
 		req := base
 		c.change(&req)

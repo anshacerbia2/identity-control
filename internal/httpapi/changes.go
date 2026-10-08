@@ -2,7 +2,7 @@ package httpapi
 
 // Registration changes at the transport (ADR-IAM-003 §5.2, TDD-identity-control-003 §Registration
 // Changes). An owner proposes and withdraws a change to the redirect URIs or the audience of a
-// registration it owns; approving and rejecting are a provider's, refused to an owner here before
+// registration it owns, or to the lifetime class of a resource it owns (ADR-IAM-003 §5.9); approving and rejecting are a provider's, refused to an owner here before
 // anything is read, and refused to the proposer by the service and the database.
 
 import (
@@ -19,11 +19,12 @@ import (
 	"github.com/anshacerbia2/identity-control/internal/registration"
 )
 
-// proposeChangeRequest carries redirect_uris or audience, never both. An audience of [] is a change
-// to no resource, which is why it is a pointer: absent and empty are different requests.
+// proposeChangeRequest carries one of redirect_uris, audience and lifetime_class. An audience of []
+// is a change to no resource, which is why it is a pointer: absent and empty are different requests.
 type proposeChangeRequest struct {
 	RedirectURIs    []string  `json:"redirect_uris"`
 	Audience        *[]string `json:"audience"`
+	LifetimeClass   *string   `json:"lifetime_class"`
 	ExpectedVersion int64     `json:"expected_version"`
 }
 
@@ -50,6 +51,7 @@ func (h *Registrations) ProposeChange(w http.ResponseWriter, r *http.Request) {
 	}
 	change, created, err := h.registrar.ProposeChange(r.Context(), registration.Proposal{
 		RegistrationID: registrationID, RedirectURIs: body.RedirectURIs, Audience: body.Audience,
+		LifetimeClass:   body.LifetimeClass,
 		ExpectedVersion: body.ExpectedVersion, ProposedBy: principal, Reason: reason, Provider: IsProvider(r.Context())})
 	if err != nil {
 		writeChangeError(w, r, err)

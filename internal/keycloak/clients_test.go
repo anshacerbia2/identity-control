@@ -582,6 +582,10 @@ func TestCreateClientRefusesAnIncoherentSpec(t *testing.T) {
 		"a workload without a lifespan": {ClientID: "x", Workload: true, Keys: key},
 		"a workload holding three keys": {ClientID: "x", Workload: true, AccessTokenLifespan: 1, Keys: append(key, key[0], key[0])},
 		"a workload holding no key":     {ClientID: "x", Workload: true, AccessTokenLifespan: 1},
+		"a public client with a back-channel logout URL": {ClientID: "x", Public: true, RedirectURIs: []string{"https://a"},
+			AccessTokenLifespan: 1, BackChannelLogoutURL: "https://a/logout"},
+		"a workload with a back-channel logout URL": {ClientID: "x", Workload: true, AccessTokenLifespan: 1, Keys: key,
+			BackChannelLogoutURL: "https://a/logout"},
 	} {
 		if _, err := admin.CreateClient(context.Background(), testRealm, spec); err == nil {
 			t.Errorf("%s was sent", name)
@@ -746,5 +750,90 @@ func TestDefaultClientScopesAreNamed(t *testing.T) {
 	}
 	if k.lastPath != "/admin/realms/scnehaux/clients/c1/default-client-scopes" {
 		t.Errorf("read %s", k.lastPath)
+	}
+}
+
+// Every client but a resource is created with front-channel logout off and a logout token that names
+// its session, written explicitly; a confidential client with a back-channel logout URL carries it
+// (ADR-IAM-009 §5.1, §5.2).
+func TestCreateClientWritesTheLogoutConfiguration(t *testing.T) {
+	for name, c := range map[string]struct {
+		spec keycloak.ClientSpec
+		url  string
+	}{
+		"a public client": {keycloak.ClientSpec{ClientID: "web", Public: true, RedirectURIs: []string{"https://a/cb"},
+			AccessTokenLifespan: 240}, ""},
+		"a confidential client without a URL": {keycloak.ClientSpec{ClientID: "bff", Confidential: true,
+			RedirectURIs: []string{"https://a/cb"}, AccessTokenLifespan: 240, Keys: []keycloak.JWK{{KID: "k1", N: "bg", E: "AQAB"}}}, ""},
+		"a confidential client with a URL": {keycloak.ClientSpec{ClientID: "bff", Confidential: true,
+			RedirectURIs: []string{"https://a/cb"}, AccessTokenLifespan: 240, Keys: []keycloak.JWK{{KID: "k1", N: "bg", E: "AQAB"}},
+			BackChannelLogoutURL: "https://a/auth/back-channel-logout"}, "https://a/auth/back-channel-logout"},
+	} {
+		k := &kernel{adminStatus: http.StatusCreated, adminLocation: "http://kc/admin/realms/scnehaux/clients/new"}
+		admin, _ := newAdmin(t, k)
+		if _, err := admin.CreateClient(context.Background(), testRealm, c.spec); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		var sent map[string]any
+		if err := json.Unmarshal(k.lastBody, &sent); err != nil {
+			t.Fatal(err)
+		}
+		attributes := sent["attributes"].(map[string]any)
+		if sent["frontchannelLogout"] != false || attributes["backchannel.logout.session.required"] != "true" ||
+			attributes["backchannel.logout.revoke.offline.tokens"] != "false" || attributes["backchannel.logout.url"] != c.url {
+			t.Errorf("%s: sent %v", name, sent)
+		}
+	}
+	k := &kernel{adminStatus: http.StatusCreated, adminLocation: "http://kc/admin/realms/scnehaux/clients/new"}
+	admin, _ := newAdmin(t, k)
+	if _, err := admin.CreateClient(context.Background(), testRealm, keycloak.ClientSpec{ClientID: "api", Resource: true}); err != nil {
+		t.Fatal(err)
+	}
+	var sent map[string]any
+	_ = json.Unmarshal(k.lastBody, &sent)
+	if _, written := sent["frontchannelLogout"]; written {
+		t.Errorf("a resource, which holds no session, was sent a logout configuration: %v", sent)
+	}
+}
+
+// A client read back reports its logout configuration, which is the logout field class.
+func TestGetClientReadsTheLogoutConfiguration(t *testing.T) {
+	admin, _ := newAdmin(t, &kernel{adminBody: `{"id":"c","clientId":"bff","frontchannelLogout":true,
+	  "attributes":{"backchannel.logout.url":"https://a/logout","backchannel.logout.session.required":"true"}}`})
+	client, err := admin.GetClient(context.Background(), testRealm, "c")
+	want := keycloak.Logout{FrontChannel: true, BackChannelURL: "https://a/logout", SessionRequired: true}
+	if err != nil || client.Logout != want {
+		t.Errorf("read %+v, %v", client.Logout, err)
+	}
+	bare, _ := newAdmin(t, &kernel{adminBody: `{"id":"c","clientId":"bff","attributes":{}}`})
+	client, _ = bare.GetClient(context.Background(), testRealm, "c")
+	if client.Logout != (keycloak.Logout{}) {
+		t.Errorf("a client with none read as %+v", client.Logout)
+	}
+}
+
+// A logout patch writes the whole configuration, and an empty URL removes the back channel, which
+// the kernel does for an empty attribute.
+func TestPatchClientWritesTheLogoutConfiguration(t *testing.T) {
+	for _, target := range []string{"https://a/auth/back-channel-logout", ""} {
+		k := &kernel{}
+		k.route = func(method, path string) (int, string) {
+			if method == http.MethodGet {
+				return http.StatusOK, clientRepresentation
+			}
+			return http.StatusNoContent, ""
+		}
+		admin, _ := newAdmin(t, k)
+		value := target
+		if err := admin.PatchClient(context.Background(), testRealm, "0b1c2d3e", keycloak.ClientPatch{BackChannelLogoutURL: &value}); err != nil {
+			t.Fatal(err)
+		}
+		var written map[string]any
+		_ = json.Unmarshal(k.lastPutBody, &written)
+		attributes, _ := written["attributes"].(map[string]any)
+		if written["frontchannelLogout"] != false || attributes["backchannel.logout.url"] != target ||
+			attributes["backchannel.logout.session.required"] != "true" || attributes["access.token.lifespan"] == nil {
+			t.Errorf("URL %q: wrote %v", target, written)
+		}
 	}
 }
