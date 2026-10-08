@@ -343,6 +343,7 @@ func run() error {
 		Me:            meHandler,
 		Assurance:     httpapi.AssurancePolicy{Report: cfg.ReportAssurance, Logger: logger},
 		Database:      pool,
+		Keys:          pool,
 		Telemetry:     telemetry,
 	}
 	projection, err := providerauthority.New(pool)

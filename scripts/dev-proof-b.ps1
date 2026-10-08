@@ -79,6 +79,11 @@ function Send($method, $url, $body, $bearer, $headers) {
         $request.Headers.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", $bearer)
     }
     if ($headers) { foreach ($k in $headers.Keys) { $request.Headers.Add($k, $headers[$k]) } }
+    # Every command to this service carries an Idempotency-Key (STD-GLB-001 1.4.0), one per call:
+    # each call here is a distinct command, and a sweep or reconcile ignores it.
+    if ($method -eq "POST" -and $url.StartsWith($api) -and -not ($headers -and $headers.ContainsKey("Idempotency-Key"))) {
+        $request.Headers.Add("Idempotency-Key", [Guid]::NewGuid().ToString())
+    }
     if ($null -ne $body) {
         $request.Content = New-Object System.Net.Http.StringContent($body, [System.Text.Encoding]::UTF8, "application/json")
     }

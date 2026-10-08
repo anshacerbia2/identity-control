@@ -99,9 +99,30 @@ func asOwner(r *http.Request, principal id.UUID) *http.Request {
 }
 
 func serve(handler http.Handler, r *http.Request) *httptest.ResponseRecorder {
+	if r.Method == http.MethodPost && r.Header.Values(httpapi.IdempotencyHeader) == nil && replayedInTest(r.URL.Path) {
+		// Every command carries a key (STD-GLB-001 1.4.0). The tests of a route this package replays
+		// are about the route, so they get one; a missing key is commands_test.go's subject.
+		r.Header.Set(httpapi.IdempotencyHeader, "test-"+r.URL.Path)
+	}
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, r)
 	return w
+}
+
+// replayedInTest reports whether a path is one of replayedKey's routes, whose key the handler tests
+// do not exercise. The routes whose service claims the key keep their own missing-key tests.
+func replayedInTest(path string) bool {
+	switch {
+	case path == "/v1/principals" || path == "/v1/registrations" || path == "/v1/workloads",
+		path == "/v1/registrations:adopt",
+		strings.HasPrefix(path, "/v1/me/sessions"), strings.HasPrefix(path, "/v1/me/authenticators"),
+		strings.HasSuffix(path, "/sessions:terminate-all"), strings.Contains(path, "/authenticators/"),
+		strings.HasPrefix(path, "/v1/principals/") && (strings.HasSuffix(path, ":suspend") || strings.HasSuffix(path, ":restore")):
+		return false
+	case strings.HasSuffix(path, ":reconcile"), strings.HasSuffix(path, ":sweep"):
+		return false
+	}
+	return true
 }
 
 func TestEveryDriftRouteRequiresAnAuthenticatedPrincipal(t *testing.T) {

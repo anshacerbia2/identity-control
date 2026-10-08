@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-008
   title: Account Security Notifications
   owner: Core Platform Team
-  version: 1.4.0
+  version: 1.5.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-10-06
-  last_reviewed: 2026-10-07
+  last_reviewed: 2026-10-08
   parent_sad: SAD-001
 ---
 
@@ -250,6 +250,10 @@ POST /v1/me/notification-addresses                      self, aal2 recent: {"add
 POST /v1/me/notification-addresses/{address_id}:verify  self: {"code": "..."}
 POST /v1/me/notification-addresses/{address_id}:remove  self, aal2 recent
 ```
+
+- **Each of the three commands requires an `Idempotency-Key` (1.5.0)**, and a retry with it is
+  answered the first response. Adding required one before and recorded nothing, so a retried add
+  was a second add (`TDD-identity-control-003` §The Idempotency-Key on Every Command).
 
 - **Adding needs `aal2`, recently.** It is the same step-up as removing an authenticator
   (`IDENTITY_STEP_UP_MAX_AGE`, `ADR-IAM-004 §5.2`). An address changes where the person is told

@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-001
   title: Canonical Principal Identifier and Creation Path
   owner: Core Platform Team
-  version: 1.14.0
+  version: 1.15.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -492,6 +492,9 @@ findings only. `POST /v1/principals:reconcile` answers what the sweep it ran fou
 `{"recovered", "dangling", "unmapped", "orphan", "duplicate"}`. All three are a provider's.
 `:quarantine` and `:retire` for a human are not built: quarantine is the reconciler's hold, which
 no administrator sets (§Data Model).
+
+`:relink` requires an `Idempotency-Key` (1.15.0), and a retry with it is answered the first
+relink's response (`TDD-identity-control-003` §The Idempotency-Key on Every Command).
 
 `:relink` requires `X-Administrative-Reason`. It refuses a mapping that is not
 `active`, and it refuses with `409` while the mapped Keycloak user still exists:

@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-005
   title: Account Security and Investigation API Mediation
   owner: Core Platform Team
-  version: 2.10.0
+  version: 2.11.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-14
-  last_reviewed: 2026-10-07
+  last_reviewed: 2026-10-08
   parent_sad: SAD-001
 ---
 
@@ -198,6 +198,11 @@ POST  /v1/security-operations/{operation_id}:redrive        X-Administrative-Rea
 type, subject, attempts, last error class and age. Like every provider route, it requires `aal2`.
 
 **Re-driving.**
+- **It requires an `Idempotency-Key` (2.11.0).** Before, a repeated re-drive relied on the
+  operation's state alone. A retry with the key is answered the first re-drive's response
+  (`TDD-identity-control-003` §The Idempotency-Key on Every Command). `POST
+  /v1/me/authenticators:enroll` requires none: it answers the kernel action, and the enrolment
+  happens at the kernel.
 - **What it does.** `:redrive` returns an `unresolved` operation to `retrying`, due now, with a new
   attempt budget.
   - The operation keeps its identifier, its correlation and its attempt history.

@@ -60,6 +60,11 @@ type RoutesConfig struct {
 	Deliveries       Applier
 	DeliveryVerifier TokenVerifier
 
+	// Keys is where a command's Idempotency-Key is claimed and its answer recorded, for the routes
+	// replayedKey names (commands.go). The pool satisfies it. Nil, as in a handler's unit test, the
+	// key is still required and nothing is recorded.
+	Keys KeyStore
+
 	// ReadinessTimeout bounds the dependency check. It is well below any orchestrator probe
 	// interval so a slow database produces a failed probe rather than a hung one.
 	ReadinessTimeout time.Duration
@@ -142,9 +147,12 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	// §Registration Ownership). providerOnly refuses an owner before a handler reads anything, and
 	// owned admits an owner only to a registration it owns.
 	p, owned, creator := providerOnly(cfg.Assurance), cfg.Registrations.owned, cfg.Registrations.creator
+	// Every mutating route requires an Idempotency-Key unless keyOptional names it (commands.go,
+	// STD-GLB-001 1.4.0). k.cmd checks a key its service claims; k.replay claims it here.
+	k := newCommands(cfg.Keys, cfg.Telemetry)
 	api := http.NewServeMux()
-	api.HandleFunc("POST /v1/principals", p(cfg.Principals.CreatePrincipal))
-	api.HandleFunc("POST /v1/principals/{target}", p(principalAction(cfg)))
+	api.HandleFunc("POST /v1/principals", p(k.cmd(cfg.Principals.CreatePrincipal)))
+	api.HandleFunc("POST /v1/principals/{target}", p(k.cmd(principalAction(cfg, k))))
 	api.HandleFunc("GET /v1/principals:dangling", p(cfg.Principals.Dangling))
 	api.HandleFunc("GET /v1/principals:unmapped", p(cfg.Principals.Unmapped))
 	if cfg.Investigation != nil {
@@ -172,67 +180,67 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	if cfg.Me != nil {
 		cfg.Me.assurance = cfg.Assurance
 		api.HandleFunc("GET /v1/me/sessions", s(cfg.Me.Sessions))
-		api.HandleFunc("POST /v1/me/sessions/{session_action}", s(cfg.Me.SessionAction))
-		api.HandleFunc("POST /v1/me/sessions:terminate-all", s(cfg.Me.TerminateAll))
+		api.HandleFunc("POST /v1/me/sessions/{session_action}", s(k.cmd(cfg.Me.SessionAction)))
+		api.HandleFunc("POST /v1/me/sessions:terminate-all", s(k.cmd(cfg.Me.TerminateAll)))
 		api.HandleFunc("GET /v1/me/authenticators", s(cfg.Me.Authenticators))
-		api.HandleFunc("POST /v1/me/authenticators/{authenticator_action}", s(cfg.Me.AuthenticatorAction))
+		api.HandleFunc("POST /v1/me/authenticators/{authenticator_action}", s(k.cmd(cfg.Me.AuthenticatorAction)))
 		api.HandleFunc("POST /v1/me/authenticators:enroll", s(cfg.Me.Enroll))
 		api.HandleFunc("GET /v1/me/security-operations/{operation_id}", s(cfg.Me.Operation))
 		if cfg.Me.addresses != nil {
 			api.HandleFunc("GET /v1/me/notification-addresses", s(cfg.Me.NotificationAddresses))
-			api.HandleFunc("POST /v1/me/notification-addresses", s(cfg.Me.AddNotificationAddress))
-			api.HandleFunc("POST /v1/me/notification-addresses/{address_action}", s(cfg.Me.NotificationAddressAction))
+			api.HandleFunc("POST /v1/me/notification-addresses", s(k.replay(cfg.Me.AddNotificationAddress)))
+			api.HandleFunc("POST /v1/me/notification-addresses/{address_action}", s(k.replay(cfg.Me.NotificationAddressAction)))
 		}
 	}
 	if cfg.Security != nil {
-		api.HandleFunc("POST /v1/principals/{principal_id}/sessions:terminate-all", p(cfg.Security.TerminateAll))
-		api.HandleFunc("POST /v1/principals/{principal_id}/authenticators/{authenticator_action}", p(cfg.Security.Revoke))
+		api.HandleFunc("POST /v1/principals/{principal_id}/sessions:terminate-all", p(k.cmd(cfg.Security.TerminateAll)))
+		api.HandleFunc("POST /v1/principals/{principal_id}/authenticators/{authenticator_action}", p(k.cmd(cfg.Security.Revoke)))
 		api.HandleFunc("GET /v1/security-operations/{operation_id}", p(cfg.Security.Operation))
 		api.HandleFunc("GET /v1/security-operations:unresolved", p(cfg.Security.Unresolved))
-		api.HandleFunc("POST /v1/security-operations/{operation_action}", p(cfg.Security.OperationAction))
+		api.HandleFunc("POST /v1/security-operations/{operation_action}", p(k.replay(cfg.Security.OperationAction)))
 	}
 	api.HandleFunc("POST /v1/principals:reconcile", p(cfg.Principals.Reconcile))
 	// A provider registers anything; an application developer registers within its bounds.
-	api.HandleFunc("POST /v1/registrations", creator(cfg.Registrations.Register))
+	api.HandleFunc("POST /v1/registrations", creator(k.cmd(cfg.Registrations.Register)))
 	api.HandleFunc("GET /v1/registrations", p(cfg.Registrations.ListRegistrations))
 	api.HandleFunc("GET /v1/registrations:mine", cfg.Registrations.Mine)
 	api.HandleFunc("GET /v1/registrations:standing", cfg.Registrations.Standing)
 	api.HandleFunc("GET /v1/registrations/{registration_id}", owned(cfg.Registrations.GetRegistration))
 	api.HandleFunc("POST /v1/registrations/{registration_id}",
-		owned(cfg.Registrations.RegistrationAction, "suspend", "restore"))
+		owned(k.replay(cfg.Registrations.RegistrationAction), "suspend", "restore"))
 	api.HandleFunc("GET /v1/registrations/{registration_id}/findings", owned(cfg.Registrations.Findings))
 	api.HandleFunc("GET /v1/registrations:drift", p(cfg.Registrations.Drift))
 	api.HandleFunc("GET /v1/registrations:expiring-keys", p(cfg.Registrations.ExpiringKeys))
 	api.HandleFunc("POST /v1/registrations:reconcile", p(cfg.Registrations.Reconcile))
 	api.HandleFunc("POST /v1/registrations:adopt", p(cfg.Registrations.Adopt))
-	api.HandleFunc("POST /v1/registrations/{registration_id}/drift-exceptions", p(cfg.Registrations.GrantException))
+	api.HandleFunc("POST /v1/registrations/{registration_id}/drift-exceptions", p(k.replay(cfg.Registrations.GrantException)))
 	api.HandleFunc("GET /v1/registrations/{registration_id}/drift-exceptions", p(cfg.Registrations.Exceptions))
-	api.HandleFunc("POST /v1/registrations/{registration_id}/keys", owned(cfg.Registrations.AddKey))
+	api.HandleFunc("POST /v1/registrations/{registration_id}/keys", owned(k.replay(cfg.Registrations.AddKey)))
 	api.HandleFunc("GET /v1/registrations/{registration_id}/keys", owned(cfg.Registrations.Keys))
-	api.HandleFunc("POST /v1/registrations/{registration_id}/keys/{key_action}", owned(cfg.Registrations.KeyAction))
-	api.HandleFunc("POST /v1/registrations/{registration_id}/owners", p(cfg.Registrations.GrantOwner))
+	api.HandleFunc("POST /v1/registrations/{registration_id}/keys/{key_action}", owned(k.replay(cfg.Registrations.KeyAction)))
+	api.HandleFunc("POST /v1/registrations/{registration_id}/owners", p(k.replay(cfg.Registrations.GrantOwner)))
 	api.HandleFunc("GET /v1/registrations/{registration_id}/owners", owned(cfg.Registrations.Owners))
-	api.HandleFunc("POST /v1/registrations/{registration_id}/owners/{owner_action}", p(cfg.Registrations.OwnerAction))
-	api.HandleFunc("POST /v1/registrations/{registration_id}/changes", owned(cfg.Registrations.ProposeChange))
+	api.HandleFunc("POST /v1/registrations/{registration_id}/owners/{owner_action}", p(k.replay(cfg.Registrations.OwnerAction)))
+	api.HandleFunc("POST /v1/registrations/{registration_id}/changes", owned(k.replay(cfg.Registrations.ProposeChange)))
 	api.HandleFunc("GET /v1/registrations/{registration_id}/changes", owned(cfg.Registrations.Changes))
 	// An owner reaches a change action only on a registration it owns; approve and reject then
 	// refuse it in the handler, before anything is read, and withdraw is its proposer's.
-	api.HandleFunc("POST /v1/registrations/{registration_id}/changes/{change_action}", owned(cfg.Registrations.ChangeAction))
+	api.HandleFunc("POST /v1/registrations/{registration_id}/changes/{change_action}", owned(k.replay(cfg.Registrations.ChangeAction)))
 	api.HandleFunc("GET /v1/registrations:changes", p(cfg.Registrations.OpenChanges))
 	api.HandleFunc("GET /v1/application-developers", p(cfg.Registrations.ApplicationDevelopers))
-	api.HandleFunc("POST /v1/application-developers", p(cfg.Registrations.GrantApplicationDeveloper))
-	api.HandleFunc("POST /v1/application-developers/{developer_action}", p(cfg.Registrations.DeveloperAction))
+	api.HandleFunc("POST /v1/application-developers", p(k.replay(cfg.Registrations.GrantApplicationDeveloper)))
+	api.HandleFunc("POST /v1/application-developers/{developer_action}", p(k.replay(cfg.Registrations.DeveloperAction)))
 	// A request is a provider's or an application developer's; approving, rejecting and the queue
 	// are a provider's, refused to anyone else in the handler, and withdrawing is the proposer's.
-	api.HandleFunc("POST /v1/registration-requests", creator(cfg.Registrations.ProposeRegistration))
+	api.HandleFunc("POST /v1/registration-requests", creator(k.replay(cfg.Registrations.ProposeRegistration)))
 	api.HandleFunc("GET /v1/registration-requests", p(cfg.Registrations.RequestQueue))
 	api.HandleFunc("GET /v1/registration-requests:mine", creator(cfg.Registrations.MyRequests))
-	api.HandleFunc("POST /v1/registration-requests/{request_action}", creator(cfg.Registrations.RequestAction))
-	api.HandleFunc("POST /v1/workloads", p(cfg.Workloads.CreateWorkload))
+	api.HandleFunc("POST /v1/registration-requests/{request_action}", creator(k.replay(cfg.Registrations.RequestAction)))
+	api.HandleFunc("POST /v1/workloads", p(k.cmd(cfg.Workloads.CreateWorkload)))
 	api.HandleFunc("GET /v1/workloads/{target}", p(cfg.Workloads.GetWorkload))
 	// :review is the workload owner's; every other action a provider's (TDD-identity-control-004 1.5.0).
 	ownedWorkload := cfg.Workloads.owned(cfg.Assurance)
-	api.HandleFunc("POST /v1/workloads/{target}", ownedWorkload(cfg.Workloads.WorkloadAction))
+	api.HandleFunc("POST /v1/workloads/{target}", ownedWorkload(k.replay(cfg.Workloads.WorkloadAction)))
 	api.HandleFunc("POST /v1/workloads:sweep", p(cfg.Workloads.Sweep))
 	api.HandleFunc("GET /v1/workloads:orphaned", p(cfg.Workloads.Orphaned))
 	api.HandleFunc("GET /v1/workloads:unused", p(cfg.Workloads.Unused))
@@ -260,8 +268,10 @@ func (s Surface) Mount(probeChain, apiChain func(http.Handler) http.Handler) htt
 }
 
 // principalAction dispatches POST /v1/principals/{target} by its action: :relink to the Principal
-// path, :suspend and :restore to the security commands when they are mounted.
-func principalAction(cfg RoutesConfig) http.HandlerFunc {
+// path, replayed here, and :suspend and :restore to the security commands when they are mounted,
+// which key themselves.
+func principalAction(cfg RoutesConfig, k commands) http.HandlerFunc {
+	relink := k.replay(cfg.Principals.PrincipalAction)
 	return func(w http.ResponseWriter, r *http.Request) {
 		subject, action, _ := strings.Cut(r.PathValue("target"), ":")
 		switch {
@@ -270,7 +280,7 @@ func principalAction(cfg RoutesConfig) http.HandlerFunc {
 		case action == "restore" && cfg.Security != nil:
 			cfg.Security.Restore(w, r, subject)
 		default:
-			cfg.Principals.PrincipalAction(w, r)
+			relink(w, r)
 		}
 	}
 }

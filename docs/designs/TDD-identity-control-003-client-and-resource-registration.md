@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-003
   title: Protocol Client and Protected-Resource Registration
   owner: Core Platform Team
-  version: 1.34.0
+  version: 1.35.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-11
-  last_reviewed: 2026-10-07
+  last_reviewed: 2026-10-08
   parent_sad: SAD-001
 ---
 
@@ -578,6 +578,90 @@ leading zero byte is the same key as one sent without.
 A JWK carrying a private parameter is refused, and its content is never logged. A caller that sent
 one has exposed that key and must generate another. A caller that loses its private key registers a
 new public key and revokes the lost one: there is nothing to retrieve.
+
+### The Idempotency-Key on Every Command (1.35.0)
+
+`STD-GLB-001` 1.4.0 §Commands Require an `Idempotency-Key`: "A command MUST require an
+`Idempotency-Key`. A command is a `POST` that a person or an operator sends to change authoritative
+state." [R6] A command without the header, or with a blank one, "is refused `400` with a problem that
+names the header". "The check runs after the caller's authority, so a caller the route does not
+admit is told `403`, not about a header." And "each service publishes which routes require the key,
+and the reason each other `POST` does not." This section is that publication for every route this
+service serves, whichever TDD owns it. `internal/httpapi/commands.go` holds the same tables, and
+`TestEveryMutatingRouteIsClassified` fails on a mutating route that is in none of them, or in two.
+
+Before 1.35.0 the Principal, workload, registration and security commands required the key, and the
+owner, key, change, standing, request, lifecycle, relink, re-drive and address commands did not. A
+retried owner grant was a second grant attempt, and a re-drive relied on the operation's state
+alone. The IETF draft the standard cites names the risk: "Repeating the request multiple times can
+result in duplication or incorrect updates" [R5].
+
+**The service claims the key.** The route checks that the key is present. The service claims it in
+the transaction of its effect and answers a retry from it, as it did before:
+
+| Route | Owner | How a retry is answered |
+| :-- | :-- | :-- |
+| `POST /v1/principals` | TDD-001 | the claim commits with the pending mapping; recovery completes it (TDD-001 1.14.0) |
+| `POST /v1/principals/{id}:suspend`, `:restore` | TDD-005 | a security operation, unique per actor and key |
+| `POST /v1/registrations` | this TDD | the claim commits with the pending registration |
+| `POST /v1/registrations:adopt` | this TDD | the adoption claims it; its plan, `dry_run`, is a read carried in a body and needs none |
+| `POST /v1/workloads` | TDD-004 | the claim commits with the pending workload |
+| `POST /v1/me/sessions/{ref}:terminate`, `/v1/me/sessions:terminate-all`, `/v1/me/authenticators/{ref}:remove` | TDD-005 | a security operation |
+| `POST /v1/principals/{id}/sessions:terminate-all`, `.../authenticators/{ref}:revoke` | TDD-005 | a security operation |
+
+**The route claims the key (1.35.0).** These commands newly require it. The route claims it in
+`platform.idempotency_key`, through foundation-platform's `idempotency`, before the handler runs, in
+a scope of its own (`route:` and the caller). The digest is the method, the path and the body:
+
+| Route | Owner | Command |
+| :-- | :-- | :-- |
+| `POST /v1/principals/{id}:relink` | TDD-001 | a Principal relinked |
+| `POST /v1/registrations/{id}:suspend`, `:restore`, `:retire` | this TDD | the client's lifecycle |
+| `POST /v1/registrations/{id}/drift-exceptions` | this TDD | a drift exception granted |
+| `POST /v1/registrations/{id}/keys`, `.../keys/{key_id}:revoke` | this TDD | a key added, or revoked |
+| `POST /v1/registrations/{id}/owners`, `.../owners/{principal_id}:revoke` | this TDD | an owner granted, or revoked |
+| `POST /v1/registrations/{id}/changes`, `.../changes/{change_id}:approve`, `:reject`, `:withdraw` | this TDD | a change proposed or decided |
+| `POST /v1/application-developers`, `.../{principal_id}:revoke` | this TDD | a standing granted, or revoked |
+| `POST /v1/registration-requests`, `.../{request_id}:approve`, `:reject`, `:withdraw` | this TDD | a request made or decided |
+| `POST /v1/workloads/{id}:suspend`, `:restore`, `:retire`, `:rebuild`, `:reassign`, `:review` | TDD-004 | a workload's lifecycle, owner or review |
+| `POST /v1/security-operations/{id}:redrive` | TDD-005 | an operation re-driven |
+| `POST /v1/me/notification-addresses`, `.../{id}:verify`, `:remove` | TDD-008 | an address added, verified or removed |
+
+- **A `2xx` answer is recorded** with its status and body, and a retry with the same key and request
+  is answered it without running again. The same key on another request is a conflict.
+- **Any other answer releases the key.** A refusal changed nothing, and a corrected retry must run,
+  not be told the refusal again.
+- **Two windows remain, both in the safe direction.** A retry while the first request runs is answered
+  `409` `request-in-progress`. A process that dies after the effect commits and before the answer is
+  recorded leaves the key in progress, so its retries are refused rather than applied twice.
+  organization-control's middleware leaves the same window, for the same reason: the answer does not
+  exist until the handler has written it.
+- **A `5xx` after a partial effect** is retried as it was before 1.35.0. Each of these commands refuses
+  a repeat from its own state: a suspended client is not suspended again, a revoked key is not revoked
+  again, a decided change is not decided again.
+- **An authority decided inside the handler** comes after the key. The route class (provider, owner,
+  self, creator) is checked first, as the standard requires. A few handlers then refuse a caller the
+  class admitted: an owner approving a change, a developer approving a request, anyone but the owner
+  reviewing a workload. Such a caller without a key is told `400`, and with one, `403`.
+
+**No key is required.** A repeat cannot act twice. A key sent to one of these routes is ignored:
+
+| Route | Owner | Why no key (`STD-GLB-001` 1.4.0 class) |
+| :-- | :-- | :-- |
+| `POST /v1/principals:reconcile` | TDD-001 | a sweep: pending recovery and the Principal sweep find nothing left to do, or the same findings |
+| `POST /v1/registrations:reconcile` | this TDD | a sweep: a repeat finds the same divergences, and the findings an operator names converge once |
+| `POST /v1/workloads:sweep` | TDD-004 | a sweep: each stage is decided by time, so a repeat finds the same stage |
+| `POST /v1/kernel-events:sweep` | TDD-007 | a sweep: a repeat finds no events past the recorded position |
+| `POST /v1/me/authenticators:enroll` | TDD-005 | a read carried in a body: it answers the kernel action, the enrolment happens at the kernel, and its row is evidence of the request |
+| `POST /v1/deliveries` | TDD-006, TDD-002 | a report identified by the identifier it carries: each event's id passes the inbox guard |
+
+The calls this service makes to Organization Control are keyOptional there: the two snapshots,
+`bootstrap` and `progress` (`TDD-organization-control-003` 1.10.0). The frontier is a `GET`.
+
+| Ref | Source |
+| :-- | :-- |
+| R5 | IETF HTTPAPI Working Group, J. Jena and S. Dalal, *The Idempotency-Key HTTP Header Field*, draft-ietf-httpapi-idempotency-key-header-07 (expired 18 April 2026; work in progress, as `STD-GLB-001` 1.4.0 cites it), <https://datatracker.ietf.org/doc/html/draft-ietf-httpapi-idempotency-key-header-07>, accessed 2026-10-08: "Repeating the request multiple times can result in duplication or incorrect updates"; §2.7, a missing key on an operation requiring it: "the resource SHOULD reply with an HTTP `400` status code"; "Resources MUST publish a idempotency related specification." |
+| R6 | `STD-GLB-001` 1.4.0, *API Design*, §Commands Require an `Idempotency-Key` (scnehaux-architecture), as quoted above. |
 
 ### Profiles
 

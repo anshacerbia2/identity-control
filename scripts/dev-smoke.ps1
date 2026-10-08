@@ -175,14 +175,28 @@ if ($r.code -eq 201) {
     $next = @(if (@($current.audience) -notcontains "smoke-orders") { "smoke-orders" })
     $audienceJson = if ($next.Count -eq 0) { "[]" } else { "[`"" + ($next -join "`",`"") + "`"]" }
     $changeBody = "{`"audience`":$audienceJson,`"expected_version`":$($current.version)}"
-    $change = New-Object System.Net.Http.HttpRequestMessage("POST", "$api/v1/registrations/$($web.registration_id)/changes")
-    $change.Headers.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", $token)
-    $change.Headers.Add("X-Administrative-Reason", "smoke: an audience change reaches the kernel")
-    $change.Content = New-Object System.Net.Http.StringContent($changeBody, [System.Text.Encoding]::UTF8, "application/json")
-    $answer = $client.SendAsync($change).Result
-    $answerBody = $answer.Content.ReadAsStringAsync().Result
-    Expect "audience change applied" ([int]$answer.StatusCode) 201
-    if ([int]$answer.StatusCode -ne 201) { Write-Host "        $answerBody" }
+    $changeKey = "smoke-audience-change-$([Guid]::NewGuid().ToString('N'))"
+    function Send-Change($key) {
+        $change = New-Object System.Net.Http.HttpRequestMessage("POST", "$api/v1/registrations/$($web.registration_id)/changes")
+        $change.Headers.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", $token)
+        $change.Headers.Add("X-Administrative-Reason", "smoke: an audience change reaches the kernel")
+        if ($key) { $change.Headers.Add("Idempotency-Key", $key) }
+        $change.Content = New-Object System.Net.Http.StringContent($changeBody, [System.Text.Encoding]::UTF8, "application/json")
+        $sent = $client.SendAsync($change).Result
+        return @{ code = [int]$sent.StatusCode; body = $sent.Content.ReadAsStringAsync().Result }
+    }
+    # STD-GLB-001 1.4.0: a command without a key is refused before it is read.
+    Expect "an audience change without an Idempotency-Key is refused" (Send-Change $null).code 400
+    $answer = Send-Change $changeKey
+    Expect "audience change applied" $answer.code 201
+    if ($answer.code -ne 201) { Write-Host "        $($answer.body)" }
+    # The retry is answered from its key. Run again, the change would be refused: its
+    # expected_version is no longer the registration's.
+    $retried = Send-Change $changeKey
+    Expect "its retry with the same key is answered the first response" $retried.code 201
+    $firstId = if ($answer.code -eq 201) { ($answer.body | ConvertFrom-Json).change_id } else { "" }
+    $retriedId = if ($retried.code -eq 201) { ($retried.body | ConvertFrom-Json).change_id } else { "-" }
+    Expect "the same change" ($retriedId -eq $firstId -and $firstId) $true
     $after = (Send-Json "GET" "/v1/registrations/$($web.registration_id)" $null $token $null).body | ConvertFrom-Json
     Expect "audience written" ((@($after.audience) -join ",")) ($next -join ",")
 }
