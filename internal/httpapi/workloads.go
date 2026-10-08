@@ -33,6 +33,10 @@ type WorkloadService interface {
 	Orphaned(ctx context.Context) ([]workload.Condition, error)
 	Unused(ctx context.Context) ([]workload.Condition, error)
 	ReviewsOverdue(ctx context.Context) ([]workload.Condition, error)
+
+	// TDD-identity-control-004 1.7.0: the owner's read of the workloads it owns (ADR-IAM-003 §5.8).
+	Owned(ctx context.Context, principalID, owner id.UUID) (workload.Workload, error)
+	Mine(ctx context.Context, owner id.UUID) ([]workload.Workload, error)
 }
 
 // Workloads serves the workload routes.
@@ -101,9 +105,12 @@ func (h *Workloads) CreateWorkload(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, created)
 }
 
-// GetWorkload handles GET /v1/workloads/{principal_id}.
+// GetWorkload handles GET /v1/workloads/{principal_id}: any workload for a provider, and for anyone
+// else only a workload it owns, read with its ownership in one query, so another's workload is the
+// same 404 as none (TDD-identity-control-004 1.7.0).
 func (h *Workloads) GetWorkload(w http.ResponseWriter, r *http.Request) {
-	if _, ok := callerPrincipal(r); !ok {
+	principal, ok := callerPrincipal(r)
+	if !ok {
 		httpapi.Problem(w, r, httpapi.AuthenticationRequired, "The request carries no authenticated caller")
 		return
 	}
@@ -112,7 +119,12 @@ func (h *Workloads) GetWorkload(w http.ResponseWriter, r *http.Request) {
 		httpapi.Problem(w, r, httpapi.ValidationFailed, "principal_id is not a valid identifier")
 		return
 	}
-	found, err := h.service.Get(r.Context(), principalID)
+	var found workload.Workload
+	if IsProvider(r.Context()) {
+		found, err = h.service.Get(r.Context(), principalID)
+	} else {
+		found, err = h.service.Owned(r.Context(), principalID, principal)
+	}
 	if err != nil {
 		writeWorkloadError(w, r, err)
 		return
@@ -195,15 +207,18 @@ func (h *Workloads) WorkloadAction(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, moved)
 }
 
-// owned serves POST /v1/workloads/{principal_id}:{action}: :review to the workload's owner, whom the
-// service checks, and every other action to a provider alone, refused before anything is read
-// (TDD-identity-control-004 1.5.0).
+// owned serves the routes on one workload. POST /v1/workloads/{principal_id}:review is the workload
+// owner's, whom the service checks (TDD-identity-control-004 1.5.0). GET /v1/workloads/{principal_id}
+// is a provider's at aal2, and any other caller's for a workload it owns, which the handler reads with
+// the ownership (1.7.0). Every other action is a provider's alone, refused before anything is read.
 func (h *Workloads) owned(policy AssurancePolicy) func(http.HandlerFunc) http.HandlerFunc {
 	provider := providerOnly(policy)
 	return func(next http.HandlerFunc) http.HandlerFunc {
 		guarded := provider(next)
 		return func(w http.ResponseWriter, r *http.Request) {
-			if _, action, _ := strings.Cut(r.PathValue("target"), ":"); action == "review" {
+			_, action, _ := strings.Cut(r.PathValue("target"), ":")
+			ownerRead := r.Method == http.MethodGet && !IsProvider(r.Context())
+			if action == "review" || ownerRead {
 				if _, ok := callerPrincipal(r); !ok {
 					httpapi.Problem(w, r, httpapi.AuthenticationRequired, "The request carries no authenticated caller")
 					return
@@ -214,6 +229,22 @@ func (h *Workloads) owned(policy AssurancePolicy) func(http.HandlerFunc) http.Ha
 			guarded(w, r)
 		}
 	}
+}
+
+// Mine handles GET /v1/workloads:mine: the workloads the caller owns, a provider's included, each with
+// its last review and the date the next is due (TDD-identity-control-004 1.7.0).
+func (h *Workloads) Mine(w http.ResponseWriter, r *http.Request) {
+	principal, ok := callerPrincipal(r)
+	if !ok {
+		httpapi.Problem(w, r, httpapi.AuthenticationRequired, "The request carries no authenticated caller")
+		return
+	}
+	mine, err := h.service.Mine(r.Context(), principal)
+	if err != nil {
+		httpapi.Problem(w, r, httpapi.Internal, "The owned workloads could not be read")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"workloads": mine})
 }
 
 // Sweep handles POST /v1/workloads:sweep: the workload sweep now, as the schedule runs it.

@@ -2,6 +2,7 @@ package httpapi_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,9 @@ import (
 )
 
 type stubWorkloadService struct {
+	// owners holds who owns each workload, for the owner's read; a workload missing from it is none.
+	owners     map[id.UUID]id.UUID
+	readBy     *id.UUID
 	err        error
 	created    *workload.CreateRequest
 	reassigned *workload.ReassignRequest
@@ -62,6 +66,29 @@ func (s *stubWorkloadService) Get(_ context.Context, principalID id.UUID) (workl
 		return workload.Workload{}, s.err
 	}
 	return workload.Workload{PrincipalID: principalID, ClientKey: "nightly-job", State: workload.StateActive}, nil
+}
+
+// Owned answers as the store does: a workload the caller does not own is ErrNotFound, as none is.
+func (s *stubWorkloadService) Owned(_ context.Context, principalID, owner id.UUID) (workload.Workload, error) {
+	s.readBy = &owner
+	if s.err != nil {
+		return workload.Workload{}, s.err
+	}
+	if got, ok := s.owners[principalID]; !ok || got != owner {
+		return workload.Workload{}, workload.ErrNotFound
+	}
+	return workload.Workload{PrincipalID: principalID, Owner: owner, ClientKey: "owned-job", State: workload.StateActive}, nil
+}
+
+func (s *stubWorkloadService) Mine(_ context.Context, owner id.UUID) ([]workload.Workload, error) {
+	s.readBy = &owner
+	mine := []workload.Workload{}
+	for principalID, got := range s.owners {
+		if got == owner {
+			mine = append(mine, workload.Workload{PrincipalID: principalID, Owner: owner, State: workload.StateActive})
+		}
+	}
+	return mine, s.err
 }
 
 func (s *stubWorkloadService) Reassign(_ context.Context, req workload.ReassignRequest) (workload.Workload, error) {
@@ -399,5 +426,92 @@ func TestAProviderRebuildsSweepsAndListsWorkloads(t *testing.T) {
 	r.Header.Set(httpapi.AdministrativeReasonHeader, "r")
 	if w := serve(failing, r); w.Code != http.StatusConflict {
 		t.Errorf("a rebuild while the client exists answered %d, want 409", w.Code)
+	}
+}
+
+// An owner reads the workloads it owns and lists them; another's workload is the same 404 as none,
+// and a provider reads any workload without its ownership being consulted (TDD-identity-control-004
+// 1.7.0, ADR-IAM-003 §5.8).
+func TestAnOwnerReadsAndListsOnlyTheWorkloadsItOwns(t *testing.T) {
+	owner, owned, other, absent := mustUUID(t), mustUUID(t), mustUUID(t), mustUUID(t)
+	service := &stubWorkloadService{owners: map[id.UUID]id.UUID{owned: owner, other: mustUUID(t)}}
+	handler := workloadHandler(t, service)
+
+	w := serve(handler, asOwner(httptest.NewRequest(http.MethodGet, "/v1/workloads/"+owned.String(), nil), owner))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), owned.String()) {
+		t.Fatalf("an owner reading its workload answered %d: %s", w.Code, w.Body)
+	}
+	if service.readBy == nil || *service.readBy != owner {
+		t.Errorf("the read was not made for the caller: %v", service.readBy)
+	}
+	var bodies []string
+	for _, target := range []id.UUID{other, absent} {
+		w := serve(handler, asOwner(httptest.NewRequest(http.MethodGet, "/v1/workloads/"+target.String(), nil), owner))
+		if w.Code != http.StatusNotFound {
+			t.Errorf("an owner reading %s answered %d, want 404", target, w.Code)
+		}
+		bodies = append(bodies, strings.ReplaceAll(w.Body.String(), target.String(), "{id}"))
+	}
+	if bodies[0] != bodies[1] {
+		t.Errorf("another's workload and none answered differently:\n%s\n%s", bodies[0], bodies[1])
+	}
+
+	w = serve(handler, asOwner(httptest.NewRequest(http.MethodGet, "/v1/workloads:mine", nil), owner))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), owned.String()) || strings.Contains(w.Body.String(), other.String()) {
+		t.Errorf("mine answered %d: %s", w.Code, w.Body)
+	}
+	w = serve(handler, asOwner(httptest.NewRequest(http.MethodGet, "/v1/workloads:mine", nil), mustUUID(t)))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"workloads":[]`) {
+		t.Errorf("mine for a caller owning none answered %d: %s", w.Code, w.Body)
+	}
+
+	service.readBy = nil
+	r, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, "/v1/workloads/"+other.String(), nil))
+	if w := serve(handler, r); w.Code != http.StatusOK || service.readBy != nil {
+		t.Errorf("a provider's read answered %d, through the owner's read: %v", w.Code, service.readBy != nil)
+	}
+	// A provider whose token does not show aal2 steps up before reading a workload as a provider.
+	r = httptest.NewRequest(http.MethodGet, "/v1/workloads/"+other.String(), nil)
+	r = r.WithContext(httpapi.WithProvider(httpapi.WithCallerScope(r.Context(), "principal:"+owner.String())))
+	if w := serve(handler, r); w.Code != http.StatusUnauthorized || service.readBy != nil {
+		t.Errorf("a provider at aal1 answered %d, want the step-up 401", w.Code)
+	}
+
+	for _, path := range []string{"/v1/workloads/" + owned.String(), "/v1/workloads:mine"} {
+		if w := serve(handler, httptest.NewRequest(http.MethodGet, path, nil)); w.Code != http.StatusUnauthorized {
+			t.Errorf("%s without a caller answered %d, want 401", path, w.Code)
+		}
+	}
+	failing := workloadHandler(t, &stubWorkloadService{err: errors.New("database down")})
+	if w := serve(failing, asOwner(httptest.NewRequest(http.MethodGet, "/v1/workloads:mine", nil), owner)); w.Code != http.StatusInternalServerError {
+		t.Errorf("a failed listing answered %d, want 500", w.Code)
+	}
+}
+
+// Every workload route but the read, :mine and :review refuses an owner before anything is read.
+func TestEveryOtherWorkloadRouteRefusesAnOwner(t *testing.T) {
+	owner, owned := mustUUID(t), mustUUID(t)
+	service := &stubWorkloadService{owners: map[id.UUID]id.UUID{owned: owner}}
+	handler := workloadHandler(t, service)
+	for _, c := range []struct{ method, path string }{
+		{http.MethodPost, "/v1/workloads"},
+		{http.MethodPost, "/v1/workloads/" + owned.String() + ":reassign"},
+		{http.MethodPost, "/v1/workloads/" + owned.String() + ":suspend"},
+		{http.MethodPost, "/v1/workloads/" + owned.String() + ":restore"},
+		{http.MethodPost, "/v1/workloads/" + owned.String() + ":retire"},
+		{http.MethodPost, "/v1/workloads/" + owned.String() + ":rebuild"},
+		{http.MethodPost, "/v1/workloads:sweep"},
+		{http.MethodGet, "/v1/workloads:orphaned"},
+		{http.MethodGet, "/v1/workloads:unused"},
+		{http.MethodGet, "/v1/workloads:reviews-overdue"},
+	} {
+		r := asOwner(httptest.NewRequest(c.method, c.path, strings.NewReader(`{}`)), owner)
+		r.Header.Set(httpapi.AdministrativeReasonHeader, "r")
+		if w := serve(handler, r); w.Code != http.StatusForbidden {
+			t.Errorf("an owner's %s %s answered %d, want 403", c.method, c.path, w.Code)
+		}
+	}
+	if service.readBy != nil || service.lifecycle != nil || service.reassigned != nil || service.created != nil {
+		t.Error("an owner's request reached the workload service")
 	}
 }

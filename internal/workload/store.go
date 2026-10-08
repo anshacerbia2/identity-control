@@ -111,16 +111,17 @@ func utc(t *time.Time) *time.Time {
 // read goes through Query rather than QueryRow, so an absent workload is no row rather than a driver
 // error this package is not allowed to name.
 func (s *Service) read(ctx context.Context, tx db.Tx, principalID id.UUID) (Workload, error) {
-	return s.one(ctx, tx, readStatement, principalID)
+	return s.one(ctx, tx, readStatement, principalID.String(), string(s.cfg.Realm))
 }
 
 // lock reads a workload under its row lock, so two changes to one workload apply one after the other.
 func (s *Service) lock(ctx context.Context, tx db.Tx, principalID id.UUID) (Workload, error) {
-	return s.one(ctx, tx, lockStatement, principalID)
+	return s.one(ctx, tx, lockStatement, principalID.String(), string(s.cfg.Realm))
 }
 
-func (s *Service) one(ctx context.Context, tx db.Tx, statement string, principalID id.UUID) (Workload, error) {
-	rows, err := tx.Query(ctx, statement, principalID.String(), string(s.cfg.Realm))
+// one reads at most one workload; its statement takes the principal_id and the realm first.
+func (s *Service) one(ctx context.Context, tx db.Tx, statement string, args ...any) (Workload, error) {
+	rows, err := tx.Query(ctx, statement, args...)
 	if err != nil {
 		return Workload{}, fmt.Errorf("workload: read: %w", err)
 	}
