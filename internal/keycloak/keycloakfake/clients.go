@@ -96,16 +96,10 @@ func (r *Registry) now() time.Time {
 	return time.Now().UTC()
 }
 
-// Put stores a client as it stands, recording no admin event: the state before the test begins. A
-// client given no logout configuration holds what the Admin API gives a client created without one:
-// front channel off and "session required" on (Keycloak 26.7.5 OIDCLoginProtocolFactory, ADR-IAM-009
-// [R4]).
+// Put stores a client as it stands, recording no admin event: the state before the test begins.
 func (r *Registry) Put(client keycloak.Client) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if client.Logout == (keycloak.Logout{}) {
-		client.Logout = keycloak.DesiredLogout("")
-	}
 	r.clients[client.ID] = copyClient(client)
 }
 

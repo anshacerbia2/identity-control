@@ -835,7 +835,7 @@ adopt(request):
         token_lifespan   repairable
         audience_scope   repairable   exactly the default and optional scopes of §Profiles
         token_format     repairable   the at+jwt attribute and the client_id mapper
-        logout           repairable   front channel off, session required, the declared URI (1.37.0)
+        logout           repairable   front channel off and the declared URI, the session named with one (1.37.0)
         enabled          repairable   the client is enabled
         audience_profile blocking     its audience profile scope is the declaration's (1.30.0)
         redirect_uris    blocking
@@ -1148,19 +1148,25 @@ declared resource, a mapper under another name or one writing a custom audience 
   sweep, with no admin event to attribute it to, and an operator applies the registered state once.
 
 **`logout` is compared from 1.37.0** (`ADR-IAM-009 §5.2`), for every active client but a resource.
-The desired value is front-channel logout off, "session required" on, and the registration's
-`backchannel_logout_uri`, or no URL. Front-channel logout turned on in the console removes the back
-channel for the client, and a URL removed or moved is a logout that no longer arrives, so either is a
-difference.
+The desired value is front-channel logout off and the registration's `backchannel_logout_uri`, or no
+URL, with "session required" on when there is a URL. Front-channel logout turned on in the console
+removes the back channel for the client, a URL removed or moved is a logout that no longer arrives,
+and a logout token that does not name its session cannot be matched to one, so each is a difference.
+Without a URL the kernel posts no logout token, so "session required" is not compared then; a repair
+writes it on all the same.
 
 - **Repaired, under the attribution rule**, as `token_lifespan` is. A changed logout configuration
   grants nothing; it delays a revocation to the refresh path. A divergence no admin event names is
   `unattributed`, and an operator's reconcile applies the registered configuration.
 - **No drift exception covers it.** A drift exception's field classes are unchanged.
 - **Existing clients do not differ.** A client the Admin API created without these fields holds
-  front-channel logout off and "session required" on, which the pinned kernel sets for a client
-  created with no back-channel URL (`ADR-IAM-009` [R4]), so a client registered or adopted before
-  1.37.0 is found in sync.
+  front-channel logout off and no URL. One whose representation named its protocol also holds
+  "session required" on; one made by `kcadm.sh` without `protocol`, as `create-kernel-clients.sh` and
+  `create-bff-client.sh` make theirs, does not, because the pinned kernel runs the protocol's
+  defaults only for a representation that names one (`ADR-IAM-009` [R4]). Neither has a URL, so a
+  client registered or adopted before 1.37.0 is found in sync. `deploy-dev`'s first run on 1.37.0
+  found the second case: the caller's adoption plan named `logout` until the comparison stopped
+  asking for "session required" without a URL.
 
 - **An absent client is held, not recreated.** It is recorded as one open `missing`
   finding naming whoever the deletion's admin event names, and every sweep leaves it

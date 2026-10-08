@@ -106,6 +106,16 @@ func DesiredLogout(backChannelURL string) Logout {
 	return Logout{BackChannelURL: backChannelURL, SessionRequired: true}
 }
 
+// Matches reports whether the configuration is what a registration with the given back-channel
+// logout URL, or "" for none, requires: front channel off and that URL, and the session named when a
+// URL is set. Without a URL the kernel posts no logout token, so "session required" decides nothing,
+// and a client the Admin API created without naming its protocol, which never holds it, is not a
+// difference (Keycloak 26.7.5 ClientManager.createClient runs the protocol's defaults only for a
+// representation that names one).
+func (l Logout) Matches(backChannelURL string) bool {
+	return !l.FrontChannel && l.BackChannelURL == backChannelURL && (backChannelURL == "" || l.SessionRequired)
+}
+
 // ClientCredential is a client's authentication configuration as the kernel holds it.
 type ClientCredential struct {
 	// Authenticator is clientAuthenticatorType: client-jwt for a client that proves itself by a

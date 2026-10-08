@@ -354,7 +354,7 @@ func planAdoption(req AdoptRequest, client keycloak.Client, scopes ScopeSets, li
 				Observed: map[string]any{"at_jwt": client.RFC9068, "client_id": client.ClientIDClaim},
 				Differs:  !client.RFC9068 || client.ClientIDClaim != req.ClientKey},
 			{FieldClass: ClassLogout, Policy: PolicyRepair, Desired: keycloak.DesiredLogout(req.BackChannelLogoutURI),
-				Observed: client.Logout, Differs: client.Logout != keycloak.DesiredLogout(req.BackChannelLogoutURI)},
+				Observed: client.Logout, Differs: !client.Logout.Matches(req.BackChannelLogoutURI)},
 			{FieldClass: ClassEnabled, Policy: PolicyRepair, Desired: true, Observed: client.Enabled, Differs: !client.Enabled},
 			{FieldClass: ClassAudienceProfile, Policy: PolicyBlock, Desired: desiredProfile, Observed: observedProfile,
 				Differs: !slices.Equal(desiredProfile, observedProfile)},

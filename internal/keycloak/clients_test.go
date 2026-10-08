@@ -837,3 +837,27 @@ func TestPatchClientWritesTheLogoutConfiguration(t *testing.T) {
 		}
 	}
 }
+
+// Without a back-channel URL the kernel posts no logout token, so "session required" decides
+// nothing; with one, the logout token must name the session. Front-channel logout is never right.
+func TestALogoutConfigurationMatchesWhatTheRegistrationRequires(t *testing.T) {
+	const target = "https://a/logout"
+	for name, c := range map[string]struct {
+		logout keycloak.Logout
+		url    string
+		want   bool
+	}{
+		"none, as registered":           {keycloak.DesiredLogout(""), "", true},
+		"none, session not named":       {keycloak.Logout{}, "", true},
+		"none, front channel on":        {keycloak.Logout{FrontChannel: true, SessionRequired: true}, "", false},
+		"none, a URL nobody registered": {keycloak.DesiredLogout(target), "", false},
+		"a URL, as registered":          {keycloak.DesiredLogout(target), target, true},
+		"a URL, session not named":      {keycloak.Logout{BackChannelURL: target}, target, false},
+		"a URL, front channel on":       {keycloak.Logout{FrontChannel: true, BackChannelURL: target, SessionRequired: true}, target, false},
+		"a URL, removed in the console": {keycloak.DesiredLogout(""), target, false},
+	} {
+		if got := c.logout.Matches(c.url); got != c.want {
+			t.Errorf("%s: Matches = %v, want %v", name, got, c.want)
+		}
+	}
+}

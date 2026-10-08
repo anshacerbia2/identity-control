@@ -509,9 +509,8 @@ func (r *Reconciler) reconcileField(
 		// logout turned on removes the back channel for the client altogether (ADR-IAM-009 §5.2). It
 		// is repaired under the attribution rule, as a lifespan is.
 		applies = reg.comparesTokenProfile()
-		want := keycloak.DesiredLogout(reg.backChannelLogoutURI)
-		differs = client.Logout != want
-		desired, observed = want, client.Logout
+		differs = !client.Logout.Matches(reg.backChannelLogoutURI)
+		desired, observed = keycloak.DesiredLogout(reg.backChannelLogoutURI), client.Logout
 		target := reg.backChannelLogoutURI
 		repair.BackChannelLogoutURL = &target
 	}
@@ -678,7 +677,7 @@ func (r *Reconciler) apply(ctx context.Context, reg registration, field FieldCla
 	case Audience:
 		return sameList(after.Audience, reg.audience), nil
 	case Logout:
-		return after.Logout == keycloak.DesiredLogout(reg.backChannelLogoutURI), nil
+		return after.Logout.Matches(reg.backChannelLogoutURI), nil
 	}
 	return false, nil
 }
