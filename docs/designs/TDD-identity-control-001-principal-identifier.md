@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-001
   title: Canonical Principal Identifier and Creation Path
   owner: Core Platform Team
-  version: 1.15.0
+  version: 1.16.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -816,6 +816,14 @@ Executed against a Keycloak instance pinned to the release under evaluation:
 - `:relink` is refused while the mapped user exists, without a reason, and on a
   mapping that is not `active`.
 
+### Restore
+
+- `deploy-dev`'s restore drill (§Restore Evidence) backs the filled stack up, deletes its volume,
+  restores it and compares every table, sequence, role and the schema with the source, then reads
+  the registrations through the restarted service.
+- A second `restore.sh` over the restored database is refused: a restore never replaces a live
+  database.
+
 ### Negative
 
 - An internal-audience token lacking `principal_id` is rejected by the reference
@@ -862,10 +870,63 @@ Alerts:
 | Reconciliation sweep age exceeding two intervals | warning |
 
 Runbooks required before production: unmapped-Principal triage, duplicate-identifier
-containment, pending-mapping recovery, and administration credential rotation.
+containment, pending-mapping recovery, administration credential rotation, and, from 1.16.0,
+Control Database restore (`docs/runbooks/control-database-restore.md`).
 
 Telemetry excludes credential fields and unrestricted personal data. `principal_id`
 appears in structured logs; `keycloak_user_id` does not.
+
+### Restore Evidence
+
+1.16.0. The Control Database is the only record that binds a `principal_id` to its kernel user, so
+the production gate asks for restore evidence (`STD-GLB-002` §Restore Evidence, `ROADMAP.md`
+§Gates). `deploy-dev` produces it on every change and weekly, as its last step,
+`scripts/dev-restore-drill.sh`, against the stack every earlier step filled:
+
+1. It reads `GET /v1/registrations` as the bootstrap operator, then stops the service.
+2. It fingerprints the database with `scripts/restore-fingerprint.sql`: the newest Atlas revision,
+   every table's row count and the md5 of its rows' sorted md5s, every sequence, and every role
+   with its attributes and memberships. The schema, owners, grants and default privileges included,
+   is `pg_dump --schema-only --create` with a fixed `--restrict-key`.
+3. It backs up with `deploy/dev/backup.sh`, the operator's cron line: `pg_dumpall --globals-only`
+   and `pg_dump --format=custom`.
+4. It deletes the volume with `docker compose down --volumes`, and checks that it is gone.
+5. It restores with `deploy/dev/restore.sh` into the new, empty volume: the roles, then
+   `pg_restore --create --exit-on-error`. Then it fingerprints again, before the migrate job runs.
+6. It runs `docker compose up -d --build`, requires the migrate job's `control database ready` and
+   `/readyz`, and reads the registrations again.
+7. It writes `restore-evidence.json`, which the job keeps as its `restore-evidence` artifact for 90
+   days, beside the fingerprints and any difference. The backup files are never uploaded: they hold
+   role password hashes.
+
+It fails unless schema, migration version, every table, every sequence and the roles are equal,
+the API answer is identical, and these tables hold rows in the source: `principal_mapping`,
+`bootstrap_ceremony`, `client_registration`, `client_key`, `tenant_desired`, `membership_desired`,
+`kernel_event` and `privileged_access`. It fails above the 15-minute RTO of `PAD-PLT-001 §6.2`,
+timed from `restore.sh` on the empty volume to the verified read.
+
+**Why the roles come from the backup.** A database dump holds no roles, and `grants.sql` grants to
+`identity_runtime` and makes `identity_migrator` the schemas' owner. Restored before the roles
+exist, the dump fails on its first owner. The alternative, running the migrate job first and then
+`pg_restore --clean` over the schema it built, was rejected: a dump older than the release would
+restore older migration history over newer tables, and the next migration would fail. Restored
+whole with `--create`, the database is as it was, and the migrate job upgrades it as it upgrades any
+database. The migrate job still runs after the restore, so `roles.sql`, `grants.sql` and
+`identity_app`'s password from `.env` are asserted again.
+
+**What it does not prove.**
+
+- **RPO.** A daily dump loses up to 24 hours, against the 1 minute of `PAD-PLT-001 §6.2`. Meeting it
+  needs continuous WAL archiving with point-in-time recovery on the production platform. This is a
+  recorded gap, not a claim.
+- **A restore to an older point.** The drill restores to the instant of its own backup. A real
+  restore is older than the kernel, and the service then reads the difference as drift: kernel users
+  and clients created after the backup as `orphan` and `unmanaged`, registration changes as drift,
+  and Tenant context events as never received. `docs/runbooks/control-database-restore.md` says
+  what an operator does. No switch holds the registration sweep or the converger meanwhile.
+- **Production size.** The duration is measured on CI data.
+- **Erasure.** This service has no right-to-erasure path, so it keeps no tombstones for a restore
+  to re-apply (`STD-GLB-007` §GDPR Right-to-Erasure). When one is built, the drill proves it.
 
 ## Traceability
 

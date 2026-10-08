@@ -861,8 +861,20 @@ removal, Keycloak administration credential rotation rehearsed, and runbooks wri
 for unmapped-Principal triage, duplicate-identifier containment, pending-mapping
 recovery, and projection drift repair.
 
-Where each stands (2026-10-07):
-- **Restore evidence for the Control Database.** Not covered here.
+Where each stands (2026-10-08):
+- ✅ **Restore evidence for the Control Database** (`STD-GLB-002` §Restore Evidence,
+  TDD-identity-control-001 1.16.0 §Restore Evidence). `deploy-dev`'s last step,
+  `scripts/dev-restore-drill.sh`, runs on every change and weekly. It backs the filled stack up with
+  `deploy/dev/backup.sh`, deletes its volume, and restores with `deploy/dev/restore.sh` (roles, then
+  `pg_restore --create --exit-on-error`). It then requires the schema with owners and grants, the
+  migration version, every table's rows and checksum, every sequence and the roles to equal the
+  source's, the restarted service to answer `GET /v1/registrations` identically, and the recovery to
+  finish inside the 15-minute RTO. The record is the job's `restore-evidence` artifact.
+  - **RPO is not met, and is a recorded gap.** The backup is a daily `pg_dump`, so a restore loses up
+    to 24 hours, against `PAD-PLT-001 §6.2`'s 1 minute. That needs continuous WAL archiving with
+    point-in-time recovery on the production platform.
+  - A restore to an older point than the kernel's is not drilled. `docs/runbooks/control-database-restore.md`
+    says what the service then reads as drift, and what an operator does.
 - ✅ **Accept-to-enforcement delay, measured.** `deploy-dev` measures both on every run against the
   live kernel and writes them to the job summary. Above the 60-second propagation budget
   (`SAD-001 §7.7`) the job fails, and above this service's 2-second share it warns.
