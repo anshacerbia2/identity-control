@@ -889,7 +889,12 @@ Where each stands (2026-10-08):
     gone while the user stays disabled, and is repeated; a Membership granted after it is removed by
     the first sweep as `extra_member` and put back by Organization Control's repair; a Principal
     created after it is an `orphan` that no route binds again, recorded as a gap. The record is
-    `older-point-evidence.json` in the `restore-evidence` artifact. ~~First run: to be recorded~~
+    `older-point-evidence.json` in the `restore-evidence` artifact. First passing run: deploy-dev run
+    37918842749, 2026-10-09, all five cases as above, the switches returned and the service ready; the
+    same run restored 47 tables and 581 rows in 2.1 s, and recovered to the verified read in 28.9 s.
+    Its first attempt found the drill itself wrong: compose prefers an exported variable to `.env`, so
+    the restored service had started in `disable` and disabled the client and the orphan. The runbook's
+    step 7 now says so.
 - ✅ **Accept-to-enforcement delay, measured.** `deploy-dev` measures both on every run against the
   live kernel and writes them to the job summary. Above the 60-second propagation budget
   (`SAD-001 §7.7`) the job fails, and above this service's 2-second share it warns.
