@@ -278,3 +278,23 @@ func containsKey(t *testing.T, raw []byte, key string) bool {
 	_, ok := fields[key]
 	return ok
 }
+
+// The sweep-age gauge reads the newest finished run once there is one.
+func TestTheSweepAgeIsObserved(t *testing.T) {
+	h := newConvergerHarness(t)
+	sweep := h.reconciler(t)
+	reader := sdkmetric.NewManualReader()
+	if err := sweep.Instrument(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test")); err != nil {
+		t.Fatal(err)
+	}
+	if err := sweep.Instrument(nil); err != nil {
+		t.Errorf("a nil meter answered %v", err)
+	}
+	if _, err := sweep.Sweep(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	age, ok := collect(t, reader)["identity.tenant_projection.sweep_age"].(metricdata.Gauge[float64])
+	if !ok || len(age.DataPoints) != 1 || age.DataPoints[0].Value < 0 {
+		t.Errorf("sweep_age observed %+v", age)
+	}
+}

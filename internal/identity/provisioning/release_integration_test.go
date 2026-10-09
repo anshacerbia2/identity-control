@@ -9,6 +9,9 @@ import (
 	"errors"
 	"testing"
 
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+
 	"github.com/anshacerbia2/foundation-platform/db"
 	"github.com/anshacerbia2/foundation-platform/id"
 
@@ -169,5 +172,38 @@ func TestThePendingListingMarksTheOverdue(t *testing.T) {
 	}
 	if listed[0].PrincipalID != stale || !listed[0].Overdue || listed[1].PrincipalID != fresh || listed[1].Overdue {
 		t.Errorf("pending = %+v, want the stale one first and overdue, the fresh one not", listed)
+	}
+}
+
+// The pending and quarantined gauges are observed when the reader collects, every overdue value
+// included (TDD-identity-control-001 1.18.0 §Operational Notes).
+func TestTheMappingGaugesAreObserved(t *testing.T) {
+	p := newPortability(t)
+	p.quarantinedDuplicate("gauged.person")
+	reader := sdkmetric.NewManualReader()
+	if err := p.provisioner.Instrument(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)).Meter("test")); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.provisioner.Instrument(nil); err != nil {
+		t.Errorf("a nil meter answered %v", err)
+	}
+	var collected metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &collected); err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]metricdata.Gauge[int64]{}
+	for _, scope := range collected.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if gauge, ok := m.Data.(metricdata.Gauge[int64]); ok {
+				got[m.Name] = gauge
+			}
+		}
+	}
+	if pending := got["identity.principal.pending"]; len(pending.DataPoints) != 2 {
+		t.Errorf("identity.principal.pending observed %d series, want overdue true and false", len(pending.DataPoints))
+	}
+	held := got["identity.principal.quarantined"]
+	if len(held.DataPoints) != 1 || held.DataPoints[0].Value < 1 {
+		t.Errorf("identity.principal.quarantined observed %+v, want the quarantined mapping counted", held.DataPoints)
 	}
 }

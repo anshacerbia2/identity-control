@@ -346,12 +346,16 @@ jobs:
       # filled is backed up with deploy/dev/backup.sh, its volume deleted, and restored with
       # deploy/dev/restore.sh; schema, migration, every table, sequence and role are compared, the
       # service restarted and read, and the recovery timed against the 15-minute RTO. Last, because it
-      # deletes the database.
+      # deletes the database. The same run drills a restore older than the kernel: changes made after
+      # the backup, the restored service in report mode, and the runbook's reconciliation checked
+      # (scripts/dev-restore-older-point.ps1), the Tenant proof's delivering workload standing in for
+      # Organization Control's repair.
       - name: the Control Database restores from its backup
         run: |
           set -a; . deploy/dev/.env; set +a
-          export IDENTITY_API_URL=http://127.0.0.1:8082 KC_BASE_URL=https://localhost
+          export IDENTITY_API_URL=http://127.0.0.1:8082 KC_BASE_URL=https://localhost KC_ADMIN_URL=http://localhost:8080
           export IDENTITY_OPERATOR_TOTP_FILE="$RUNNER_TEMP/operator-totp.json"
+          export TENANT_PROOF_STATE="$RUNNER_TEMP/tenant-proof/state.json"
           bash scripts/dev-restore-drill.sh "$RUNNER_TEMP/restore-drill"
 
       # The evidence, never the backup: the dump and the roles file hold role password hashes.
@@ -364,6 +368,7 @@ jobs:
             ${{ runner.temp }}/restore-drill/*.json
             ${{ runner.temp }}/restore-drill/*.txt
             ${{ runner.temp }}/restore-drill/*.sql
+            ${{ runner.temp }}/restore-drill/older-point/older-point-evidence.json
             !${{ runner.temp }}/restore-drill/backup/**
           if-no-files-found: ignore
           retention-days: 90

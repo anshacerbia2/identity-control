@@ -17,9 +17,16 @@
 #   7. writes restore-evidence.json and fails on any difference, or on a recovery slower than the
 #      15-minute RTO of PAD-PLT-001 §6.2.
 #
+# It also drills a restore to a point older than the kernel's (scripts/dev-restore-older-point.ps1,
+# docs/runbooks/control-database-restore.md §After a restore to an older point): changes made before
+# the backup, more made after it while the service runs again on the old database, the restored
+# service started in report mode as the runbook's step 7 says, the runbook's reconciliation carried out
+# and checked, and the rollout switches returned afterwards. Its record is older-point-evidence.json.
+#
 # It deletes the database, so it refuses to run outside CI. The environment is deploy/dev/.env's,
-# plus IDENTITY_API_URL, KC_BASE_URL and IDENTITY_OPERATOR_TOTP_FILE for the API reads, as the other
-# deploy-dev steps set them.
+# plus IDENTITY_API_URL, KC_BASE_URL, KC_ADMIN_URL and IDENTITY_OPERATOR_TOTP_FILE for the API reads,
+# as the other deploy-dev steps set them, and TENANT_PROOF_STATE, the Tenant proof's state file, whose
+# delivering workload stands in for Organization Control.
 #
 #   bash scripts/dev-restore-drill.sh "$RUNNER_TEMP/restore-drill"
 set -euo pipefail
@@ -50,6 +57,23 @@ out="$(cd "$out" && pwd)"
 backup="$out/backup"
 
 compose() { (cd "$deploy" && docker compose "$@"); }
+older="$out/older-point"
+mkdir -p "$older"
+older_point() { pwsh -NoProfile -File "$root/scripts/dev-restore-older-point.ps1" -Phase "$1" -State "$older/state.json" \
+	-TenantState "${TENANT_PROOF_STATE:?TENANT_PROOF_STATE names the state file of the Tenant proof}"; }
+wait_ready() {
+	for _ in $(seq 1 180); do
+		curl -fsS "$ready_url" >/dev/null 2>&1 && return 0
+		sleep 1
+	done
+	return 1
+}
+# env_value and set_env read and write one deploy/dev/.env setting, as an operator edits the file.
+env_value() { sed -n "s/^$1=//p" "$deploy/.env" | tail -n 1; }
+set_env() {
+	sed -i "/^$1=/d" "$deploy/.env"
+	[ -z "$2" ] || echo "$1=$2" >> "$deploy/.env"
+}
 now() { date +%s.%N; }
 elapsed() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.3f", b - a }'; }
 
@@ -76,6 +100,9 @@ section() { jq -S ".$2" "$out/fingerprint-$1.json" > "$out/$2-$1.json"; }
 
 started_at="$(date -u +%FT%TZ)"
 
+echo "0. the older point: changes the backup will hold"
+older_point before
+
 echo "1. read the registrations through the API, then stop the service"
 read_api before
 compose stop "$service"
@@ -90,6 +117,12 @@ backup_seconds="$(elapsed "$t" "$(now)")"
 globals="$(sed -n 1p "$out/backup-files.txt")"
 dump="$(sed -n 2p "$out/backup-files.txt")"
 dump_bytes="$(stat -c %s "$dump")"
+
+echo "3b. the older point: the service runs again on the backed-up database, and changes the kernel"
+compose start "$service"
+wait_ready || { echo "::error::the service did not come back before the older point's changes"; exit 1; }
+older_point after-backup
+compose stop "$service"
 
 echo "4. lose the database: docker compose down --volumes"
 volume_before="$(docker volume inspect -f '{{.CreatedAt}}' "$volume")"
@@ -146,7 +179,11 @@ else
 	grep -qF "refusing:" "$out/second-restore.txt" && refuses_occupied=true
 fi
 
-echo "6. start the stack on the restored database"
+echo "6. start the stack on the restored database, in report mode (runbook step 7)"
+unmapped_before="$(env_value IDENTITY_UNMAPPED_USERS)"
+unmanaged_before="$(env_value IDENTITY_UNMANAGED_CLIENTS)"
+set_env IDENTITY_UNMAPPED_USERS report
+set_env IDENTITY_UNMANAGED_CLIENTS report
 t="$(now)"
 compose up -d --build
 ready=false
@@ -165,6 +202,18 @@ if [ "$ready" = true ] && read_api after; then
 	read_ok=true
 fi
 recovery_seconds="$(elapsed "$t0" "$(now)")"
+
+echo "6b. the older point: what the restored service sees, and the runbook's reconciliation"
+older_point_reconciled=false
+if [ "$ready" = true ] && older_point reconcile; then
+	older_point_reconciled=true
+fi
+# The runbook's last step: the rollout switches return to what they were.
+set_env IDENTITY_UNMAPPED_USERS "$unmapped_before"
+set_env IDENTITY_UNMANAGED_CLIENTS "$unmanaged_before"
+compose up -d "$service"
+switches_returned=false
+wait_ready && switches_returned=true
 
 echo "7. compare"
 for side in source restored; do
@@ -204,6 +253,8 @@ jq -n \
 	--argjson read_equal "$read_equal" --argjson critical "$critical" --argjson critical_filled "$critical_filled" \
 	--argjson refuses_occupied "$refuses_occupied" --argjson one_row_detected "$one_row_detected" \
 	--argjson without_roles_refused "$without_roles_refused" --arg probe_table "$probe_table" \
+	--argjson older_point_reconciled "$older_point_reconciled" --argjson switches_returned "$switches_returned" \
+	--slurpfile older "$( [ -s "$older/older-point-evidence.json" ] && echo "$older/older-point-evidence.json" || echo /dev/null )" \
 	--slurpfile source "$out/fingerprint-source.json" \
 	'{
 	  standard: "STD-GLB-002 §Restore Evidence",
@@ -229,6 +280,9 @@ jq -n \
 	                  read_equal: $read_equal},
 	  rto: {target_seconds: $rto_seconds, recovery_seconds: $recovery_seconds, within: $within_rto,
 	        measured: "from restore.sh on an empty volume to the verified API read"},
+	  older_point: {procedure: "docs/runbooks/control-database-restore.md §After a restore to an older point",
+	                reconciled: $older_point_reconciled, switches_returned: $switches_returned,
+	                cases: ($older[0].cases // [])},
 	  rpo: {target_seconds: 60, backup_interval_seconds: 86400, met: false,
 	        why: "A daily pg_dump loses up to 24 hours. A 1-minute RPO needs continuous WAL archiving with point-in-time recovery on the production platform; a drill of a logical dump never proves it."}
 	}' > "$out/restore-evidence.json"
@@ -236,7 +290,8 @@ jq -n \
 cat "$out/restore-evidence.json"
 
 checks=(schema_equal migration_equal tables_equal sequences_equal roles_equal critical_filled
-	volume_new refuses_occupied one_row_detected without_roles_refused ready migrate_ready read_equal within_rto)
+	volume_new refuses_occupied one_row_detected without_roles_refused ready migrate_ready read_equal within_rto
+	older_point_reconciled switches_returned)
 failures=0
 for check in "${checks[@]}"; do
 	if [ "${!check}" = true ]; then
