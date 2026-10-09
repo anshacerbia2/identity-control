@@ -510,6 +510,14 @@ func (r *Reconciler) reconcileField(
 		// is repaired under the attribution rule, as a lifespan is.
 		applies = reg.comparesTokenProfile()
 		differs = !client.Logout.Matches(reg.backChannelLogoutURI)
+		if applies && differs {
+			// Confirmed first: a back-channel logout URI change writes the kernel before it commits the
+			// URI this sweep read, and repairing toward the old one would undo it (TDD-003 1.38.0).
+			var err error
+			if reg, client, differs, err = r.confirmLogoutDrift(ctx, reg); err != nil {
+				return false, false, err
+			}
+		}
 		desired, observed = keycloak.DesiredLogout(reg.backChannelLogoutURI), client.Logout
 		target := reg.backChannelLogoutURI
 		repair.BackChannelLogoutURL = &target
@@ -697,6 +705,23 @@ func (r *Reconciler) confirmAudienceDrift(ctx context.Context, reg registration)
 		return reg, keycloak.Client{}, true, fmt.Errorf("reconcile: read %s again: %w", reg.clientKey, err)
 	}
 	return reg, client, !sameList(client.Audience, reg.audience), nil
+}
+
+// confirmLogoutDrift reads the registration's back-channel logout URI again under the share lock a
+// logout change's update lock excludes, then the client again, and reports whether they still differ.
+func (r *Reconciler) confirmLogoutDrift(ctx context.Context, reg registration) (registration, keycloak.Client, bool, error) {
+	if err := r.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		return tx.QueryRow(ctx, lockedLogoutStatement, reg.id.String()).Scan(&reg.backChannelLogoutURI)
+	}); err != nil {
+		return reg, keycloak.Client{}, true, fmt.Errorf("reconcile: read %s's back-channel logout URI again: %w", reg.clientKey, err)
+	}
+	client, err := call(ctx, r.cfg.CallTimeout, func(ctx context.Context) (keycloak.Client, error) {
+		return r.kernel.GetClient(ctx, r.cfg.Realm, reg.client)
+	})
+	if err != nil {
+		return reg, keycloak.Client{}, true, fmt.Errorf("reconcile: read %s again: %w", reg.clientKey, err)
+	}
+	return reg, client, !client.Logout.Matches(reg.backChannelLogoutURI), nil
 }
 
 // confirmLifespanDrift derives the registration's lifespan again under the share lock that a

@@ -1286,3 +1286,36 @@ func TestTheLogoutConfigurationIsHeldAndRepaired(t *testing.T) {
 		}
 	}
 }
+
+// A back-channel logout URI change writes the kernel before it commits the URI a sweep reads
+// (TDD-identity-control-003 1.38.0). A sweep that read the old URI first and the kernel after confirms
+// the difference under the registration's lock, and by then the change has committed.
+func TestALogoutChangeInFlightIsNotTakenForDrift(t *testing.T) {
+	h := newHarness(t)
+	caller := h.caller()
+	const target = "https://bff.example.com/auth/back-channel-logout"
+	stale := registration{id: caller.id, client: caller.client, clientKey: "identity-control-caller",
+		profile: "confidential"}
+
+	// The change, committed: desired state and the kernel both hold the new URI.
+	if err := h.pool.InTx(context.Background(), func(ctx context.Context, tx db.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE identity.client_registration SET backchannel_logout_uri = $2 WHERE registration_id = $1`,
+			caller.id.String(), target)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h.kernel.ConsoleChange("", caller.client, func(c *keycloak.Client) { c.Logout = keycloak.DesiredLogout(target) })
+
+	confirmed, _, differs, err := h.reconciler.confirmLogoutDrift(context.Background(), stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if differs || confirmed.backChannelLogoutURI != target {
+		t.Errorf("a committed logout change was confirmed as drift: differs %v, URI %q", differs, confirmed.backChannelLogoutURI)
+	}
+	h.tick(time.Second)
+	if run := h.sweep(); run.Outcome != Converged {
+		t.Errorf("the sweep after the change ran %+v, want converged", run)
+	}
+}

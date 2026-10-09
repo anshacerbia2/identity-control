@@ -118,6 +118,11 @@ FOR SHARE OF r`
 const lockedAudienceStatement = `SELECT coalesce(audience, '{}'::text[]) FROM identity.client_registration
 WHERE registration_id = $1 FOR SHARE`
 
+// lockedLogoutStatement is one registration's back-channel logout URI under the share lock a logout
+// change's update lock excludes, so it waits for a change in flight and reads what it committed.
+const lockedLogoutStatement = `SELECT coalesce(backchannel_logout_uri, '') FROM identity.client_registration
+WHERE registration_id = $1 FOR SHARE`
+
 // lifespanStatement derives one registration's lifespan. It is read after lockRegistrationStatement
 // has taken the share lock a lifetime-class change's and an audience change's update lock on the row
 // excludes, in a statement of its own, so it sees what the change committed.

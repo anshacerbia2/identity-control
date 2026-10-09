@@ -8,7 +8,12 @@
 #   3. the session is ended at POST /v1/me/sessions/{security_ref}:terminate, followed until final;
 #   4. the receiver holds a logout token for that client and that session: typed logout+jwt, PS256,
 #      the realm as issuer, the client as audience, the back-channel logout event, the session's sid,
-#      and no nonce (Back-Channel Logout 1.0 §2.4, §2.6), within the command budget.
+#      and no nonce (Back-Channel Logout 1.0 §2.4, §2.6), within the command budget;
+#   5. the URI moves by a registration change, the backchannel_logout_uri kind (TDD-identity-control-003
+#      1.38.0), applied at once outside production, and the next session ended is told at the new URI
+#      and not at the first;
+#   6. a registration sweep after the change finds the client's logout configuration in sync, and a
+#      second change removes the URI.
 #
 # The receiver must listen where the kernel can reach it: on a CI runner, the kernel's Docker
 # network gateway. It ends one session of the bootstrap operator: for a kernel that lives for a CI
@@ -102,6 +107,7 @@ $r = Send "POST" "$api/v1/registrations" $registration $provider @{ "Idempotency
 Expect "registered" $r.code 201
 if ($r.code -ne 201) { Write-Host "        $($r.text)"; exit 1 }
 Expect "the registration names the URI" $r.json.backchannel_logout_uri $ReceiverUrl
+$r0 = $r
 
 Write-Host "2. the bootstrap operator signs in through it"
 $signin = Get-ScnehauxToken -Username "bootstrap-operator" -Password $env:IDENTITY_CALLER_PASSWORD `
@@ -163,9 +169,89 @@ if ($delay -gt $propagationBudget) {
     Write-Host "::warning::the logout token took $delay s, over the 2 s command budget"
 }
 
+# End-Session signs in through the client, ends that session through the API, and returns the claims
+# of its token and the first request the receiver recorded after it.
+function End-Session([string] $label) {
+    $signin = Get-ScnehauxToken -Username "bootstrap-operator" -Password $env:IDENTITY_CALLER_PASSWORD `
+        -ClientId $clientKey -KeyFile $keyFile -RedirectUri $redirect -FullResponse @operatorTotp
+    $claims = Decode-Part $signin.access_token 1
+    $sessions = Send "GET" "$api/v1/me/sessions" $null $signin.access_token $null
+    $current = @($sessions.json.sessions | Where-Object { $_.current -eq $true })
+    if ($current.Count -ne 1) { throw "$($label): the current session is not listed: $($sessions.text)" }
+    $before = if (Test-Path $Received) { @(Get-Content $Received).Count } else { 0 }
+    $r = Send "POST" "$api/v1/me/sessions/$($current[0].security_ref):terminate" $null $signin.access_token `
+        @{ "Idempotency-Key" = "logout-proof-$label-$run" }
+    if ($r.code -notin @(200, 202)) { throw "$($label): the session was not ended: $($r.text)" }
+    $operation = $r.json
+    for ($i = 0; $i -lt 600 -and $operation.state -notin @("applied", "refused", "unresolved"); $i++) {
+        Start-Sleep -Milliseconds 100
+        $operation = (Send "GET" "$api/v1/me/security-operations/$($operation.operation_id)" $null $signin.access_token $null).json
+    }
+    if ($operation.state -ne "applied") { throw "$($label): the session removal is $($operation.state)" }
+    $record = $null
+    for ($i = 0; $i -lt 100 -and -not $record; $i++) {
+        if (Test-Path $Received) {
+            $lines = @(Get-Content $Received)
+            if ($lines.Count -gt $before) { $record = $lines[$before] | ConvertFrom-Json }
+        }
+        if (-not $record) { Start-Sleep -Milliseconds 100 }
+    }
+    return @{ claims = $claims; record = $record }
+}
+
+Write-Host "5. the URI moves by a registration change, and the next logout arrives there"
+$movedUrl = "$ReceiverUrl/moved"
+$movedPath = ([Uri] $movedUrl).AbsolutePath
+$firstPath = ([Uri] $ReceiverUrl).AbsolutePath
+$registrationId = $r0.json.registration_id
+# A fresh provider token: the first may be near the end of its lifetime, and a command asks for a
+# recent authentication (TDD-identity-control-005 §Step-Up).
+$provider = Get-ScnehauxToken -Username "bootstrap-operator" -Password $env:IDENTITY_CALLER_PASSWORD `
+    -KeyFile $env:IDENTITY_CALLER_KEY_FILE @operatorTotp
+$read = Send "GET" "$api/v1/registrations/$registrationId" $null $provider $null
+Expect "the registration is read" $read.code 200
+$change = Send "POST" "$api/v1/registrations/$registrationId/changes" `
+    (@{ backchannel_logout_uri = $movedUrl; expected_version = $read.json.version } | ConvertTo-Json -Compress) $provider `
+    @{ "Idempotency-Key" = "logout-proof-move-$run"; "X-Administrative-Reason" = "deploy-dev: the BFF's logout endpoint moves" }
+Expect "the change is recorded" $change.code 201
+if ($change.code -ne 201) { Write-Host "        $($change.text)"; exit 1 }
+Expect "of the backchannel_logout_uri kind" $change.json.kind "backchannel_logout_uri"
+Expect "applied at once outside production" $change.json.state "applied"
+Expect "naming the URI it replaces" $change.json.previous_backchannel_logout_uri $ReceiverUrl
+$after = Send "GET" "$api/v1/registrations/$registrationId" $null $provider $null
+Expect "the registration names the new URI" $after.json.backchannel_logout_uri $movedUrl
+Expect "at the next version" $after.json.version ($read.json.version + 1)
+$moved = End-Session "moved"
+Expect "a logout request arrived after the change" ([bool]$moved.record) $true
+if ($moved.record) {
+    $movedToken = Decode-Part $moved.record.logout_token 1
+    Expect "at the new URI" $moved.record.path $movedPath
+    Expect "not at the first" ($moved.record.path -eq $firstPath) $false
+    Expect "naming the session ended" $movedToken.sid $moved.claims.sid
+}
+
+Write-Host "6. a sweep finds the client in sync, and a second change removes the URI"
+$sweep = Send "POST" "$api/v1/registrations:reconcile" $null $provider $null
+Expect "the registrations are swept" $sweep.code 200
+$findings = Send "GET" "$api/v1/registrations/$registrationId/findings" $null $provider $null
+$open = @($findings.json.findings | Where-Object { $_.field_class -eq "logout" -and -not $_.converged_at })
+Expect "no open logout finding" $open.Count 0
+$removal = Send "POST" "$api/v1/registrations/$registrationId/changes" `
+    (@{ backchannel_logout_uri = ""; expected_version = $after.json.version } | ConvertTo-Json -Compress) $provider `
+    @{ "Idempotency-Key" = "logout-proof-remove-$run"; "X-Administrative-Reason" = "deploy-dev: the BFF stops receiving logouts" }
+Expect "the removal is applied" "$($removal.code) $($removal.json.state)" "201 applied"
+Expect "the change records no URI after it" ($null -eq $removal.json.backchannel_logout_uri) $true
+$removed = Send "GET" "$api/v1/registrations/$registrationId" $null $provider $null
+Expect "the registration names no URI" ([string]::IsNullOrEmpty($removed.json.backchannel_logout_uri)) $true
+$sweep = Send "POST" "$api/v1/registrations:reconcile" $null $provider $null
+$findings = Send "GET" "$api/v1/registrations/$registrationId/findings" $null $provider $null
+$open = @($findings.json.findings | Where-Object { $_.field_class -eq "logout" -and -not $_.converged_at })
+Expect "still no open logout finding after the removal" $open.Count 0
+
 $summary = @("## Back-channel logout · a registered client", "",
     "| Registered | Ended | Received | Delay |", "| :-- | :-- | :-- | :-- |",
-    "| ``$clientKey`` with ``backchannel_logout_uri`` | ``POST /v1/me/sessions/{ref}:terminate`` | logout token, ``sid`` of the session | $delay s |")
+    "| ``$clientKey`` with ``backchannel_logout_uri`` | ``POST /v1/me/sessions/{ref}:terminate`` | logout token, ``sid`` of the session | $delay s |",
+    "| the URI moved by a ``backchannel_logout_uri`` change | the next session | at ``$movedPath``, not ``$firstPath`` | |")
 if ($env:GITHUB_STEP_SUMMARY) { $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8 }
 
 Remove-Item -Force $keyFile

@@ -1569,7 +1569,7 @@ table "registration_owner" {
 
 table "registration_change" {
   schema  = schema.identity
-  comment = "A change to a registration's redirect URIs, audience or lifetime class, proposed, then applied or decided against. TDD-identity-control-003."
+  comment = "A change to a registration's redirect URIs, audience, lifetime class or back-channel logout URI, proposed, then applied or decided against. TDD-identity-control-003."
 
   column "change_id" {
     null = false
@@ -1625,6 +1625,19 @@ table "registration_change" {
   }
 
   column "lifetime_class" {
+    null = true
+    type = text
+  }
+
+  // A confidential client's back-channel logout URI when the change was proposed, and the URI
+  // proposed; null is none, so a null after is the URI removed (ADR-IAM-009 §5.1,
+  // TDD-identity-control-003 1.38.0).
+  column "previous_backchannel_logout_uri" {
+    null = true
+    type = text
+  }
+
+  column "backchannel_logout_uri" {
     null = true
     type = text
   }
@@ -1706,7 +1719,7 @@ table "registration_change" {
   }
 
   check "registration_change_kind_check" {
-    expr = "(kind = ANY (ARRAY['redirect_uris'::text, 'audience'::text, 'lifetime_class'::text])) AND ((kind = 'redirect_uris'::text) = ((redirect_uris IS NOT NULL) AND (previous_redirect_uris IS NOT NULL))) AND ((kind = 'audience'::text) = ((audience IS NOT NULL) AND (previous_audience IS NOT NULL))) AND ((kind = 'lifetime_class'::text) = ((lifetime_class IS NOT NULL) AND (previous_lifetime_class IS NOT NULL)))"
+    expr = "(kind = ANY (ARRAY['redirect_uris'::text, 'audience'::text, 'lifetime_class'::text, 'backchannel_logout_uri'::text])) AND ((kind = 'redirect_uris'::text) = ((redirect_uris IS NOT NULL) AND (previous_redirect_uris IS NOT NULL))) AND ((kind = 'audience'::text) = ((audience IS NOT NULL) AND (previous_audience IS NOT NULL))) AND ((kind = 'lifetime_class'::text) = ((lifetime_class IS NOT NULL) AND (previous_lifetime_class IS NOT NULL))) AND ((kind = 'backchannel_logout_uri'::text) = (backchannel_logout_uri IS DISTINCT FROM previous_backchannel_logout_uri))"
   }
 
   check "registration_change_lifetime_check" {

@@ -195,6 +195,37 @@ func TestAnAudienceChangeReachesTheServiceAsAsked(t *testing.T) {
 	}
 }
 
+// A back-channel logout URI change carries the URI as given, and "" to remove it: absent and empty
+// are different requests (TDD-identity-control-003 1.38.0).
+func TestABackChannelLogoutURIChangeReachesTheServiceAsAsked(t *testing.T) {
+	owner, owned := mustUUID(t), mustUUID(t)
+	registrar := &stubRegistrar{owners: map[id.UUID]id.UUID{owned: owner}}
+	handler := registrarHandler(t, registrar)
+	path := "/v1/registrations/" + owned.String() + "/changes"
+
+	const uri = "https://bff.example.com/auth/back-channel-logout"
+	if w := serve(handler, asOwner(changeRequest(http.MethodPost, path, `{"backchannel_logout_uri":"`+uri+`","expected_version":2}`), owner)); w.Code != http.StatusCreated {
+		t.Fatalf("an owner's logout URI change answered %d: %s", w.Code, w.Body)
+	}
+	got := registrar.proposal
+	if got == nil || got.BackChannelLogoutURI == nil || *got.BackChannelLogoutURI != uri || got.RedirectURIs != nil ||
+		got.Audience != nil || got.LifetimeClass != nil {
+		t.Fatalf("the logout URI change reached the service as %+v", got)
+	}
+
+	if w := serve(handler, asOwner(changeRequest(http.MethodPost, path, `{"backchannel_logout_uri":"","expected_version":3}`), owner)); w.Code != http.StatusCreated {
+		t.Fatalf("a removal answered %d: %s", w.Code, w.Body)
+	}
+	if got := registrar.proposal; got.BackChannelLogoutURI == nil || *got.BackChannelLogoutURI != "" {
+		t.Errorf("a removal reached the service as %v; it must stay distinct from absent", got.BackChannelLogoutURI)
+	}
+
+	registrar.err = fmt.Errorf("%w: a backchannel_logout_uri is https in production", registration.ErrInvalid)
+	if w := serve(handler, asOwner(changeRequest(http.MethodPost, path, `{"backchannel_logout_uri":"http://bff/logout","expected_version":4}`), owner)); w.Code != http.StatusBadRequest {
+		t.Errorf("a refused URI answered %d, want 400", w.Code)
+	}
+}
+
 // A failure the kernel caused may pass on a retry and answers 503; any other is not the kernel's and
 // answers 500, so the message never blames a kernel that was not called.
 func TestAChangeFailureNamesWhoseItIs(t *testing.T) {
