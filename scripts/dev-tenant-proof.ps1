@@ -11,7 +11,10 @@
 #      issued for it is refused. The revocation's accept-to-enforcement delay is measured, from the
 #      delivery's 202 to the kernel's Organization no longer listing the member, read through the
 #      Admin API every 50 ms, and goes to the job summary against this service's 2-second share
-#      (TDD-identity-control-002 2.4.0). Above 60 s, SAD-001 §7.7's propagation budget, it fails.
+#      (TDD-identity-control-002 2.4.0). Above 60 s, SAD-001 §7.7's propagation budget, it fails;
+#   3. the operator's routes (TDD-identity-control-002 2.5.0): the Tenant is not listed unconverged once
+#      converged, the findings are read, a re-drive makes it converge again and one of an unknown
+#      Tenant is refused, and a sweep on request records its run.
 #
 # Two phases, because the service reads its delivering workload at start:
 #
@@ -300,6 +303,42 @@ $refreshBody = $refresh.Content.ReadAsStringAsync().Result
 Expect "the refresh issued for the Tenant is refused" ([int]$refresh.StatusCode) 400
 $refreshError = try { ($refreshBody | ConvertFrom-Json).error } catch { "" }
 Expect "as invalid_grant" $refreshError "invalid_grant"
+
+Write-Host "5. the operator's view of the projection"
+$provider = Get-ScnehauxToken -Username "bootstrap-operator" -Password $env:IDENTITY_CALLER_PASSWORD `
+    -KeyFile $env:IDENTITY_CALLER_KEY_FILE @operatorTotp
+function Operator([string] $method, [string] $path, [string] $reason) {
+    $request = New-Object System.Net.Http.HttpRequestMessage($method, "$api$path")
+    $request.Headers.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", $provider)
+    if ($reason) { $request.Headers.Add("X-Administrative-Reason", $reason) }
+    $response = $client.SendAsync($request).Result
+    $text = $response.Content.ReadAsStringAsync().Result
+    $json = $null
+    if ($text) { try { $json = $text | ConvertFrom-Json } catch { $json = $null } }
+    return @{ code = [int]$response.StatusCode; json = $json; body = $text }
+}
+function Unconverged-Tenant {
+    $listed = Operator "GET" "/v1/projections/tenant-context:unconverged" $null
+    if ($listed.code -ne 200) { throw "the unconverged listing answered $($listed.code): $($listed.body)" }
+    return @($listed.json.tenants | Where-Object { $_.tenant_id -eq $tenant })
+}
+Expect "the converged Tenant is not listed unconverged" (Unconverged-Tenant).Count 0
+$findings = Operator "GET" "/v1/projections/tenant-context:findings?limit=50" $null
+Expect "the projection findings are read" $findings.code 200
+$r = Operator "POST" "/v1/projections/tenant-context/tenants/${tenant}:redrive" "deploy-dev: converge the Tenant again"
+Expect "a re-drive is accepted" $r.code 202
+$converged = $false
+for ($i = 0; $i -lt 60; $i++) {
+    if ((Unconverged-Tenant).Count -eq 0) { $converged = $true; break }
+    Start-Sleep -Milliseconds 500
+}
+Expect "the re-driven Tenant converges again" $converged $true
+$r = Operator "POST" "/v1/projections/tenant-context/tenants/$(New-UuidV7):redrive" "deploy-dev: no such Tenant"
+Expect "a re-drive of an unknown Tenant is refused" $r.code 404
+$r = Operator "POST" "/v1/projections/tenant-context:sweep" $null
+Expect "a sweep on request runs" $r.code 200
+Expect "and records its run" ([bool]$r.json.run_id) $true
+Expect "converged or drift" ($r.json.outcome -in @("converged", "drift")) $true
 
 Write-Host ""
 if ($failures -gt 0) { Write-Host "$failures case(s) failed."; exit 1 }

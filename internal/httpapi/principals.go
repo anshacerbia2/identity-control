@@ -30,6 +30,9 @@ const maxBodyBytes = 64 << 10
 type Provisioner interface {
 	Create(ctx context.Context, req provisioning.CreateRequest) (provisioning.Response, error)
 	Relink(ctx context.Context, req provisioning.RelinkRequest) (provisioning.RelinkResult, error)
+	Release(ctx context.Context, req provisioning.ReleaseRequest) (provisioning.ReleaseResult, error)
+	Pending(ctx context.Context) ([]provisioning.PendingMapping, error)
+	Quarantined(ctx context.Context) ([]provisioning.QuarantinedMapping, error)
 	Dangling(ctx context.Context) ([]provisioning.DanglingFinding, error)
 	Unmapped(ctx context.Context) ([]provisioning.UserFinding, error)
 	Reconcile(ctx context.Context) (provisioning.SweepResult, error)
@@ -123,7 +126,8 @@ func (h *Principals) CreatePrincipal(w http.ResponseWriter, r *http.Request) {
 }
 
 // PrincipalAction handles POST /v1/principals/{principal_id}:{action}. The mux matches whole
-// segments only, so the action is read from the segment here. :relink is the only action built.
+// segments only, so the action is read from the segment here. :relink and :release are built here;
+// :suspend and :restore are the security commands' (routes.go).
 func (h *Principals) PrincipalAction(w http.ResponseWriter, r *http.Request) {
 	principal, ok := callerPrincipal(r)
 	if !ok {
@@ -131,7 +135,7 @@ func (h *Principals) PrincipalAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	raw, action, _ := strings.Cut(r.PathValue("target"), ":")
-	if action != "relink" {
+	if action != "relink" && action != "release" {
 		httpapi.Problem(w, r, httpapi.NotFound, "No such Principal action")
 		return
 	}
@@ -142,7 +146,11 @@ func (h *Principals) PrincipalAction(w http.ResponseWriter, r *http.Request) {
 	}
 	reason := strings.TrimSpace(r.Header.Get(AdministrativeReasonHeader))
 	if reason == "" {
-		httpapi.Problem(w, r, httpapi.ValidationFailed, "A relink requires an X-Administrative-Reason header")
+		httpapi.Problem(w, r, httpapi.ValidationFailed, "A "+action+" requires an X-Administrative-Reason header")
+		return
+	}
+	if action == "release" {
+		h.release(w, r, target, principal, reason)
 		return
 	}
 	result, err := h.provisioner.Relink(r.Context(), provisioning.RelinkRequest{
@@ -158,6 +166,68 @@ func (h *Principals) PrincipalAction(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeProvisioningError(w, r, err)
 	}
+}
+
+// releaseRequest names the kernel user the duplicate triage decided is the person.
+type releaseRequest struct {
+	Username string `json:"username"`
+}
+
+// release handles POST /v1/principals/{principal_id}:release (TDD-identity-control-001 1.18.0): a
+// quarantined mapping bound to the one kernel user left, and moved to suspended.
+func (h *Principals) release(w http.ResponseWriter, r *http.Request, target, principal id.UUID, reason string) {
+	var body releaseRequest
+	decoder := json.NewDecoder(io.LimitReader(r.Body, maxBodyBytes))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&body); err != nil || strings.TrimSpace(body.Username) == "" {
+		httpapi.Problem(w, r, httpapi.ValidationFailed,
+			`A release names the kernel user the triage kept: {"username": "..."}`)
+		return
+	}
+	result, err := h.provisioner.Release(r.Context(), provisioning.ReleaseRequest{
+		PrincipalID: target, ReleasedBy: principal, Reason: reason, Username: body.Username})
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, result)
+	case errors.Is(err, provisioning.ErrReleaseRefused):
+		// The message names a count or a mismatch, never a kernel identifier.
+		httpapi.Problem(w, r, httpapi.StateTransitionRefused, err.Error())
+	case errors.Is(err, provisioning.ErrWorkloadRelease):
+		httpapi.Problem(w, r, httpapi.StateTransitionRefused,
+			"A workload's mapping is not released here: its user is its client's service account")
+	case errors.Is(err, provisioning.ErrInvalidTransition):
+		httpapi.Problem(w, r, httpapi.StateTransitionRefused, "Only a quarantined Principal is released")
+	default:
+		writeProvisioningError(w, r, err)
+	}
+}
+
+// Pending handles GET /v1/principals:pending: the mappings recovery has not resolved, oldest first.
+func (h *Principals) Pending(w http.ResponseWriter, r *http.Request) {
+	if _, ok := callerPrincipal(r); !ok {
+		httpapi.Problem(w, r, httpapi.AuthenticationRequired, "The request carries no authenticated caller")
+		return
+	}
+	found, err := h.provisioner.Pending(r.Context())
+	if err != nil {
+		httpapi.Problem(w, r, httpapi.Internal, "The pending mappings could not be read")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"pending": found})
+}
+
+// Quarantined handles GET /v1/principals:quarantined: the mappings the reconciler holds.
+func (h *Principals) Quarantined(w http.ResponseWriter, r *http.Request) {
+	if _, ok := callerPrincipal(r); !ok {
+		httpapi.Problem(w, r, httpapi.AuthenticationRequired, "The request carries no authenticated caller")
+		return
+	}
+	found, err := h.provisioner.Quarantined(r.Context())
+	if err != nil {
+		httpapi.Problem(w, r, httpapi.Internal, "The quarantined mappings could not be read")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"quarantined": found})
 }
 
 // Dangling handles GET /v1/principals:dangling: active Principals whose Keycloak user is gone.

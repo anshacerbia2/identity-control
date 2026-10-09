@@ -240,6 +240,11 @@ func run() error {
 			"github.com/anshacerbia2/identity-control/internal/registration")); err != nil {
 			return fmt.Errorf("key expiry gauge: %w", err)
 		}
+		// The pending and quarantined mapping gauges (TDD-identity-control-001 1.18.0).
+		if err := provisioner.Instrument(exported.MeterProvider.Meter(
+			"github.com/anshacerbia2/identity-control/internal/identity/provisioning")); err != nil {
+			return fmt.Errorf("mapping gauges: %w", err)
+		}
 	}
 
 	// A provider's reads of another Principal (TDD-identity-control-005). The kernel's security
@@ -409,6 +414,29 @@ func run() error {
 	// Each projected emergency grant's last use, reported on its route (ADR-ORG-002 §5.2).
 	routesConfig.EmergencyGrants = providers
 
+	// The Tenant context sweep, built before the routes because an operator runs it on request and
+	// re-drives a Tenant through it (TDD-identity-control-002 2.5.0). It reads Organization's snapshot as
+	// this service's workload when one is configured, and sweeps the kernel either way (2.1.0).
+	var snapshotSource tenantcontext.SnapshotSource
+	if frontier != nil {
+		snapshotSource = frontier
+	}
+	tenantSweep, err := tenantcontext.NewReconciler(desired, pool, kernel, keycloak.Realm(cfg.KeycloakRealm),
+		snapshotSource, logger)
+	if err != nil {
+		return fmt.Errorf("tenant context reconciler: %w", err)
+	}
+	if exported != nil {
+		projectionMeter := exported.MeterProvider.Meter("github.com/anshacerbia2/identity-control/internal/tenantcontext")
+		if err := desired.Instrument(projectionMeter); err != nil {
+			return fmt.Errorf("tenant context intake metrics: %w", err)
+		}
+		if err := tenantSweep.Instrument(projectionMeter); err != nil {
+			return fmt.Errorf("tenant context sweep metrics: %w", err)
+		}
+	}
+	routesConfig.TenantOperator = tenantSweep
+
 	surface, err := httpapi.Routes(routesConfig)
 	if err != nil {
 		return fmt.Errorf("routes: %w", err)
@@ -503,17 +531,6 @@ func run() error {
 		return fmt.Errorf("tenant context converger: %w", err)
 	}
 	go converger.Run(ctx)
-	// The reconciliation sweep reads Organization's snapshot as this service's workload, when one is
-	// configured, and sweeps the kernel either way (TDD-identity-control-002 2.1.0).
-	var snapshotSource tenantcontext.SnapshotSource
-	if frontier != nil {
-		snapshotSource = frontier
-	}
-	tenantSweep, err := tenantcontext.NewReconciler(desired, pool, kernel, keycloak.Realm(cfg.KeycloakRealm),
-		snapshotSource, logger)
-	if err != nil {
-		return fmt.Errorf("tenant context reconciler: %w", err)
-	}
 	go scheduleTenantSweeps(ctx, tenantSweep, cfg.ProjectionReconcileInterval, logger)
 	go scheduleKernelEventSweeps(ctx, kernelEvents, cfg.KernelEventInterval, logger)
 	go scheduleWorkloadSweeps(ctx, workloads, cfg.WorkloadSweepInterval, logger)

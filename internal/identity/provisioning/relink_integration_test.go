@@ -51,6 +51,8 @@ func newPortability(t *testing.T) *portability {
 			`DELETE FROM identity.principal_finding WHERE realm = $1`,
 			`DELETE FROM identity.principal_relink WHERE principal_id IN
 			   (SELECT principal_id FROM identity.principal_mapping WHERE realm = $1)`,
+			`DELETE FROM identity.principal_release WHERE principal_id IN
+			   (SELECT principal_id FROM identity.principal_mapping WHERE realm = $1)`,
 			`DELETE FROM identity.principal_mapping WHERE realm = $1`,
 		} {
 			if _, err := tx.Exec(ctx, statement, string(portabilityRealm)); err != nil {

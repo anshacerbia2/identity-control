@@ -21,7 +21,9 @@
 #      fake's to prove; one carrying an identifier no mapping holds is an orphan, disabled under
 #      IDENTITY_UNMAPPED_USERS=disable; a second user carrying a Principal's identifier disables
 #      both and quarantines the mapping; no service-account user is a finding; deleting the users
-#      resolves their findings
+#      resolves their findings; the quarantined mapping is listed, refused a release while two users
+#      carry it or naming the wrong one, released to suspended once one is left, and returned to
+#      service by :restore (TDD-identity-control-001 1.18.0)
 #   7. a workload's keys rotate with an overlap and revoke at once, and a key added in the console
 #      blocks the client until an operator's reconcile puts back exactly the registered keys; its
 #      grants are its last authentication, its owner reviews it, and its client deleted in the
@@ -340,11 +342,40 @@ Expect "no service-account user is a finding" @($open | Where-Object { "$(Get-Pr
 Expect "the orphan is disabled" (Kc "GET" "/users/$forged" $null).json.enabled $false
 Expect "the duplicate is disabled" (Kc "GET" "/users/$copy" $null).json.enabled $false
 Expect "and so is the Principal's own user" (Kc "GET" "/users/$duplicatedOwn" $null).json.enabled $false
+$held = @((Api "GET" "/v1/principals:quarantined" $null $null).json.quarantined | Where-Object { $_.principal_id -eq $duplicated })
+Expect "the quarantined mapping is listed" $held.Count 1
+Expect "bound to its own user" (Get-Prop $held[0] "linked") $true
+$releaseReason = @{ "X-Administrative-Reason" = "proof-b: the console copy was the extra user and is deleted" }
+$r = Api "POST" "/v1/principals/${duplicated}:release" "{`"username`":`"proofb.duplicated.$run6`"}" $releaseReason
+Expect "a release while two users carry it is refused" $r.code 409
 foreach ($user in @($forged, $copy)) { [void](Kc "DELETE" "/users/$user" $null) }
 [void](Api "POST" "/v1/principals:reconcile" $null $null)
 $left = @((Api "GET" "/v1/principals:unmapped" $null $null).json.unmapped | Where-Object { "$(Get-Prop $_ 'username')" -like "proofb-*-$run6" })
 Expect "deleting the users resolves their findings" $left.Count 0
+$r = Api "POST" "/v1/principals/${duplicated}:release" "{`"username`":`"proofb-copy-$run6`"}" $releaseReason
+Expect "a release naming the deleted user is refused" $r.code 409
+$r = Api "POST" "/v1/principals/${duplicated}:release" "{`"username`":`"proofb.duplicated.$run6`"}" $releaseReason
+Expect "released once one user is left" $r.code 200
+Expect "to suspended, not active" (Get-Prop $r.json "state") "suspended"
+Expect "the user stays disabled" (Kc "GET" "/users/$duplicatedOwn" $null).json.enabled $false
+$held = @((Api "GET" "/v1/principals:quarantined" $null $null).json.quarantined | Where-Object { $_.principal_id -eq $duplicated })
+Expect "no longer listed as quarantined" $held.Count 0
+$read = Api "GET" "/v1/principals/$duplicated" $null $null
+Expect "the Principal reads suspended" (Get-Prop $read.json "state") "suspended"
+$r = Api "POST" "/v1/principals/${duplicated}:restore" "{`"expected_version`":$(Get-Prop $read.json 'security_version')}" `
+    @{ "X-Administrative-Reason" = "proof-b: the duplicate is resolved; return the person to service" }
+Expect "a restore is accepted" ($r.code -in @(200, 202)) $true
+$operation = $r.json
+for ($i = 0; $i -lt 100 -and (Get-Prop $operation "state") -notin @("applied", "refused", "unresolved"); $i++) {
+    Start-Sleep -Milliseconds 200
+    $operation = (Api "GET" "/v1/security-operations/$(Get-Prop $operation 'operation_id')" $null $null).json
+}
+Expect "and applied" (Get-Prop $operation "state") "applied"
+Expect "the user is enabled again" (Kc "GET" "/users/$duplicatedOwn" $null).json.enabled $true
+$pending = Api "GET" "/v1/principals:pending" $null $null
+Expect "the pending mappings are listed" $pending.code 200
 Record "Users made in the console" "orphan and duplicate recorded and disabled; no unmapped user can be made" "resolved once the users were deleted"
+Record "Quarantine left" "refused while two users carry it; released to suspended once one is left" "restored to service by :restore"
 
 Write-Host ""
 Write-Host "7. client keys: rotation, revocation, and a key added in the console"

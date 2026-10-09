@@ -259,6 +259,10 @@ type AdminClient interface {
 	// not. It is idempotent — disabling an already-disabled user succeeds.
 	DisableUser(ctx context.Context, realm Realm, userID UserID) error
 
+	// LogoutUser ends every session the user holds. A released quarantine lands in suspended, whose
+	// user holds no session (TDD-identity-control-001 1.18.0 §Leaving Quarantine). Idempotent.
+	LogoutUser(ctx context.Context, realm Realm, userID UserID) error
+
 	// WriteWorkloadIdentity writes a workload's claim-source attributes on the service-account
 	// user of its client: its principal_id, subject_type=workload and workload_owner. A client
 	// credentials token is issued for that user and no other, so this is the only place the

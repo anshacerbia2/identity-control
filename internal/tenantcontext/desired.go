@@ -9,6 +9,8 @@
 package tenantcontext
 
 import (
+	"go.opentelemetry.io/otel/metric"
+
 	"context"
 	"encoding/json"
 	"errors"
@@ -116,15 +118,31 @@ type Transactor interface {
 
 // Desired applies delivered events to the desired state.
 type Desired struct {
-	tx Transactor
+	tx     Transactor
+	metric shared
 }
 
-// NewDesired builds the intake on the control database.
+// NewDesired builds the intake on the control database. It records no metric until Instrument.
 func NewDesired(tx Transactor) (*Desired, error) {
 	if tx == nil {
 		return nil, errors.New("tenantcontext: a transactor is required")
 	}
-	return &Desired{tx: tx}, nil
+	metrics, err := newShared(nil)
+	if err != nil {
+		return nil, err
+	}
+	return &Desired{tx: tx, metric: metrics}, nil
+}
+
+// Instrument counts the intake's marks on the meter (TDD-identity-control-002 2.5.0). A nil meter
+// counts nothing.
+func (d *Desired) Instrument(meter metric.Meter) error {
+	metrics, err := newShared(meter)
+	if err != nil {
+		return err
+	}
+	d.metric = metrics
+	return nil
 }
 
 // upsertMembershipStatement writes a Membership's state when its version is above the one held.
@@ -156,12 +174,14 @@ WHERE identity.tenant_desired.tenant_version < excluded.tenant_version`
 // markStatement marks a Tenant to converge. A priority mark is due now and stays priority until the
 // Tenant converges. A standard mark is due now unless the Tenant is already pending and backing off,
 // whose schedule it keeps. Either clears an unresolved Tenant's attempts: new desired state is a
-// new reason to try.
-const markStatement = `INSERT INTO identity.tenant_convergence (tenant_id, priority, marked_at, next_attempt_at, state)
-VALUES ($1, $2, now(), now(), 'pending')
+// new reason to try. It sets delivered_at when none is held, so the delay is measured from the first
+// delivery the Tenant has not converged (TDD-identity-control-002 2.5.0).
+const markStatement = `INSERT INTO identity.tenant_convergence (tenant_id, priority, marked_at, next_attempt_at, state, delivered_at)
+VALUES ($1, $2, now(), now(), 'pending', now())
 ON CONFLICT (tenant_id) DO UPDATE
 SET priority        = identity.tenant_convergence.priority OR excluded.priority,
     marked_at       = now(),
+    delivered_at    = coalesce(identity.tenant_convergence.delivered_at, now()),
     next_attempt_at = CASE
         WHEN excluded.priority OR identity.tenant_convergence.state <> 'pending' THEN now()
         ELSE identity.tenant_convergence.next_attempt_at END,
@@ -228,6 +248,9 @@ func (d *Desired) Apply(ctx context.Context, envelope event.Envelope) (delivery.
 	})
 	if err != nil {
 		return delivery.Outcome{}, err
+	}
+	if !outcome.Duplicate && !outcome.Superseded {
+		d.metric.mark(ctx, markDelivery, Priority(envelope.Type), 1)
 	}
 	return outcome, nil
 }
