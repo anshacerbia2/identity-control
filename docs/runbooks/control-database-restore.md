@@ -9,9 +9,9 @@ its data is lost, and says what a restore to an older point does to the kernel, 
 after the backup.
 
 `deploy-dev` proves the procedure on every change and weekly (`scripts/dev-restore-drill.sh`,
-`STD-GLB-002` §Restore Evidence). The drill restores to the instant of its own backup. A real
-restore is older than the last change, and §After a restore to an older point is what the drill
-does not cover.
+`STD-GLB-002` §Restore Evidence). It also drills a restore older than the kernel, and checks the
+reconciliation §After a restore to an older point prescribes, case by case
+(`scripts/dev-restore-older-point.ps1`, `TDD-identity-control-001` 1.18.0 §Restore Evidence).
 
 ## Signals
 
@@ -57,11 +57,15 @@ The service then treats the difference as drift, and repairs the kernel toward t
 
 | Made after the backup | What the restored service sees | What to do |
 | :-- | :-- | :-- |
-| A Principal created | An `orphan` kernel user: it carries a `principal_id` no mapping holds | In `report`, it is only recorded. [Unmapped-Principal triage](unmapped-principal-triage.md) |
-| A client registered | An `unmanaged` client | In `report`, it is only recorded. Register it again from its request record, or adopt it |
-| A registration changed | Drift from the restored registration (`TDD-identity-control-003` §Drift Reconciliation) | A `redirect_uris` difference disables the client, `blocked`. Another class is repaired to the restored value when an admin event attributes it, and recorded `unattributed` otherwise. Repeat each change through the API; the kernel's admin events after the backup list them |
-| A Membership or Tenant event applied | Nothing: Organization Control does not deliver an acknowledged event again | At once, [projection drift repair](projection-drift-repair.md) §The desired state against the authority |
-| A security command, such as a suspension | Nothing: the record is gone, and the kernel keeps the effect | Repeat the command, so the record exists again |
+| A Principal created | An `orphan` kernel user: it carries a `principal_id` no mapping holds | In `report`, it is only recorded and stays enabled. No route binds its identifier to a mapping again (see Gaps). [Unmapped-Principal triage](unmapped-principal-triage.md) decides whether it is replaced |
+| A client registered | An `unmanaged` client | In `report`, it is only recorded. A `confidential` client is adopted from its declaration, which converges the finding; another profile is deleted in the console and registered again |
+| A registration changed | Drift from the restored registration (`TDD-identity-control-003` §Drift Reconciliation) | A `redirect_uris` difference disables the client, `blocked`: `POST /v1/registrations:reconcile` naming the finding applies the restored state and enables it, then the change is repeated through the API. Another class is repaired to the restored value when an admin event attributes it, and recorded `unattributed` otherwise. Repeat each change; the kernel's admin events after the backup list them |
+| A Membership granted, or another Membership or Tenant event applied | The first sweep converges the kernel to the restored desired state: a member granted after the backup is removed and recorded `extra_member`, so the projection fails closed. Organization Control does not deliver an acknowledged event again | At once, [projection drift repair](projection-drift-repair.md) §The desired state against the authority: Organization Control's repair puts the Membership back. A Tenant created after the backup reaches the desired state only through the snapshot, which the sweep reads when Organization Control is configured |
+| A security command, such as a suspension | The record is gone: the Principal reads `active` while the kernel keeps the effect, its user disabled | Repeat the command, so the record exists again |
+
+`deploy-dev` checks the first five rows' reconciliation on every run, and the record is
+`older-point-evidence.json` in the `restore-evidence` artifact. The Tenant row is drilled with a
+Membership; a Tenant created after the backup is not.
 
 Then return `IDENTITY_UNMAPPED_USERS` and `IDENTITY_UNMANAGED_CLIENTS` to `disable`, and
 `docker compose up -d identity-control`.
@@ -92,9 +96,14 @@ Then return `IDENTITY_UNMAPPED_USERS` and `IDENTITY_UNMANAGED_CLIENTS` to `disab
   1 minute, which needs continuous WAL archiving with point-in-time recovery on the production
   platform (`STD-GLB-002` §Restore Evidence). Until it does, a restore loses up to a day.
 - **No switch holds the registration sweep or the Tenant context converger.** The first sweep runs
-  at startup and blocks or repairs registrations toward the restored values, and the converger can act on a
-  restored Membership that Organization Control has since revoked, until the reconciliation in
-  §After a restore to an older point lands. A restore older than the last change has that window.
+  at startup and blocks or repairs registrations toward the restored values, removes members granted
+  after the backup, and the converger can act on a restored Membership that Organization Control has
+  since revoked, until the reconciliation in §After a restore to an older point lands. A restore older
+  than the last change has that window.
+- **A Principal created after the backup cannot be bound again.** Its kernel user carries the
+  `principal_id` the API issued, and Organization Control may hold Memberships under it, but no route
+  adopts an orphan's identifier into a mapping. It stays an `orphan`, and under `disable` its user is
+  disabled. The drill records this case as a gap.
 - **Only the procedure is timed.** The drill measures it on CI data, not on a production-sized
   database.
 - **The drill does not cover `.env` and `keys/`.** It deletes the volume only.

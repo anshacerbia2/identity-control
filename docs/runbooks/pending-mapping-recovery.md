@@ -40,6 +40,11 @@ It runs before every Principal sweep, at startup and every `IDENTITY_REGISTRATIO
   progress; retry after it completes"). This holds only while the mapping is pending: recovery
   completes the key (`TDD-identity-control-001` 1.14.0).
 
+- **Gauge:** `identity.principal.pending{overdue="true"}` above zero: a mapping pending past
+  `IDENTITY_PENDING_RECOVERY_AFTER` (`TDD-identity-control-001` 1.18.0).
+- **API:** `GET /v1/principals:pending` lists every pending mapping, oldest first, with `username`,
+  `created_at` and `overdue`.
+
 `TDD-identity-control-001` §Operational Notes classes pending mappings past the recovery threshold as
 a **warning**.
 
@@ -50,11 +55,14 @@ A provider, with a token at `aal2`. `:relink` is a command: it also needs `auth_
 
 ## Steps: a mapping that stays pending
 
-1. **Run recovery now.** Call `POST /v1/principals:reconcile`. `recovered` in the answer counts the
+1. **List them.** `GET /v1/principals:pending`. An entry with `overdue: true` is one recovery has had
+   at least one chance to resolve; one with `overdue: false` is a creation still in flight, which
+   recovery leaves alone until the threshold.
+2. **Run recovery now.** Call `POST /v1/principals:reconcile`. `recovered` in the answer counts the
    mappings it finished. A `503` ("The identity kernel could not be enumerated; retry") means the
    kernel could not be reached. Fix that first: nothing
    recovers without it.
-2. **Read the error for the `principal_id`** from `recovery of one mapping failed`:
+3. **Read the error for the `principal_id`** from `recovery of one mapping failed`:
    - **Unavailable or timeout.** The kernel or the network. Recovery retries at the next sweep, and
      nothing is lost: the mapping is durable.
    - **Forbidden.** The administration client lost `manage-users` or `view-users`
@@ -64,7 +72,7 @@ A provider, with a token at `aal2`. `:relink` is a command: it also needs `auth_
      user with the Principal sweep's findings: it is an `unmapped` or `orphan` finding, or another
      Principal's user. Triage it with [unmapped-Principal triage](unmapped-principal-triage.md).
      Recovery succeeds once the username is free.
-3. **Tell the caller what to retry.** A caller that kept its `Idempotency-Key` gets `409`
+4. **Tell the caller what to retry.** A caller that kept its `Idempotency-Key` gets `409`
    `request-in-progress` while the mapping is pending. Once recovery resolves it, the same key answers
    `201` with the `principal_id` the request minted, and makes no kernel call
    (`TDD-identity-control-001` 1.14.0, `completeCreation` in `provisioner.go`). So the caller retries
@@ -103,7 +111,8 @@ so it holds no password and no authenticator (see Gaps).
 - `GET /v1/principals/{principal_id}` answers `state: active`.
 - `GET /v1/principals:dangling` no longer lists it, and `GET /v1/principals/{principal_id}/findings`
   shows the finding resolved as `relinked` or `user_present`.
-- `recovery of one mapping failed` stops for that `principal_id`.
+- `recovery of one mapping failed` stops for that `principal_id`, `GET /v1/principals:pending` no
+  longer lists it, and `identity.principal.pending{overdue="true"}` returns to zero.
 
 ## Never do
 
@@ -123,8 +132,8 @@ so it holds no password and no authenticator (see Gaps).
   Before it, the mapping did not record the key, so after recovery a retry with that key answered
   `409` `request-in-progress` for as long as the claim was kept. Mappings written before the fix
   still hold no key (step 3).
-- **No listing of pending mappings, and no metric.** The warning in §Operational Notes, pending past
-  the threshold, has no instrument. Only the log lines show it.
+- **Fixed in `TDD-identity-control-001` 1.18.0: a listing and a metric.** `GET /v1/principals:pending`
+  and the `identity.principal.pending` gauge, by `overdue`, are the warning's instrument.
 - **No route abandons a pending mapping** whose create can never succeed.
 - **No credential path after a relink.** The recreated user has no password or authenticator, and
   this service offers no route to give it one. How the person signs in again is not designed here.
