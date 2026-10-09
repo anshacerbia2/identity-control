@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-003
   title: Protocol Client and Protected-Resource Registration
   owner: Core Platform Team
-  version: 1.37.0
+  version: 1.38.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-11
-  last_reviewed: 2026-10-08
+  last_reviewed: 2026-10-09
   parent_sad: SAD-001
 ---
 
@@ -572,9 +572,10 @@ how a caller retries after a kernel failure. They answer:
 **`backchannel_logout_uri` (1.37.0).** `POST /v1/registrations`, `POST /v1/registrations:adopt` and
 `POST /v1/registration-requests` take it for a `confidential` profile, and a registration's
 representation carries it when it is set. It is written to the kernel client at creation, recovery,
-recreation and restoration, and converged at adoption when `logout` is named (§Adoption). It is not changed
-after registration: no change kind writes it yet, so a URI is corrected by retiring the
-registration and registering the client again.
+recreation and restoration, and converged at adoption when `logout` is named (§Adoption). From
+1.38.0 it changes after registration through a `backchannel_logout_uri` change (§Registration
+Changes), proposed by an owner or a provider and approved in production by another provider. Until
+1.38.0 a URI was corrected only by retiring the registration and registering the client again.
 
 **No response ever carries a secret, because none exists.**
 
@@ -1158,6 +1159,9 @@ writes it on all the same.
 - **Repaired, under the attribution rule**, as `token_lifespan` is. A changed logout configuration
   grants nothing; it delays a revocation to the refresh path. A divergence no admin event names is
   `unattributed`, and an operator's reconcile applies the registered configuration.
+- **Confirmed under the share lock first (1.38.0).** A `backchannel_logout_uri` change writes the
+  kernel before it commits (§Registration Changes), so the sweep reads the URI again under the
+  registration's share lock, and the client again, before it records or repairs a difference.
 - **No drift exception covers it.** A drift exception's field classes are unchanged.
 - **Existing clients do not differ.** A client the Admin API created without these fields holds
   front-channel logout off and no URL. One whose representation named its protocol also holds
@@ -1376,6 +1380,19 @@ it in production. A change has a `kind`:
 
 - **`lifetime_class`** (1.37.0, `ADR-IAM-003 §5.9`), a resource's lifetime class, which moves the
   derived lifespan of every client whose audience names it (STD-IAM-002 §3.3).
+- **`backchannel_logout_uri`** (1.38.0, `ADR-IAM-009 §5.1`), where the kernel posts a confidential
+  client's logout tokens, set, moved or removed.
+
+**Why the back-channel logout URI is a governed change (1.38.0).** It is where the kernel delivers a
+logout token, and a logout token names the person and, with "session required" on, the session: the
+specification's `backchannel_logout_session_required` asks "that a sid (session ID) Claim be included
+in the Logout Token" (`ADR-IAM-009` [R2]). A URI moved to an endpoint the client's owners do not run
+sends that to someone else, and a URI removed turns every session removal into one that reaches the
+client only at its next refresh (`ADR-IAM-009 §5.3`). It is therefore trust configuration in the
+sense of `ADR-IAM-003 §5.2`, as a redirect URI is, and takes the same route: an owner or a provider
+proposes, it applies at once outside production, and in production a provider other than the
+proposer approves it (NIST AC-5). "Session required" is not part of the change: it is not
+registered, and every client this service writes holds it on (§Profiles).
 
 **Why an audience is a governed change.** Keycloak's guidance is to "limit the audience on the token
 to make sure that access tokens contain just limited amount of audiences" [R3], and an
@@ -1390,13 +1407,15 @@ CREATE TABLE identity.registration_change (
     registration_id        UUID        NOT NULL REFERENCES identity.client_registration(registration_id),
     base_version           BIGINT      NOT NULL,
     kind                   TEXT        NOT NULL DEFAULT 'redirect_uris'
-        CHECK (kind IN ('redirect_uris', 'audience', 'lifetime_class')),
+        CHECK (kind IN ('redirect_uris', 'audience', 'lifetime_class', 'backchannel_logout_uri')),
     previous_redirect_uris TEXT[],
     redirect_uris          TEXT[]      CHECK (cardinality(redirect_uris) > 0),
     previous_audience      TEXT[],
     audience               TEXT[],
     previous_lifetime_class TEXT,
     lifetime_class         TEXT,
+    previous_backchannel_logout_uri TEXT,               -- (1.38.0) null: none was registered
+    backchannel_logout_uri TEXT,                        -- (1.38.0) null: the change removes it
     approval_required      BOOLEAN     NOT NULL,
     proposed_by            UUID        NOT NULL,
     proposal_reason        TEXT        NOT NULL CHECK (btrim(proposal_reason) <> ''),
@@ -1415,7 +1434,9 @@ CREATE TABLE identity.registration_change (
     CONSTRAINT registration_change_kind_check
         CHECK ((kind = 'redirect_uris') = (redirect_uris IS NOT NULL AND previous_redirect_uris IS NOT NULL)
            AND (kind = 'audience') = (audience IS NOT NULL AND previous_audience IS NOT NULL)
-           AND (kind = 'lifetime_class') = (lifetime_class IS NOT NULL AND previous_lifetime_class IS NOT NULL)),
+           AND (kind = 'lifetime_class') = (lifetime_class IS NOT NULL AND previous_lifetime_class IS NOT NULL)
+           AND (kind = 'backchannel_logout_uri') =
+               (backchannel_logout_uri IS DISTINCT FROM previous_backchannel_logout_uri)),
     CONSTRAINT registration_change_lifetime_check
         CHECK ((lifetime_class IS NULL OR lifetime_class IN ('L0','L1','L2','L3'))
            AND (previous_lifetime_class IS NULL OR previous_lifetime_class IN ('L0','L1','L2','L3')))
@@ -1526,6 +1547,39 @@ apply(lifetime change), under the resource's row lock:
 - **The version is the resource's.** A proposal is pinned to the resource's version, which the apply
   moves. A caller's audience change does not move it, so the set of callers a waiting proposal will
   move is the set at its approval, not at its proposal. No route lists a resource's callers yet.
+
+A back-channel logout URI change (1.38.0, `ADR-IAM-009 §5.1`) validates as registration validates the
+URI, and writes one kernel attribute:
+
+```text
+propose(registration, backchannel_logout_uri, expected_version, reason, caller):
+    refuse unless the registration is an active confidential client       400 for any other profile
+    a URI: absolute, no fragment, no credentials, no wildcard, https or http   400
+    an http URI in production                                               400
+    "" removes the URI; refuse removing one that is not registered          400
+    refuse the registered URI                                               400
+    then as above: pinned to expected_version, one open change, applied now or proposed
+
+apply(logout change), under the registration's row lock:
+    write backchannel_logout_uri, null for a removal, and version + 1
+    patch the kernel client's backchannel.logout.url, "" removing it, with front-channel
+        logout off and "session required" on, as registration writes them (§Profiles)
+    on a kernel failure roll back                                            503, retry
+```
+
+- **The body names the whole new value.** `{"backchannel_logout_uri": "https://…"}` sets or moves it,
+  and `{"backchannel_logout_uri": ""}` removes it. The record holds the URI before and after, null
+  for none, so the approver reads what changes; the kind check holds that the two differ.
+- **Only a confidential client.** The constraint on `client_registration` already holds a URI to
+  `confidential` (§Data Model), and the proposal is refused before it is recorded, with the reason.
+- **Compared by the sweep, confirmed first.** The apply writes the kernel before it commits the URI the
+  sweep reads, so a `logout` divergence is read again under the registration's share lock before it
+  is acted on, as an audience or a key divergence is (§Drift Reconciliation). Without that, a sweep
+  between the kernel write and the commit would repair the client back to the old URI.
+- **A logout in flight is not retried.** The kernel posts a logout token once and does not retransmit
+  it "unless the OP suspects that previous transmissions may have failed due to potentially
+  recoverable errors" (`ADR-IAM-009` [R2] §2.5). A session removed while the change is applied is
+  told to whichever URI the client held at that instant; the next one goes to the new URI.
 
 | Ref | Source |
 | :-- | :-- |
@@ -1902,6 +1956,17 @@ two creates nothing.
   provider's applies it and moves the callers.
 - A kernel that refuses one caller leaves the class and the version unchanged, records no change,
   and puts back the lifespan of the callers already written.
+- A back-channel logout URI change on a client that is not confidential, to a URI registration would
+  refuse, to an http URI in production, to the registered URI, or removing a URI that is not
+  registered, is refused; so is one carrying a second kind (1.38.0).
+- An applied back-channel logout URI change writes the URI, or null, and the version, and the kernel
+  client's back-channel URL with front-channel logout off. A sweep after it finds the client in sync;
+  a sweep that reads the old URI while the change is in flight confirms under the share lock and
+  records nothing.
+- In production a back-channel logout URI change waits, its proposer's approval is refused, and
+  another provider's applies it. `deploy-dev` moves a registered client's URI to a second receiver
+  and proves the next logout token arrives there and not at the first
+  (`scripts/dev-back-channel-logout-proof.ps1`).
 
 ### Application Developers
 
@@ -2047,6 +2112,7 @@ compromised client key, expired client key recovery, and registration drift repa
 | Governed by | ADR-IAM-008 §5.1 — the `per-sign-in` privileged form, confidential only, with no form scope as a default (1.32.0) |
 | Governed by | ADR-IAM-009 §5.1–§5.3 — a confidential client's back-channel logout URI, front-channel logout off on every client, none for a client the kernel cannot reach (1.37.0) |
 | Governed by | ADR-IAM-003 §5.9 — a resource's lifetime class changes as a registration change (1.37.0) |
+| Governed by | ADR-IAM-003 §5.2, ADR-IAM-009 §5.1 — a confidential client's back-channel logout URI changes as a registration change, approved in production by a provider other than its proposer (1.38.0) |
 | Conforms to | STD-IAM-002 1.8.0 §3.3 — a lifetime-class change moves every caller's lifespan, approved in production by a second provider (1.37.0) |
 | Conforms to | STD-IAM-001 2.7.0 §3.4 — back-channel logout for a reachable server-side relying party, no front-channel logout (1.37.0) |
 | Conforms to | STD-IAM-002 1.7.0 §3.1.1 — a `privileged` registration names `provider-scope`, `tenant-scoped` or `per-sign-in` (1.32.0) |
