@@ -69,10 +69,17 @@ wait_ready() {
 	return 1
 }
 # env_value and set_env read and write one deploy/dev/.env setting, as an operator edits the file.
+# Compose prefers a variable in its own environment to .env, and the workflow exports .env before the
+# drill runs, so set_env changes the exported value too, or compose would keep the old one.
 env_value() { sed -n "s/^$1=//p" "$deploy/.env" | tail -n 1; }
 set_env() {
 	sed -i "/^$1=/d" "$deploy/.env"
-	[ -z "$2" ] || echo "$1=$2" >> "$deploy/.env"
+	if [ -z "$2" ]; then
+		unset "$1"
+	else
+		echo "$1=$2" >> "$deploy/.env"
+		export "$1=$2"
+	fi
 }
 now() { date +%s.%N; }
 elapsed() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.3f", b - a }'; }
