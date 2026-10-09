@@ -46,6 +46,8 @@ reconciliation §After a restore to an older point prescribes, case by case
    `IDENTITY_UNMAPPED_USERS=report` and `IDENTITY_UNMANAGED_CLIENTS=report` in `.env`. Their first
    sweep runs at startup, and in `disable` it would disable every kernel user and client created
    after the backup (§After a restore to an older point).
+   Run compose from a shell that has not exported `.env` (`set -a; . .env`), or `unset` both there:
+   compose prefers an exported variable to `.env`, and the restore drill met exactly that.
 8. **Start.** `docker compose up -d --build`. The migrate job finds the schema at its revision,
    applies anything newer, and re-asserts every privilege; `docker compose logs migrate` ends with
    `control database ready`. Then `curl -fsS http://127.0.0.1:8082/readyz`.

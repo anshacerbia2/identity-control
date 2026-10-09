@@ -533,7 +533,7 @@ artifact. A daily dump loses up to 24 hours of changes, against the 1-minute RPO
 | :-- | :-- |
 | The build fails at `go mod download` with a certificate error | The network intercepts TLS to the module proxy. Set `GOPROXY=direct` in `.env` and `docker compose up -d --build` |
 | `/readyz` does not answer | The service waits for the migrate job. `docker compose logs migrate` shows which stage failed; the service starts only once it succeeds |
-| A setting in `.env` changes nothing | compose passes a container only the variables `compose.yaml` lists, and a restart keeps the environment the container was created with. Check the variable is listed, then `docker compose up -d identity-control` |
+| A setting in `.env` changes nothing | compose passes a container only the variables `compose.yaml` lists, a restart keeps the environment the container was created with, and a variable exported in the shell wins over `.env` (a shell that ran `set -a; . deploy/dev/.env; set +a` holds the old values). Check the variable is listed, `unset` it in the shell or open a new one, then `docker compose up -d identity-control` |
 | The login form answers "Restart login cookie not found" | The login started on the private port. Log in on the public origin (§One-off tasks, Calling the API) |
 | Every provider route answers 401 with `insufficient_user_authentication` | The token is not `aal2`: a provider route asks for a password and a TOTP code (ADR-IAM-004). Pass `IDENTITY_OPERATOR_TOTP_FILE` to the scripts (§Updating, The server's own TOTP) |
 | Every call answers 401 after §First start step 11 | A caller's token is typed `JWT`, not `at+jwt`: its client was not adopted with `token_format` converged. The log names it by `azp`; apply its registered state (step 10) |
