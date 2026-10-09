@@ -30,13 +30,16 @@ const realm = keycloak.Realm("scnehaux")
 
 // stubProvisioner returns a configured outcome and records what it was asked for.
 type stubProvisioner struct {
-	response provisioning.Response
-	err      error
-	calls    int
-	last     provisioning.CreateRequest
-	relinked *provisioning.RelinkRequest
-	dangling []provisioning.DanglingFinding
-	unmapped []provisioning.UserFinding
+	response    provisioning.Response
+	err         error
+	calls       int
+	last        provisioning.CreateRequest
+	relinked    *provisioning.RelinkRequest
+	released    *provisioning.ReleaseRequest
+	pending     []provisioning.PendingMapping
+	quarantined []provisioning.QuarantinedMapping
+	dangling    []provisioning.DanglingFinding
+	unmapped    []provisioning.UserFinding
 }
 
 func (s *stubProvisioner) Create(_ context.Context, req provisioning.CreateRequest) (provisioning.Response, error) {
@@ -49,6 +52,20 @@ func (s *stubProvisioner) Relink(_ context.Context, req provisioning.RelinkReque
 	s.calls++
 	s.relinked = &req
 	return provisioning.RelinkResult{PrincipalID: req.PrincipalID, State: provisioning.StateActive}, s.err
+}
+
+func (s *stubProvisioner) Release(_ context.Context, req provisioning.ReleaseRequest) (provisioning.ReleaseResult, error) {
+	s.calls++
+	s.released = &req
+	return provisioning.ReleaseResult{PrincipalID: req.PrincipalID, State: "suspended"}, s.err
+}
+
+func (s *stubProvisioner) Pending(context.Context) ([]provisioning.PendingMapping, error) {
+	return s.pending, s.err
+}
+
+func (s *stubProvisioner) Quarantined(context.Context) ([]provisioning.QuarantinedMapping, error) {
+	return s.quarantined, s.err
 }
 
 func (s *stubProvisioner) Dangling(context.Context) ([]provisioning.DanglingFinding, error) {

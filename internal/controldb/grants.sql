@@ -53,6 +53,7 @@ BEGIN
               ('identity.security_operation'),
               ('identity.security_operation_attempt'),
               ('identity.principal_relink'),
+              ('identity.principal_release'),
               ('identity.principal_finding'),
               ('identity.tenant_desired'),
               ('identity.membership_desired'),
@@ -180,6 +181,9 @@ GRANT UPDATE (state, decided_by, decision_reason, decided_at, registration_id) O
 -- A relink record says who moved a Principal to a new Keycloak user and why, so it is insert-only.
 -- A dangling-mapping finding is evidence that a user disappeared, kept after it is resolved.
 REVOKE UPDATE, DELETE, TRUNCATE ON identity.principal_relink FROM identity_runtime;
+-- A release of a quarantined mapping is the record of who lifted an integrity hold, on what reason,
+-- and onto which kernel user (TDD-identity-control-001 1.18.0): insert-only, as a relink is.
+REVOKE UPDATE, DELETE, TRUNCATE ON identity.principal_release FROM identity_runtime;
 REVOKE DELETE, TRUNCATE ON identity.principal_finding FROM identity_runtime;
 -- The provider authority projection (TDD-identity-control-006): written by the delivery intake and
 -- the bootstrap, replaced by version, never deleted. A revoked grant stays as the record a late,

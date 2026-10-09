@@ -82,3 +82,135 @@ func TestAnAdoptionConvergesTheLogoutConfiguration(t *testing.T) {
 		t.Errorf("the adopted client's logout is %+v", live.Logout)
 	}
 }
+
+// logoutProposal is a back-channel logout URI change; "" removes the URI (TDD-identity-control-003 1.38.0).
+func (h *harness) logoutProposal(registration Registration, uri string) Proposal {
+	return Proposal{RegistrationID: registration.ID, BackChannelLogoutURI: &uri, ExpectedVersion: registration.Version,
+		ProposedBy: h.caller, Reason: "the BFF's logout endpoint moves", Provider: true}
+}
+
+// Outside production a back-channel logout URI change applies at once: desired state, the version and
+// the kernel client move together, and a removal leaves front-channel logout off and no URL.
+func TestABackChannelLogoutURIChangeIsAppliedAtOnce(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	registration, client := h.registerConfidential("logout-change", testKey(t))
+
+	set, created, err := h.service.ProposeChange(ctx, h.logoutProposal(registration, logoutURI))
+	if err != nil || !created || set.State != ChangeApplied || set.Kind != ChangeBackChannelLogout {
+		t.Fatalf("set: %+v, %v, %v", set, created, err)
+	}
+	if set.PreviousBackChannelLogoutURI != nil || stringOf(set.BackChannelLogoutURI) != logoutURI ||
+		set.RedirectURIs != nil || set.Audience != nil || set.LifetimeClass != nil {
+		t.Errorf("the change records %+v", set)
+	}
+	got, _ := h.service.Get(ctx, registration.ID)
+	if got.BackChannelLogoutURI != logoutURI || got.Version != registration.Version+1 {
+		t.Errorf("desired state is %q at version %d", got.BackChannelLogoutURI, got.Version)
+	}
+	if live := h.live(client); live.Logout != keycloak.DesiredLogout(logoutURI) {
+		t.Errorf("the kernel client's logout is %+v", live.Logout)
+	}
+
+	moved := "https://bff.example.com/auth/back-channel-logout-v2"
+	change, _, err := h.service.ProposeChange(ctx, h.logoutProposal(got, moved))
+	if err != nil || stringOf(change.PreviousBackChannelLogoutURI) != logoutURI || stringOf(change.BackChannelLogoutURI) != moved {
+		t.Fatalf("move: %+v, %v", change, err)
+	}
+	got, _ = h.service.Get(ctx, registration.ID)
+	if live := h.live(client); live.Logout != keycloak.DesiredLogout(moved) || got.BackChannelLogoutURI != moved {
+		t.Errorf("a moved URI left %+v and %q", live.Logout, got.BackChannelLogoutURI)
+	}
+
+	removed, _, err := h.service.ProposeChange(ctx, h.logoutProposal(got, ""))
+	if err != nil || removed.State != ChangeApplied || removed.BackChannelLogoutURI != nil ||
+		stringOf(removed.PreviousBackChannelLogoutURI) != moved {
+		t.Fatalf("remove: %+v, %v", removed, err)
+	}
+	got, _ = h.service.Get(ctx, registration.ID)
+	if live := h.live(client); live.Logout != keycloak.DesiredLogout("") || got.BackChannelLogoutURI != "" {
+		t.Errorf("a removed URI left %+v and %q", live.Logout, got.BackChannelLogoutURI)
+	}
+}
+
+func TestABackChannelLogoutURIChangeIsRefusedWhenItBreaksARule(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	confidential, _ := h.registerConfidential("logout-rules", testKey(t))
+	public := h.publicClient("logout-rules-public")
+
+	both := h.logoutProposal(confidential, logoutURI)
+	both.RedirectURIs = movedCallback
+	for name, proposal := range map[string]Proposal{
+		"a public client":               h.logoutProposal(public, logoutURI),
+		"a relative URI":                h.logoutProposal(confidential, "/auth/back-channel-logout"),
+		"a fragment":                    h.logoutProposal(confidential, logoutURI+"#x"),
+		"credentials":                   h.logoutProposal(confidential, "https://user:pw@bff.example.com/logout"),
+		"a wildcard":                    h.logoutProposal(confidential, "https://*.example.com/logout"),
+		"another scheme":                h.logoutProposal(confidential, "ftp://bff.example.com/logout"),
+		"removing a URI not registered": h.logoutProposal(confidential, ""),
+		"two kinds at once":             both,
+	} {
+		if _, _, err := h.service.ProposeChange(ctx, proposal); !errors.Is(err, ErrInvalid) {
+			t.Errorf("%s answered %v, want ErrInvalid", name, err)
+		}
+	}
+	if _, _, err := h.service.ProposeChange(ctx, h.logoutProposal(confidential, logoutURI)); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	got, _ := h.service.Get(ctx, confidential.ID)
+	if _, _, err := h.service.ProposeChange(ctx, h.logoutProposal(got, logoutURI)); !errors.Is(err, ErrInvalid) {
+		t.Errorf("the registered URI answered %v, want ErrInvalid", err)
+	}
+	stale := h.logoutProposal(got, "https://bff.example.com/other")
+	stale.ExpectedVersion--
+	if _, _, err := h.service.ProposeChange(ctx, stale); !errors.Is(err, ErrVersionConflict) {
+		t.Errorf("a stale version answered %v, want ErrVersionConflict", err)
+	}
+
+	h.service.cfg.Production = true
+	if _, _, err := h.service.ProposeChange(ctx, h.logoutProposal(got, "http://bff.internal/logout")); !errors.Is(err, ErrInvalid) {
+		t.Errorf("an http URI in production answered %v, want ErrInvalid", err)
+	}
+}
+
+// In production a back-channel logout URI change waits for a provider other than its proposer, and
+// the kernel is written only when it is approved.
+func TestAProductionBackChannelLogoutURIChangeWaitsForAnotherProvider(t *testing.T) {
+	h := newHarness(t)
+	h.service.cfg.Production = true
+	ctx := context.Background()
+	registration, client := h.registerConfidential("logout-prod", testKey(t))
+
+	change, created, err := h.service.ProposeChange(ctx, h.logoutProposal(registration, logoutURI))
+	if err != nil || !created || change.State != ChangeProposed || !change.ApprovalRequired {
+		t.Fatalf("propose: %+v, %v, %v", change, created, err)
+	}
+	if live := h.live(client); live.Logout != keycloak.DesiredLogout("") {
+		t.Errorf("a waiting change wrote the kernel: %+v", live.Logout)
+	}
+	if again, created, err := h.service.ProposeChange(ctx, h.logoutProposal(registration, logoutURI)); err != nil || created || again.ID != change.ID {
+		t.Errorf("a retried proposal answered %v, %v, %v", again.ID, created, err)
+	}
+	if _, err := h.service.DecideChange(ctx, h.decision(change, DecisionApprove, h.caller), true); !errors.Is(err, ErrSelfApproval) {
+		t.Errorf("the proposer's approval answered %v, want ErrSelfApproval", err)
+	}
+
+	// A kernel that does not answer leaves the proposal open; retried, it applies.
+	approver := h.person("human")
+	h.kernel.FailPatch = errors.New("kernel unavailable")
+	if _, err := h.service.DecideChange(ctx, h.decision(change, DecisionApprove, approver), true); err == nil {
+		t.Fatal("an approval the kernel did not confirm succeeded")
+	}
+	if got, _ := h.service.Get(ctx, registration.ID); got.BackChannelLogoutURI != "" || got.Version != registration.Version {
+		t.Errorf("a failed approval left %q at version %d", got.BackChannelLogoutURI, got.Version)
+	}
+	h.kernel.FailPatch = nil
+	applied, err := h.service.DecideChange(ctx, h.decision(change, DecisionApprove, approver), true)
+	if err != nil || applied.State != ChangeApplied {
+		t.Fatalf("approve: %+v, %v", applied, err)
+	}
+	if live := h.live(client); live.Logout != keycloak.DesiredLogout(logoutURI) {
+		t.Errorf("an approved change left the kernel client's logout %+v", live.Logout)
+	}
+}

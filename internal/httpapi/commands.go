@@ -44,7 +44,7 @@ const missingKey = "This route changes state and requires an " + IdempotencyHead
 // it. The route checks only that the key is present.
 var serviceKeyed = map[string]string{
 	"POST /v1/principals":                                                      "provisioning claims it with the pending mapping (TDD-identity-control-001)",
-	"POST /v1/principals/{target}":                                             ":suspend and :restore are security operations keyed per actor (TDD-identity-control-005); :relink is replayed here",
+	"POST /v1/principals/{target}":                                             ":suspend and :restore are security operations keyed per actor (TDD-identity-control-005); :relink and :release (TDD-identity-control-001 1.18.0) are replayed here",
 	"POST /v1/registrations":                                                   "registration claims it with the pending registration (TDD-identity-control-003)",
 	"POST /v1/workloads":                                                       "the workload path claims it with the pending workload (TDD-identity-control-004)",
 	"POST /v1/me/sessions/{session_action}":                                    "a security operation, keyed per actor (TDD-identity-control-005)",
@@ -94,6 +94,11 @@ var keyOptional = map[string]string{
 	"POST /v1/me/authenticators:enroll": "a read carried in a body: it answers the kernel action that " +
 		"enrolls; the enrolment happens at the kernel, and the row it writes is evidence of the request " +
 		"(TDD-identity-control-005)",
+	"POST /v1/projections/tenant-context:sweep": "a sweep: the scheduled Tenant context sweep, now; a " +
+		"repeat marks the same Tenants and finds what the first left (TDD-identity-control-002 2.5.0)",
+	"POST /v1/projections/tenant-context/tenants/{tenant_action}": "a sweep of one Tenant: a re-drive " +
+		"marks it to converge, and convergence is level-driven, so a repeat converges the same desired " +
+		"state and changes nothing a first did not (TDD-identity-control-002 2.5.0)",
 	"POST /v1/deliveries": "a report identified by the identifier it carries: each event's id passes " +
 		"the inbox guard, so a repeat is acknowledged and applied once (TDD-identity-control-006)",
 }

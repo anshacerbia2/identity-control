@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-002
   title: Tenant Context Projection into the Kernel, and Its Reconciliation
   owner: Core Platform Team
-  version: 2.4.0
+  version: 2.5.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-11
-  last_reviewed: 2026-10-07
+  last_reviewed: 2026-10-09
   parent_sad: SAD-001
 ---
 
@@ -183,6 +183,7 @@ CREATE TABLE identity.tenant_convergence (
     last_error_class   TEXT,
     kernel_org_id      TEXT,
     converged_at       TIMESTAMPTZ,
+    delivered_at       TIMESTAMPTZ,      -- (2.5.0) the earliest delivery not yet converged
     CONSTRAINT tenant_convergence_state_check
         CHECK (state IN ('pending', 'converged', 'unresolved'))
 );
@@ -194,6 +195,12 @@ CREATE INDEX tenant_convergence_claim ON identity.tenant_convergence (priority D
   also sets `priority` and `next_attempt_at = now()`. A mark that arrives during a convergence is
   not lost: the converger finishes as `converged` only if `marked_at` is unchanged since it claimed
   the row, and otherwise leaves it `pending`.
+- **`delivered_at` (2.5.0).** The time of the earliest delivery the Tenant has not yet converged:
+  an event or a repair sets it when it is null, a sweep or a re-drive leaves it, and the convergence
+  that records the Tenant `converged` clears it. A mark that arrives during a convergence keeps it,
+  because that convergence will not be the one that converges the mark. So "delivery to converged" is
+  measured from the first delivery a convergence closes, never from a later mark that merely joined
+  it, which would understate the delay `SAD-001 §7.7` asks to be measured [R5].
 - **Claiming.** A converger claims a row with `FOR UPDATE SKIP LOCKED`, priority first, and holds
   it through `lease_until`. That is the one-item-at-a-time rule [R1], across replicas.
 - **`kernel_org_id`.** The kernel's identifier for the Tenant's Organization, kept once known. When
@@ -241,7 +248,7 @@ Either is the shape a privilege-escalation defect takes, and the record is the e
 - delivery is a post to `POST /v1/deliveries`, deduplicated by `inbox.Guard`;
 - order is decided by the versions, "not delivery order or `streamposition`" [R3];
 - convergence is observed through `tenant_convergence` and the metrics in §Operational Notes, and a
-  sweep through its log line and `identity.tenant_projection.findings`.
+  sweep through its log line, its run record (2.5.0) and `identity.tenant_projection.findings`.
 
 No version of this service ever read or wrote the table, so migration
 `20261007210158_drop_projection_cursor` drops it. It is the contract step of `STD-GLB-002`'s
@@ -326,6 +333,56 @@ GET /v1/projections/tenant-context/report      provider route, aal2
 - **What it does not hold.** No principal, no Tenant, no name: an identifier and a version per
   Membership.
 - **Its route class.** It is a provider route, as every operational read here is.
+
+### Operator Routes (2.5.0)
+
+The projection drift runbook needed four things only the logs and a restart gave it: the Tenants not
+converged, the findings, one Tenant converged again on request, and a sweep on request.
+
+```text
+GET  /v1/projections/tenant-context:unconverged            provider route, aal2
+→ {"tenants": [{"tenant_id", "state", "priority", "sweep", "attempts", "last_error_class",
+                "marked_at", "delivered_at", "next_attempt_at"}]}       pending and unresolved, oldest mark first, at most 500
+GET  /v1/projections/tenant-context:findings[?class=…][&limit=…]
+→ {"findings": [{"finding_id", "finding_class", "tenant_id", "principal_id", "detail", "detected_at"}]}
+                                                            newest first; limit 1–500, default 100
+POST /v1/projections/tenant-context/tenants/{tenant_id}:redrive    X-Administrative-Reason
+→ 202 {"tenant_id", "state": "pending"}                    404 for a Tenant the desired state does not hold
+POST /v1/projections/tenant-context:sweep
+→ 200 {"run_id", "mark", "snapshot_rows", "snapshot_read", "unknown_organizations", "tenants_marked", "outcome"}
+```
+
+- **A re-drive is a sweep of one Tenant.** It marks the Tenant as a sweep marks it: due now, its
+  attempts reset when it was `unresolved`, and `sweep` set, so whatever its convergence has to change
+  is recorded as a finding. It does not touch the desired state, and it does not set `priority` or
+  `delivered_at`: it is not a delivery. The caller and the reason are logged at `WARN`.
+- **Neither command takes an `Idempotency-Key`.** Both are classified `keyOptional` under
+  `STD-GLB-001` 1.4.0: convergence is level-driven [R1], so a repeated re-drive converges the same
+  desired state again and changes nothing a first did not, and a repeated sweep finds what the first
+  left, the same as the scheduled one.
+- **A sweep on request is the scheduled sweep, now.** It runs the same code and records the same run,
+  so an operator need not restart the service to force one.
+- **The findings listing carries no kernel identifier.** A convergence's finding records the kernel
+  user in its `detail` as evidence; the listing serves `detail` without `kernel_user_id`, and
+  `principal_id` names the person, as `TDD-identity-control-001` §Operational Notes keeps
+  `keycloak_user_id` out of every response.
+- **No route changes the desired state.** Only an event or a repair does, each with its inbox guard and
+  its version rule. These routes schedule work and read records.
+
+### Sweep Runs (2.5.0)
+
+Each sweep, scheduled or requested, is recorded in `identity.reconcile_run` with `sweep =
+'tenant_context'` (the table is `TDD-identity-control-003`'s, whose check 1.38.0 widens): started when
+it begins, finished with its outcome and the count of unknown Organizations as `findings`.
+
+| Outcome | When |
+| :-- | :-- |
+| `converged` | the snapshot was read, or there is no snapshot source, and no unknown Organization was found |
+| `drift` | an Organization the authority never created was disabled and emptied |
+| `unresolved` | the snapshot could not be read, or the sweep failed part way |
+
+`identity.tenant_projection.sweep_age` reads the newest finished run, which is how §Operational
+Notes' "Sweep age" is alerted rather than inferred from a missing log line.
 
 ### Applying a Repair (2.2.0)
 
@@ -435,6 +492,7 @@ version, including a suspended or revoked one [R3].
 events order. Without it, a snapshot could not safely say whether a Tenant was suspended.
 
 - **Findings.** A sweep's convergence records a finding for each change it had to make (§Findings).
+- **Runs.** Each sweep is recorded with its outcome (§Sweep Runs, 2.5.0).
 - **Bootstrap.** Bootstrap is the first sweep.
   - It runs before deliveries are applied.
   - It records the snapshot's mark with Organization Control, as `cmd/identity-provider-bootstrap`
@@ -490,6 +548,17 @@ events order. Without it, a snapshot could not safely say whether a Tenant was s
     kernel's Organization no longer listing the member, read through the Admin API every 50 ms. The
     figure goes to the job summary against this service's 2-second share. Above the share is a
     warning, and above `SAD-001 §7.7`'s 60-second propagation budget the job fails [R5].
+- **Metrics and operator routes (2.5.0):**
+  - a delivery sets `delivered_at`, a later mark keeps it, a sweep mark does not set it, and the
+    convergence that records the Tenant converged clears it and records the delay from it;
+  - a convergence left pending by a mark during it records no delay and keeps `delivered_at`;
+  - a re-drive of an unresolved Tenant makes it pending with its attempts reset and `sweep` set, and a
+    re-drive of an unknown Tenant answers `404`;
+  - a sweep records a run, `converged`, `drift` or `unresolved` as above;
+  - the unconverged listing holds pending and unresolved Tenants and no converged one, and the
+    findings listing filters by class;
+  - `deploy-dev` reads both listings, re-drives a Tenant, and runs a sweep on request
+    (`scripts/dev-tenant-proof.ps1`).
 - **Negative:**
   - no code path constructs an Organization database connection: `internal/controldb`'s
     `TestOnlyTheControlDatabaseIsOpened`, beside archcheck's denied driver imports (2.4.0);
@@ -522,8 +591,29 @@ events order. Without it, a snapshot could not safely say whether a Tenant was s
 | `extra_member` or `unknown_organization` finding | — | any |
 | Sweep age | one interval | two intervals |
 
-Metrics, over OTLP as elsewhere in this service:
-`identity.tenant_projection.{marked, converged, duration, attempts, unresolved, findings}`.
+Metrics, over OTLP as elsewhere in this service (2.5.0 builds the ones 2.0.0 named and had not):
+
+| Metric | Instrument | Attributes | Meaning |
+| :-- | :-- | :-- | :-- |
+| `identity.tenant_projection.marked` | counter | `mark`: `delivery`, `sweep`, `redrive`; `priority` | a Tenant marked to converge |
+| `identity.tenant_projection.converged` | counter | `priority` | a convergence recorded `converged`, not left pending by a later mark |
+| `identity.tenant_projection.delivery_to_converged` | histogram, s | `priority` | from `delivered_at` to the convergence recorded; the "Delivery to converged" signal |
+| `identity.tenant_projection.duration` | histogram, s | — | one convergence's kernel calls |
+| `identity.tenant_projection.attempts` | counter | `outcome`: `converged`, `retry`, `unresolved` | a convergence attempt |
+| `identity.tenant_projection.unresolved` | gauge | `priority` | Tenants parked as `unresolved`; a priority one is critical |
+| `identity.tenant_projection.findings` | counter | `finding_class` | a finding recorded, by a sweep's convergence or by the sweep itself |
+| `identity.tenant_projection.sweep_age` | gauge, s | — | since the newest finished sweep run; absent before the first |
+
+- **The delay is the service's share, as `deploy-dev` measures it.** `delivered_at` is the delivery's
+  transaction, the one that answers `202`, so the histogram covers what this service owns of the
+  propagation budget and nothing of Organization Control's (`SAD-001 §7.7` [R5]). Its thresholds are the table's:
+  a recorded delay above 2 s is a warning, and above 4 s critical.
+- **The gauges are state metrics** (`STD-GLB-003` 1.1.0 §State Metrics): read from the Control Database
+  when the reader collects, every attribute value observed with zero included, and nothing observed on a
+  failed read, so an alert fires on absence too. The unresolved gauge gains `priority` in 2.5.0, since
+  the table alerts a priority one at a higher severity than any other.
+- **No alert rule ships in this repository.** The thresholds above are the contract an alerting
+  platform implements; the service exports the instruments.
 
 Runbooks required before production:
 - a revocation not converged within budget;

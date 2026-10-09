@@ -30,8 +30,7 @@ What it does not do:
   two clients.
 - **It does not register other applications' clients yet.** The Admin API client holds
   `manage-users` and `view-users`, as TDD-identity-control-001 states, and `manage-organizations` and
-  `view-organizations`, which TDD-identity-control-002 2.0.0 adds to project Tenants. A server whose
-  client predates them runs `./add-organization-roles.sh` once. Client registration
+  `view-organizations`, which TDD-identity-control-002 2.0.0 adds to project Tenants. Client registration
   (TDD-identity-control-003) has its tables and its own credential, `identity-control-registration`,
   holding `manage-clients`, `view-clients` and `view-events`. The registration drift sweep uses it,
   and the service refuses to start without it.
@@ -118,8 +117,31 @@ design, not a fault.
    with one of the owner's codes first (§Updating, The server's own TOTP).
 9. **Adopt the BFF,** once `identity-experience`'s `create-bff-client.sh` has made it: §Wiring to other
    services, Adopting the BFF.
-10. **Then set `IDENTITY_UNMANAGED_CLIENTS=disable`** in `.env` and recreate the service with
-    `docker compose up -d identity-control`. Before both adoptions it would disable the caller and the BFF.
+10. **Apply the registered state, if anything differs.** Both adoptions converge `token_format` and
+    `audience_scope`, so every client this server holds now carries the token profile (`TDD-identity-control-003`
+    §Profiles) and none should differ. Read the open findings with a provider token:
+    `GET /v1/registrations:drift`, whose `findings` should be empty. A finding there is applied, with
+    its reason, by `POST /v1/registrations:reconcile` naming it
+    (`{"findings":["<finding_id>"]}`, `X-Administrative-Reason`); a `redirect_uris` or `client_keys`
+    finding instead means a declaration was wrong (§Never do).
+11. **End in the production settings.** Put both in `.env`, then recreate the service, since a
+    restart keeps the environment the container was created with:
+
+    ```sh
+    echo IDENTITY_UNMANAGED_CLIENTS=disable >> .env   # a client no registration describes is disabled
+    echo IDENTITY_TOKEN_TYPE=enforce >> .env          # a token not typed at+jwt is refused with 401
+    docker compose up -d identity-control
+    curl -fsS http://127.0.0.1:8082/readyz
+    ```
+
+    Both must wait for step 10: before the caller and the BFF are adopted, `disable` would disable them
+    with every open session, and before they carry the token profile their tokens are typed `JWT`,
+    which `enforce` refuses. `compose.yaml` defaults both to `report`, which is what a server is until
+    this step (`TDD-identity-control-003` §Adoption, `TDD-identity-control-001` §Caller Token).
+    Then check it, with the environment of step 8: `pwsh ./scripts/dev-production-switches.ps1` signs
+    in, requires the token typed `at+jwt` and a provider call to answer, runs a registration sweep and
+    requires no client recorded `unmanaged`. `docker compose logs identity-control | grep 'not typed
+    at+jwt'` then finds nothing. `deploy-dev` runs this step on every change.
 
 ## Updating
 
@@ -132,88 +154,9 @@ docker compose up -d --build
 ```
 
 The migrate job applies whatever is new before the service restarts. The one-off tasks run the
-migrate image, so this rebuilds them too. The subsections below say when a release needs more than this.
-
-### Adding the registration client to a running server
-
-A server stood up before the registration client existed has the two kernel clients and not this
-one. Add it once, without rerunning `create-kernel-clients.sh`:
-
-```sh
-cd identity-control/deploy/dev
-./create-registration-client.sh              # refuses if the client already exists
-```
-
-It creates `identity-control-registration` and its key, and changes nothing else in the realm. Run
-it again and it refuses. A key is replaced by a rotation, below, never by a rerun.
-
-### The token profile, on a server that ran before it
-
-A client registered or adopted before the token profile (`TDD-identity-control-003` §Profiles)
-lacks the at+jwt attribute and the `client_id` mapper, and holds the realm's old default scopes.
-The first sweep after the upgrade records each such client `unattributed` in `token_format` and
-`audience_scope`, because no admin event explains a difference that predates the comparison. Apply
-the registered state once per finding, from the Admin Portal's registration page or with
-`POST /v1/registrations:reconcile` naming the findings and a reason. The clients' access tokens then
-carry `typ` `at+jwt` and `client_id`, and no email, names, or roles.
-
-### Moving a server to `identity-control-api`
-
-A server whose ceremony ran before `ADR-IAM-001 §5.11` rule 5 has no `identity-control-api`
-resource, and its callers' tokens name the Admin API client `identity-control`, which
-STD-IAM-002 §3.1 prohibits. Move it in this order, because each step needs a token the step before
-still accepts, and the audience change needs the new binary while the old audience is verified:
-
-1. **The kernel first.** Pull identity-kernel and `docker compose up -d` there: realm-apply removes
-   the `provider_scope` mapper (identity-kernel TDD-001 1.9.0). The new binary refuses a token that
-   carries the claim, and the ceremony's Principal still holds the attribute.
-2. **Migrate, and run the new binary on the old audience.** Pull this repository, put
-   `IDENTITY_TOKEN_AUDIENCE=identity-control` in `.env`, and
-   `docker compose up -d --build identity-control`. The migrate job runs first, and the ceremony
-   runs the migrate image, so it is rebuilt with it.
-3. **Register the resource by resuming the ceremony**, with the operator, username and email on
-   record (`bootstrap.sh` used `bootstrap-operator` and `bootstrap-operator@scnehaux.local`). Do not
-   rerun `bootstrap.sh`; run only its first step:
-
-   ```sh
-   docker compose run --rm bootstrap -operator '<recorded operator>' -reason 'register identity-control-api' \
-     -username bootstrap-operator -email bootstrap-operator@scnehaux.local -resume '<recorded operator>'
-   ```
-
-4. **Move each caller's audience.** With a token from the running service, propose an audience
-   change on the adopted caller and the BFF (`TDD-identity-control-003` §Registration Changes). A
-   development server applies it at once, and the apply replaces the hand-made
-   `identity-control-audience` mapper with `audience-identity-control-api`:
-
-   ```http
-   POST /v1/registrations/{registration_id}/changes
-   X-Administrative-Reason: move to the API's own resource (STD-IAM-002 section 3.1)
-   Content-Type: application/json
-
-   {"audience":["identity-control-api"],"expected_version":<the registration's version>}
-   ```
-
-   `GET /v1/registrations` lists both with their `registration_id` and `version`. A caller that is
-   not adopted yet is adopted first, with `"audience":[]`, and then moved. From here, new tokens
-   name `identity-control-api` and the running service refuses them.
-
-5. **Verify the new audience.** Remove `IDENTITY_TOKEN_AUDIENCE` from `.env` and
-   `docker compose up -d identity-control`. A fresh token now works.
-
-### Two factors for providers, on a server that ran before them
-
-Every provider route now requires `acr` `aal2`, a password and a TOTP code (ADR-IAM-004,
-TDD-identity-control-005 §Step-Up). The kernel must map the levels first.
-
-1. **Update identity-kernel** (`git pull && docker compose up -d` there). realm-apply builds
-   `scnehaux-browser-v1` and binds it. A plain sign-in is unchanged.
-2. **Update this service** as usual. `IDENTITY_ASSURANCE` stays `enforce`. Set it to `report` in `.env`
-   only if step 1 cannot run first.
-3. **Enroll the operator's TOTP once, in a browser.** Sign in to the Admin Portal. It asks for `aal2`,
-   and the kernel shows its enrollment page with a QR code for an authenticator app. After that, every
-   provider sign-in asks for the app's code.
-4. **For a token from the scripts**, ask for the level and pass the current code:
-   `Get-ScnehauxToken … -AcrValues aal2 -Otp 123456`.
+migrate image, so this rebuilds them too. A release that needs more than this is taken by standing the
+server up again from zero (§First start), which every environment is: there is no in-place upgrade
+procedure to keep in step with the code.
 
 ### The server's own TOTP for the bootstrap operator
 
@@ -242,19 +185,6 @@ Rules:
   this account the two factors are one place.
 - **To end it,** a provider revokes the `dev-server` authenticator of the bootstrap operator from the
   Admin Portal. That removes the server's TOTP without touching the owner's.
-
-### The investigation reads, on a server that ran before them
-
-The service needs the key ring that seals `security_ref` handles (TDD-identity-control-005
-§Configuration) and refuses to start without it. On a server that ran before the reads, make it
-once, then update as usual:
-
-```sh
-./create-security-ref-key.sh
-git pull && docker compose up -d --build
-```
-
-The script refuses when `keys/security-ref.json` exists. It never prints the key.
 
 ## One-off tasks
 
@@ -482,11 +412,9 @@ put email, names and roles into its access tokens), so name both:
 `"converge":["token_format","audience_scope"]`. A
 `redirect_uris` or `client_keys` difference means the declaration is wrong, and is fixed in the
 declaration, never in the console: for `client_keys`, pass every public JWK the client holds. Then send the same body without `dry_run` and with an
-`Idempotency-Key`. Once the BFF and the caller are adopted, set `IDENTITY_UNMANAGED_CLIENTS=disable`
-in `.env` and recreate the service with `docker compose up -d identity-control`; a restart keeps the
-environment the container was created with. `IDENTITY_TOKEN_TYPE=enforce` goes the same way, once
-the log no longer reports a token not typed at+jwt. `compose.yaml` passes both to the container,
-defaulting to `report`, and passes nothing it does not list.
+`Idempotency-Key`. Once the BFF and the caller are adopted, §First start steps 10 and 11 apply any
+registered state that still differs and end the server in `IDENTITY_UNMANAGED_CLIENTS=disable` and
+`IDENTITY_TOKEN_TYPE=enforce`.
 
 ## Keys
 
@@ -495,24 +423,7 @@ in `./keys`, mode 0600, owned by `KEYS_OWNER`: the service's container user, 655
 says otherwise. The kernel holds only the public halves. `identity-kernel/deploy/dev/README.md`
 documents its two tools, `new-client-key.sh` and `set-client-key.sh`.
 
-**A server stood up with client secrets** moves once. Each client stops authenticating between its
-`set-client-key.sh` and the rebuild, so run the steps together. From this directory, after `git
-pull`:
 
-```sh
-k="$KERNEL_DEPLOY_DIR"   # after: set -a; . ./.env; set +a
-mkdir -p keys
-"$k/new-client-key.sh" identity-control "$PWD/keys" "${KEYS_OWNER:-65532:65532}"
-"$k/new-client-key.sh" identity-control-registration "$PWD/keys" "${KEYS_OWNER:-65532:65532}"
-"$k/new-client-key.sh" identity-control-caller "$PWD/keys" "$(id -u):$(id -g)"
-"$k/set-client-key.sh" scnehaux identity-control "$PWD/keys/identity-control.jwk.json"
-"$k/set-client-key.sh" scnehaux identity-control-registration "$PWD/keys/identity-control-registration.jwk.json"
-"$k/set-client-key.sh" scnehaux identity-control-caller "$PWD/keys/identity-control-caller.jwk.json"
-# .env: delete IDENTITY_KEYCLOAK_CLIENT_SECRET, IDENTITY_REGISTRATION_KEYCLOAK_CLIENT_SECRET and
-# IDENTITY_CALLER_SECRET; add KERNEL_DEPLOY_DIR, and IDENTITY_CALLER_KEY_FILE=$PWD/keys/identity-control-caller.pem
-docker compose up -d --build
-curl -fsS http://127.0.0.1:8082/readyz
-```
 
 **Rotating a key.**
 
@@ -539,7 +450,7 @@ previous one is refused as `invalid_client`, and the restarted service still rea
 same five steps by hand; nothing restarts for it.
 
 The other secrets on disk: `keys/security-ref.json`, the key ring `create-security-ref-key.sh` made
-(§Updating, The investigation reads), and `keys/operator-totp.json`, the server's TOTP for the
+(§First start, step 4), and `keys/operator-totp.json`, the server's TOTP for the
 bootstrap operator (§Updating, The server's own TOTP). Neither is ever printed, and both are in the
 backup below.
 
@@ -613,7 +524,8 @@ artifact. A daily dump loses up to 24 hours of changes, against the 1-minute RPO
   or through the API; a console change is drift the sweep blocks.
 - **Log in on `http://127.0.0.1:8081`.** Log in on the public origin (§One-off tasks, Calling the API).
 - **Put a client secret in `.env`.** No client of this service has one (ADR-IAM-001 §5.12).
-- **Set `IDENTITY_UNMANAGED_CLIENTS=disable` before the caller and the BFF are adopted** (§First start).
+- **Set `IDENTITY_UNMANAGED_CLIENTS=disable` or `IDENTITY_TOKEN_TYPE=enforce` before the caller and
+  the BFF are adopted** (§First start, step 11).
 
 ## Troubleshooting
 
@@ -621,10 +533,10 @@ artifact. A daily dump loses up to 24 hours of changes, against the 1-minute RPO
 | :-- | :-- |
 | The build fails at `go mod download` with a certificate error | The network intercepts TLS to the module proxy. Set `GOPROXY=direct` in `.env` and `docker compose up -d --build` |
 | `/readyz` does not answer | The service waits for the migrate job. `docker compose logs migrate` shows which stage failed; the service starts only once it succeeds |
-| A setting in `.env` changes nothing | compose passes a container only the variables `compose.yaml` lists, and a restart keeps the environment the container was created with. Check the variable is listed, then `docker compose up -d identity-control` |
+| A setting in `.env` changes nothing | compose passes a container only the variables `compose.yaml` lists, a restart keeps the environment the container was created with, and a variable exported in the shell wins over `.env` (a shell that ran `set -a; . deploy/dev/.env; set +a` holds the old values). Check the variable is listed, `unset` it in the shell or open a new one, then `docker compose up -d identity-control` |
 | The login form answers "Restart login cookie not found" | The login started on the private port. Log in on the public origin (§One-off tasks, Calling the API) |
-| Every provider route answers 401 with `insufficient_user_authentication` | The token is not `aal2`. Enroll a TOTP and ask for the level (§Updating, Two factors for providers) |
-| A token is refused for its `aud` | The caller still names the old audience (§Updating, Moving a server to `identity-control-api`) |
+| Every provider route answers 401 with `insufficient_user_authentication` | The token is not `aal2`: a provider route asks for a password and a TOTP code (ADR-IAM-004). Pass `IDENTITY_OPERATOR_TOTP_FILE` to the scripts (§Updating, The server's own TOTP) |
+| Every call answers 401 after §First start step 11 | A caller's token is typed `JWT`, not `at+jwt`: its client was not adopted with `token_format` converged. The log names it by `azp`; apply its registered state (step 10) |
 | The BFF's sessions all end at once | `IDENTITY_UNMANAGED_CLIENTS=disable` was set before the BFF was adopted. Adopt it (§Wiring to other services) and re-enable it with the registered state |
 | The ceremony is refused | It ran already; that is the design (§First start). Resume it only to finish an interrupted one |
 | `create-kernel-clients.sh` refuses to run | The realm is not applied, or lacks `scnehaux-provider`: apply identity-kernel's realm first (§Before you start) |

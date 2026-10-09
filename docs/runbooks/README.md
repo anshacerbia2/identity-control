@@ -11,6 +11,7 @@ where an operator would need something that is not built.
 | [Pending-mapping recovery](pending-mapping-recovery.md) | a mapping left `pending`, or a `dangling` finding | `TDD-identity-control-001` §Idempotency and Crash Recovery, §Data Model (`relink`) |
 | [Projection drift repair](projection-drift-repair.md) | a projection finding, an `unresolved` Tenant, or a revocation not converged in budget | `TDD-identity-control-002` §Operational Notes, §Reconciliation |
 | [Control Database restore](control-database-restore.md) | a lost or damaged Control Database | `TDD-identity-control-001` §Restore Evidence, `deploy/dev/README.md` §Backups |
+| [Bootstrap ceremony](bootstrap-ceremony.md) | a fresh Control Database with no Principal | `ADR-IAM-001 §5.11`, `TDD-identity-control-001` §The Bootstrap Ceremony |
 
 ## What every runbook assumes
 

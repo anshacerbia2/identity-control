@@ -143,14 +143,9 @@ table "principal_mapping" {
     columns = [column.keycloak_user_id]
   }
 
-  // Named as a Week 1 deliverable by ROADMAP.md. It is implied by the constraint above
-  // and is carried because TDD-identity-control-001 specifies both; the redundancy is
-  // recorded in ROADMAP.md rather than silently resolved here.
-  index "principal_mapping_realm_user" {
-    unique  = true
-    columns = [column.realm, column.keycloak_user_id]
-    where   = "keycloak_user_id IS NOT NULL"
-  }
+  // A partial unique index on (realm, keycloak_user_id) stood here until TDD-identity-control-001
+  // 1.18.0. The constraint above already holds every non-null value unique, so it refused nothing;
+  // migration 20261009110000_drop_redundant_principal_index drops it.
 
   check "principal_mapping_state_check" {
     expr = "state IN ('pending', 'active', 'suspended', 'quarantined', 'retired')"
@@ -225,6 +220,70 @@ table "principal_relink" {
   }
 
   check "principal_relink_reason_named" {
+    expr = "btrim(reason) <> ''"
+  }
+}
+
+// A quarantined mapping released to suspended once the kernel holds exactly one user carrying its
+// identifier (TDD-identity-control-001 1.18.0 §Leaving Quarantine). Insert-only for the runtime.
+table "principal_release" {
+  schema  = schema.identity
+  comment = "Each release of a quarantined mapping to suspended. Insert-only. TDD-identity-control-001 1.18.0."
+
+  column "release_id" {
+    null = false
+    type = uuid
+  }
+
+  column "principal_id" {
+    null = false
+    type = uuid
+  }
+
+  // Null for a mapping recovery quarantined, which held no kernel user.
+  column "previous_keycloak_user_id" {
+    null = true
+    type = text
+  }
+
+  column "keycloak_user_id" {
+    null = false
+    type = text
+  }
+
+  column "quarantine_reason" {
+    null = true
+    type = text
+  }
+
+  column "released_by" {
+    null = false
+    type = uuid
+  }
+
+  column "reason" {
+    null = false
+    type = text
+  }
+
+  column "released_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+
+  primary_key {
+    columns = [column.release_id]
+  }
+
+  foreign_key "principal_release_principal_id_fkey" {
+    columns     = [column.principal_id]
+    ref_columns = [table.principal_mapping.column.principal_id]
+    on_update   = NO_ACTION
+    on_delete   = NO_ACTION
+  }
+
+  check "principal_release_reason_named" {
     expr = "btrim(reason) <> ''"
   }
 }
@@ -658,7 +717,7 @@ table "reconcile_run" {
   }
 
   check "reconcile_run_sweep_check" {
-    expr = "sweep IN ('registration')"
+    expr = "sweep IN ('registration', 'tenant_context')"
   }
 
   check "reconcile_run_outcome_check" {
@@ -1569,7 +1628,7 @@ table "registration_owner" {
 
 table "registration_change" {
   schema  = schema.identity
-  comment = "A change to a registration's redirect URIs, audience or lifetime class, proposed, then applied or decided against. TDD-identity-control-003."
+  comment = "A change to a registration's redirect URIs, audience, lifetime class or back-channel logout URI, proposed, then applied or decided against. TDD-identity-control-003."
 
   column "change_id" {
     null = false
@@ -1625,6 +1684,19 @@ table "registration_change" {
   }
 
   column "lifetime_class" {
+    null = true
+    type = text
+  }
+
+  // A confidential client's back-channel logout URI when the change was proposed, and the URI
+  // proposed; null is none, so a null after is the URI removed (ADR-IAM-009 §5.1,
+  // TDD-identity-control-003 1.38.0).
+  column "previous_backchannel_logout_uri" {
+    null = true
+    type = text
+  }
+
+  column "backchannel_logout_uri" {
     null = true
     type = text
   }
@@ -1706,7 +1778,7 @@ table "registration_change" {
   }
 
   check "registration_change_kind_check" {
-    expr = "(kind = ANY (ARRAY['redirect_uris'::text, 'audience'::text, 'lifetime_class'::text])) AND ((kind = 'redirect_uris'::text) = ((redirect_uris IS NOT NULL) AND (previous_redirect_uris IS NOT NULL))) AND ((kind = 'audience'::text) = ((audience IS NOT NULL) AND (previous_audience IS NOT NULL))) AND ((kind = 'lifetime_class'::text) = ((lifetime_class IS NOT NULL) AND (previous_lifetime_class IS NOT NULL)))"
+    expr = "(kind = ANY (ARRAY['redirect_uris'::text, 'audience'::text, 'lifetime_class'::text, 'backchannel_logout_uri'::text])) AND ((kind = 'redirect_uris'::text) = ((redirect_uris IS NOT NULL) AND (previous_redirect_uris IS NOT NULL))) AND ((kind = 'audience'::text) = ((audience IS NOT NULL) AND (previous_audience IS NOT NULL))) AND ((kind = 'lifetime_class'::text) = ((lifetime_class IS NOT NULL) AND (previous_lifetime_class IS NOT NULL))) AND ((kind = 'backchannel_logout_uri'::text) = (backchannel_logout_uri IS DISTINCT FROM previous_backchannel_logout_uri))"
   }
 
   check "registration_change_lifetime_check" {
@@ -2533,6 +2605,12 @@ table "tenant_convergence" {
     type = text
   }
   column "converged_at" {
+    null = true
+    type = timestamptz
+  }
+  // The earliest delivery the Tenant has not yet converged: an event or a repair sets it when null,
+  // and the convergence recorded converged clears it (TDD-identity-control-002 2.5.0).
+  column "delivered_at" {
     null = true
     type = timestamptz
   }

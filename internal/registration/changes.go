@@ -1,8 +1,9 @@
 package registration
 
 // Registration changes (ADR-IAM-003 §5.2, §5.9, TDD-identity-control-003 §Registration Changes): a
-// change to a registration's redirect URIs, its audience, or a resource's lifetime class, proposed
-// by an owner or a provider. In non-production
+// change to a registration's redirect URIs, its audience, a resource's lifetime class, or a
+// confidential client's back-channel logout URI (ADR-IAM-009 §5.1), proposed by an owner or a
+// provider. In non-production
 // it is applied at once. In production it waits until a provider other than its proposer approves
 // it, a rule the database holds as well as this code. A change is pinned to the version it was
 // proposed against, so what the approver sees is what the proposer saw, and nothing is deleted: a
@@ -44,6 +45,10 @@ const (
 	ChangeRedirectURIs  = "redirect_uris"
 	ChangeAudience      = "audience"
 	ChangeLifetimeClass = "lifetime_class"
+
+	// ChangeBackChannelLogout is a confidential client's back-channel logout URI, set, moved or
+	// removed (TDD-identity-control-003 1.38.0).
+	ChangeBackChannelLogout = "backchannel_logout_uri"
 )
 
 // LifetimeClasses are the classes of STD-IAM-002 §3.3 a resource may carry.
@@ -105,6 +110,12 @@ type Change struct {
 	PreviousLifetimeClass *string `json:"previous_lifetime_class"`
 	LifetimeClass         *string `json:"lifetime_class"`
 
+	// PreviousBackChannelLogoutURI and BackChannelLogoutURI are a backchannel_logout_uri change's
+	// before and after, null for none: a null after is the URI removed. Both are null for every other
+	// kind, which Kind tells apart (TDD-identity-control-003 1.38.0).
+	PreviousBackChannelLogoutURI *string `json:"previous_backchannel_logout_uri"`
+	BackChannelLogoutURI         *string `json:"backchannel_logout_uri"`
+
 	ApprovalRequired bool       `json:"approval_required"`
 	ProposedBy       id.UUID    `json:"proposed_by"`
 	ProposalReason   string     `json:"proposal_reason"`
@@ -115,14 +126,18 @@ type Change struct {
 	DecidedAt        *time.Time `json:"decided_at"`
 }
 
-// Proposal is a change asked for: the redirect URIs, the audience or the lifetime class the
-// registration should have, the version the caller read, who asks and why. Exactly one of
-// RedirectURIs, Audience and LifetimeClass is set.
+// Proposal is a change asked for: the redirect URIs, the audience, the lifetime class or the
+// back-channel logout URI the registration should have, the version the caller read, who asks and
+// why. Exactly one of RedirectURIs, Audience, LifetimeClass and BackChannelLogoutURI is set.
 type Proposal struct {
-	RegistrationID  id.UUID
-	RedirectURIs    []string
-	Audience        *[]string
-	LifetimeClass   *string
+	RegistrationID id.UUID
+	RedirectURIs   []string
+	Audience       *[]string
+	LifetimeClass  *string
+
+	// BackChannelLogoutURI is the URI the client should have, "" to remove it.
+	BackChannelLogoutURI *string
+
 	ExpectedVersion int64
 	ProposedBy      id.UUID
 	Reason          string
@@ -135,6 +150,8 @@ type Proposal struct {
 // kind is what the proposal changes.
 func (p Proposal) kind() string {
 	switch {
+	case p.BackChannelLogoutURI != nil:
+		return ChangeBackChannelLogout
 	case p.LifetimeClass != nil:
 		return ChangeLifetimeClass
 	case p.Audience != nil:
@@ -151,8 +168,15 @@ func (p Proposal) validate() error {
 		return fmt.Errorf("%w: expected_version is the registration's version as read, and is required", ErrInvalid)
 	case strings.TrimSpace(p.Reason) == "":
 		return fmt.Errorf("%w: a change requires a reason", ErrInvalid)
-	case (p.Audience != nil && p.RedirectURIs != nil) || (p.LifetimeClass != nil && (p.Audience != nil || p.RedirectURIs != nil)):
-		return fmt.Errorf("%w: a change is to one of redirect_uris, audience or lifetime_class", ErrInvalid)
+	case p.kinds() > 1:
+		return fmt.Errorf("%w: a change is to one of redirect_uris, audience, lifetime_class or backchannel_logout_uri", ErrInvalid)
+	case p.BackChannelLogoutURI != nil && *p.BackChannelLogoutURI == "":
+		return nil
+	case p.BackChannelLogoutURI != nil:
+		if err := validateBackChannelLogout(*p.BackChannelLogoutURI); err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalid, err)
+		}
+		return nil
 	case p.LifetimeClass != nil && !slices.Contains(LifetimeClasses, *p.LifetimeClass):
 		return fmt.Errorf("%w: a lifetime class is L0, L1, L2 or L3 (STD-IAM-002 §3.3)", ErrInvalid)
 	case p.LifetimeClass != nil:
@@ -173,6 +197,19 @@ func (p Proposal) validate() error {
 		seen[uri] = true
 	}
 	return nil
+}
+
+// kinds counts the kinds a proposal names; a change is to exactly one. Redirect URIs count when the
+// list is present, so an empty list beside another kind is still two.
+func (p Proposal) kinds() int {
+	n := 0
+	for _, present := range []bool{p.RedirectURIs != nil, p.Audience != nil, p.LifetimeClass != nil,
+		p.BackChannelLogoutURI != nil} {
+		if present {
+			n++
+		}
+	}
+	return n
 }
 
 // validateAudience applies the rules that need nothing but the list: each entry a client_key, named
@@ -221,7 +258,7 @@ func (d Decision) validate() error {
 
 const lockChangedRegistrationStatement = `SELECT profile, state, coalesce(kc_client_id, ''), version,
        coalesce(redirect_uris, '{}'::text[]), client_key, coalesce(audience, '{}'::text[]),
-       coalesce(lifetime_class, '')
+       coalesce(lifetime_class, ''), coalesce(backchannel_logout_uri, '')
 FROM identity.client_registration
 WHERE registration_id = $1 AND realm = $2
 FOR UPDATE`
@@ -235,6 +272,7 @@ type changedRegistration struct {
 	clientKey    string
 	audience     []string
 	lifetime     string
+	logout       string
 }
 
 func (s *Service) lockChanged(ctx context.Context, tx db.Tx, registrationID id.UUID) (changedRegistration, error) {
@@ -254,7 +292,7 @@ func (s *Service) lockChanged(ctx context.Context, tx db.Tx, registrationID id.U
 		client string
 	)
 	if err := rows.Scan(&locked.profile, &locked.state, &client, &locked.version, &locked.redirectURIs,
-		&locked.clientKey, &locked.audience, &locked.lifetime); err != nil {
+		&locked.clientKey, &locked.audience, &locked.lifetime, &locked.logout); err != nil {
 		return changedRegistration{}, fmt.Errorf("registration: scan the registration: %w", err)
 	}
 	locked.client = keycloak.ClientUUID(client)
@@ -264,7 +302,8 @@ func (s *Service) lockChanged(ctx context.Context, tx db.Tx, registrationID id.U
 
 var changeColumns = `c.change_id::text, c.registration_id::text, r.client_key, c.base_version, c.kind,
        c.previous_redirect_uris, c.redirect_uris, c.previous_audience, c.audience,
-       c.previous_lifetime_class, c.lifetime_class, c.approval_required, c.proposed_by::text,
+       c.previous_lifetime_class, c.lifetime_class, c.previous_backchannel_logout_uri,
+       c.backchannel_logout_uri, c.approval_required, c.proposed_by::text,
        c.proposal_reason, c.proposed_at, c.state, coalesce(c.decided_by::text, ''),
        coalesce(c.decision_reason, ''), c.decided_at`
 
@@ -293,9 +332,9 @@ ORDER BY c.proposed_at, c.change_id`
 
 const insertChangeStatement = `INSERT INTO identity.registration_change
     (change_id, registration_id, base_version, kind, previous_redirect_uris, redirect_uris,
-     previous_audience, audience, previous_lifetime_class, lifetime_class, approval_required, proposed_by,
-     proposal_reason, proposed_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`
+     previous_audience, audience, previous_lifetime_class, lifetime_class, previous_backchannel_logout_uri,
+     backchannel_logout_uri, approval_required, proposed_by, proposal_reason, proposed_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`
 
 const decideChangeStatement = `UPDATE identity.registration_change
 SET state = $2, decided_by = $3, decision_reason = $4, decided_at = $5
@@ -311,6 +350,10 @@ WHERE registration_id = $1`
 
 const changeLifetimeStatement = `UPDATE identity.client_registration
 SET lifetime_class = $2, version = version + 1
+WHERE registration_id = $1`
+
+const changeLogoutStatement = `UPDATE identity.client_registration
+SET backchannel_logout_uri = $2, version = version + 1
 WHERE registration_id = $1`
 
 // lockCallersStatement locks, in a fixed order, every active client whose audience names the
@@ -341,7 +384,8 @@ func scanChange(row interface{ Scan(dest ...any) error }) (Change, error) {
 	)
 	if err := row.Scan(&changeID, &registrationID, &change.ClientKey, &change.BaseVersion, &change.Kind,
 		&change.PreviousRedirectURIs, &change.RedirectURIs, &change.PreviousAudience, &change.Audience,
-		&change.PreviousLifetimeClass, &change.LifetimeClass, &change.ApprovalRequired, &proposer,
+		&change.PreviousLifetimeClass, &change.LifetimeClass, &change.PreviousBackChannelLogoutURI,
+		&change.BackChannelLogoutURI, &change.ApprovalRequired, &proposer,
 		&change.ProposalReason, &change.ProposedAt, &change.State, &decidedBy,
 		&change.DecisionReason, &change.DecidedAt); err != nil {
 		return Change{}, err
@@ -426,7 +470,15 @@ func (s *Service) ProposeChange(ctx context.Context, proposal Proposal) (Change,
 		if kind == ChangeLifetimeClass {
 			lifetime = *proposal.LifetimeClass
 		}
+		logout := ""
+		if kind == ChangeBackChannelLogout {
+			logout = *proposal.BackChannelLogoutURI
+		}
 		switch {
+		case kind == ChangeBackChannelLogout && locked.profile != ProfileConfidential:
+			return fmt.Errorf("%w: only a confidential client registers a backchannel_logout_uri: it is a back end that holds sessions (ADR-IAM-009 §5.1)", ErrInvalid)
+		case kind == ChangeBackChannelLogout && s.cfg.Production && logout != "" && !strings.HasPrefix(logout, "https://"):
+			return fmt.Errorf("%w: a backchannel_logout_uri is https in production", ErrInvalid)
 		case kind == ChangeRedirectURIs && locked.profile != ProfilePublic && locked.profile != ProfileConfidential:
 			return fmt.Errorf("%w: only a public or confidential client has redirect URIs", ErrInvalid)
 		case kind == ChangeAudience && locked.profile == ProfileResource:
@@ -440,7 +492,7 @@ func (s *Service) ProposeChange(ctx context.Context, proposal Proposal) (Change,
 		switch {
 		case err == nil && open.ProposedBy == proposal.ProposedBy && open.Kind == kind &&
 			slices.Equal(open.RedirectURIs, proposal.RedirectURIs) && slices.Equal(open.Audience, audience) &&
-			stringOf(open.LifetimeClass) == lifetime:
+			stringOf(open.LifetimeClass) == lifetime && stringOf(open.BackChannelLogoutURI) == logout:
 			change = open
 			return nil
 		case err == nil:
@@ -458,6 +510,10 @@ func (s *Service) ProposeChange(ctx context.Context, proposal Proposal) (Change,
 			return fmt.Errorf("%w: this is the registered audience already", ErrInvalid)
 		case kind == ChangeLifetimeClass && locked.lifetime == lifetime:
 			return fmt.Errorf("%w: this is the registered lifetime class already", ErrInvalid)
+		case kind == ChangeBackChannelLogout && locked.logout == logout && logout == "":
+			return fmt.Errorf("%w: the client registers no backchannel_logout_uri to remove", ErrInvalid)
+		case kind == ChangeBackChannelLogout && locked.logout == logout:
+			return fmt.Errorf("%w: this is the registered backchannel_logout_uri already", ErrInvalid)
 		}
 		if kind == ChangeAudience {
 			if err := s.admitAudience(ctx, tx, locked, audience, proposal); err != nil {
@@ -471,6 +527,7 @@ func (s *Service) ProposeChange(ctx context.Context, proposal Proposal) (Change,
 		}
 		at := s.now()
 		var previousRedirects, redirects, previousAudience, nextAudience, previousLifetime, nextLifetime any
+		var previousLogout, nextLogout any
 		switch kind {
 		case ChangeRedirectURIs:
 			previousRedirects, redirects = locked.redirectURIs, proposal.RedirectURIs
@@ -478,10 +535,13 @@ func (s *Service) ProposeChange(ctx context.Context, proposal Proposal) (Change,
 			previousAudience, nextAudience = locked.audience, audience
 		case ChangeLifetimeClass:
 			previousLifetime, nextLifetime = locked.lifetime, lifetime
+		case ChangeBackChannelLogout:
+			previousLogout, nextLogout = nullableText(locked.logout), nullableText(logout)
 		}
 		if _, err := tx.Exec(ctx, insertChangeStatement, changeID.String(), proposal.RegistrationID.String(),
 			locked.version, kind, previousRedirects, redirects, previousAudience, nextAudience, previousLifetime,
-			nextLifetime, s.cfg.Production, proposal.ProposedBy.String(), strings.TrimSpace(proposal.Reason), at); err != nil {
+			nextLifetime, previousLogout, nextLogout, s.cfg.Production, proposal.ProposedBy.String(),
+			strings.TrimSpace(proposal.Reason), at); err != nil {
 			return fmt.Errorf("registration: record the change: %w", err)
 		}
 		created = true
@@ -490,6 +550,9 @@ func (s *Service) ProposeChange(ctx context.Context, proposal Proposal) (Change,
 			pending := Change{Kind: kind, RedirectURIs: proposal.RedirectURIs, Audience: audience}
 			if kind == ChangeLifetimeClass {
 				pending.LifetimeClass = &lifetime
+			}
+			if kind == ChangeBackChannelLogout {
+				pending.BackChannelLogoutURI = &logout
 			}
 			if err := s.apply(ctx, tx, locked, proposal.RegistrationID, pending); err != nil {
 				return err
@@ -645,6 +708,8 @@ func (s *Service) apply(ctx context.Context, tx db.Tx, locked changedRegistratio
 		return s.applyAudience(ctx, tx, locked, registrationID, change.Audience)
 	case ChangeLifetimeClass:
 		return s.applyLifetime(ctx, tx, locked, registrationID, stringOf(change.LifetimeClass))
+	case ChangeBackChannelLogout:
+		return s.applyLogout(ctx, tx, locked, registrationID, stringOf(change.BackChannelLogoutURI))
 	}
 	uris := change.RedirectURIs
 	if _, err := tx.Exec(ctx, changeRedirectsStatement, registrationID.String(), uris); err != nil {
@@ -681,6 +746,25 @@ func (s *Service) applyAudience(ctx context.Context, tx db.Tx, locked changedReg
 			keycloak.ClientPatch{Audience: &audience, AccessTokenLifespan: &lifespan})
 	}); err != nil {
 		return fmt.Errorf("registration: write the audience to the client: %w", err)
+	}
+	return nil
+}
+
+// applyLogout writes the back-channel logout URI, null when it is removed, and makes the kernel
+// client's logout configuration the one registration writes: front-channel logout off, "session
+// required" on, and this URL or none (TDD-identity-control-003 1.38.0, ADR-IAM-009 §5.1, §5.2).
+func (s *Service) applyLogout(ctx context.Context, tx db.Tx, locked changedRegistration, registrationID id.UUID, uri string) error {
+	if _, err := tx.Exec(ctx, changeLogoutStatement, registrationID.String(), nullableText(uri)); err != nil {
+		return fmt.Errorf("registration: write the back-channel logout URI: %w", err)
+	}
+	if locked.client == "" {
+		return nil
+	}
+	target := uri
+	if _, err := call(ctx, s.cfg.CallTimeout, func(ctx context.Context) (struct{}, error) {
+		return struct{}{}, s.kernel.PatchClient(ctx, s.cfg.Realm, locked.client, keycloak.ClientPatch{BackChannelLogoutURL: &target})
+	}); err != nil {
+		return fmt.Errorf("registration: write the back-channel logout URI to the client: %w", err)
 	}
 	return nil
 }

@@ -30,12 +30,18 @@ Two paths find a duplicate, and they leave different records.
     the caller's retry learns which Principal its request made, now quarantined
     (`TDD-identity-control-001` 1.14.0).
 
+- **API and gauge:** the mapping in `GET /v1/principals:quarantined`, with `quarantined_at`,
+  `quarantine_reason` and `linked` (whether it holds a kernel user; one recovery quarantined does
+  not), and `identity.principal.quarantined` above zero (`TDD-identity-control-001` 1.18.0).
+
 `TDD-identity-control-001` §Operational Notes classes a duplicate as **critical**.
 
 ## Authority
 
-A provider, with a token at `aal2`. No step here changes anything: containment is already done by
-the service.
+A provider, with a token at `aal2`. Steps 1 to 7 change nothing: containment is already done by the
+service. Step 8, the release, is a command: it also needs `auth_time` within
+`IDENTITY_STEP_UP_MAX_AGE`, an `X-Administrative-Reason` and an `Idempotency-Key`. A Keycloak realm
+administrator deletes the extra user in step 8; this service deletes no user.
 
 ## Steps
 
@@ -70,43 +76,68 @@ the service.
 6. **Close the creation path,** as in [unmapped-Principal triage](unmapped-principal-triage.md)
    step 5.
 7. **Decide which user is the person,** with the Principal's owner and security. Record the
-   decision. The remedy is not built: see Gaps.
+   decision, naming the username kept.
+8. **Release the mapping** (`TDD-identity-control-001` 1.18.0 §Leaving Quarantine):
+   1. Delete the other user in the kernel's console, as a realm administrator. Only that one: the
+      Principal outlives its kernel user, and a release needs exactly one user carrying the
+      identifier.
+   2. `POST /v1/principals/{principal_id}:release` with `X-Administrative-Reason` and
+      `{"username": "<the username kept>"}`. It answers `200` with `state: suspended`: the mapping is
+      bound to that user, the user stays disabled and its sessions are ended, and the release is
+      recorded in `identity.principal_release` with you, the reason and the reason it was held.
+      - `409` naming a count means the kernel does not hold exactly one user carrying the
+        identifier: the extra one is not deleted yet, or both were (see Gaps).
+      - `409` "is not the username named" means the one user left is not the one decided. Stop:
+        the wrong user may have been deleted.
+      - `409` for a mapping that is not quarantined, or a workload; `503` when the kernel did not
+        confirm the containment, with nothing recorded, so retry with the same key.
+   3. `POST /v1/principals:reconcile`. The sweep resolves the `duplicate` finding as `user_absent`
+      once it no longer finds the deleted user.
+   4. **Return the person to service** with `POST /v1/principals/{principal_id}:restore`
+      (`TDD-identity-control-005` §Containment Is Reversible), with `{"expected_version": <the
+      security_version GET /v1/principals/{principal_id} answers>}`. It refuses while any finding
+      about the Principal is open, which is why step 3 comes first. Release and restore are two
+      decisions on purpose: the first proves the duplicate is gone, the second returns access.
+      Proof B scenario 6b runs this step against the kernel on every `deploy-dev` run.
 
 ## Verification
 
-- `GET /v1/principals/{principal_id}` answers `state: quarantined`.
-- Both users stay disabled. A later sweep logs nothing new for them while the finding is open
-  (`act` in `sweep.go` logs only a new finding or a new quarantine).
+- Until step 8, `GET /v1/principals/{principal_id}` answers `state: quarantined`, and both users stay
+  disabled. A later sweep logs nothing new for them while the finding is open (`act` in `sweep.go`
+  logs only a new finding or a new quarantine).
 - The finding resolves as `user_absent` only after the extra user is deleted in the kernel and a
   complete sweep no longer returns it.
+- After the release, `GET /v1/principals:quarantined` no longer lists the Principal, and it reads
+  `suspended`; after the restore, `active`, with the kept user enabled.
 
 ## Never do
 
-- **Re-enable either user.** Both carry the identifier, so either one's token asserts the same
-  Principal.
+- **Re-enable either user in the console.** Both carry the identifier, so either one's token asserts
+  the same Principal. The kept user is enabled by `:restore`, after the release.
 - **Delete both users.** The Principal outlives its kernel user. Deleting both leaves a quarantined
   mapping with nothing to recover from.
 - **Edit `principal_mapping` to set the state back to `active`.** Quarantine is the reconciler's
-  hold. "No administrator sets it, and only a relink or a retirement leaves it" (§Data Model).
-  Neither is available for it today.
+  hold, left by `:release` once the kernel shows the duplicate gone, and only to `suspended`
+  (§Leaving Quarantine).
 - **Suspend or terminate the sessions through the containment routes and expect them to work.**
   `:suspend`, `:restore` and `sessions:terminate-all` accept only an `active` or `suspended`
   Principal, and refuse a quarantined one with `409` (`TDD-identity-control-005` §State).
 
 ## Gaps
 
-- **No route leaves `quarantined`.** `:relink` refuses any mapping that is not `active`
-  (`internal/identity/provisioning/relink.go`). A human `:retire` is not built
-  (`TDD-identity-control-001` §API / Interface). A quarantined Principal therefore stays
-  quarantined until one of them is designed and built.
-- **No route ends a quarantined Principal's sessions.** `sessions:terminate-all` refuses it. Neither
-  the sweep nor recovery ends sessions: they only disable the users. Whether a disabled user's open
-  session can still refresh is not asserted by any test in this repository. A realm administrator
-  can end the sessions in the kernel; this service records nothing when they do.
+- **Fixed in `TDD-identity-control-001` 1.18.0: `:release` leaves `quarantined`,** to `suspended`, once
+  exactly one kernel user carries the identifier (step 8).
+- **A quarantined mapping whose users were all deleted stays quarantined.** `:release` refuses zero
+  users, and a human `:retire` is not built (`TDD-identity-control-001` §API / Interface).
+- **No route ends a quarantined Principal's sessions before the release.** `sessions:terminate-all`
+  refuses it, and neither the sweep nor recovery ends sessions: they only disable the users. Whether
+  a disabled user's open session can still refresh is not asserted by any test in this repository.
+  The release ends the kept user's sessions, and deleting the extra user removes its own; until
+  then a realm administrator can end them in the kernel, and this service records nothing.
 - **Recovery's duplicate writes no finding.** It is visible only in the log and in the mapping's
   `quarantine_reason`. `GET /v1/principals:unmapped` may not list it.
-- **No listing of quarantined mappings.** An operator finds one only through a log line or
-  `GET /v1/principals:search`.
+- **Fixed in `TDD-identity-control-001` 1.18.0: `GET /v1/principals:quarantined`** lists the held
+  mappings, and `identity.principal.quarantined` counts them.
 
 ## References
 

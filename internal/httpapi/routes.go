@@ -47,6 +47,10 @@ type RoutesConfig struct {
 	// is not mounted.
 	TenantContext TenantReporter
 
+	// TenantOperator serves the projection's operator routes (TDD-identity-control-002 2.5.0). Nil,
+	// they are not mounted.
+	TenantOperator TenantOperator
+
 	// KernelEvents sweeps the kernel's event store into the record on request (TDD-identity-control-007).
 	// Nil, its route is not mounted.
 	KernelEvents KernelEventSweeper
@@ -155,6 +159,8 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	api.HandleFunc("POST /v1/principals/{target}", p(k.cmd(principalAction(cfg, k))))
 	api.HandleFunc("GET /v1/principals:dangling", p(cfg.Principals.Dangling))
 	api.HandleFunc("GET /v1/principals:unmapped", p(cfg.Principals.Unmapped))
+	api.HandleFunc("GET /v1/principals:pending", p(cfg.Principals.Pending))
+	api.HandleFunc("GET /v1/principals:quarantined", p(cfg.Principals.Quarantined))
 	if cfg.Investigation != nil {
 		api.HandleFunc("GET /v1/principals:search", p(cfg.Investigation.Search))
 		api.HandleFunc("GET /v1/principals/{principal_id}", p(cfg.Investigation.Principal))
@@ -171,6 +177,12 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	}
 	if cfg.TenantContext != nil {
 		api.HandleFunc("GET /v1/projections/tenant-context/report", p(tenantReport(cfg.TenantContext)))
+	}
+	if cfg.TenantOperator != nil {
+		api.HandleFunc("GET /v1/projections/tenant-context:unconverged", p(tenantUnconverged(cfg.TenantOperator)))
+		api.HandleFunc("GET /v1/projections/tenant-context:findings", p(tenantFindings(cfg.TenantOperator)))
+		api.HandleFunc("POST /v1/projections/tenant-context/tenants/{tenant_action}", p(tenantAction(cfg.TenantOperator)))
+		api.HandleFunc("POST /v1/projections/tenant-context:sweep", p(tenantSweep(cfg.TenantOperator)))
 	}
 	if cfg.EmergencyGrants != nil {
 		api.HandleFunc("GET /v1/provider-grants:emergency-validation", p(emergencyValidation(cfg.EmergencyGrants)))
@@ -269,8 +281,8 @@ func (s Surface) Mount(probeChain, apiChain func(http.Handler) http.Handler) htt
 	return root
 }
 
-// principalAction dispatches POST /v1/principals/{target} by its action: :relink to the Principal
-// path, replayed here, and :suspend and :restore to the security commands when they are mounted,
+// principalAction dispatches POST /v1/principals/{target} by its action: :relink and :release to the
+// Principal path, replayed here, and :suspend and :restore to the security commands when they are mounted,
 // which key themselves.
 func principalAction(cfg RoutesConfig, k commands) http.HandlerFunc {
 	relink := k.replay(cfg.Principals.PrincipalAction)

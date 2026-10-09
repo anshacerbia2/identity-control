@@ -43,8 +43,11 @@ type Converger struct {
 }
 
 type convergerInstruments struct {
-	attempts metric.Int64Counter
-	duration metric.Float64Histogram
+	attempts  metric.Int64Counter
+	duration  metric.Float64Histogram
+	converged metric.Int64Counter
+	delay     metric.Float64Histogram
+	shared    shared
 }
 
 // NewConverger builds the converger. A nil meter records nothing.
@@ -74,16 +77,29 @@ func NewConverger(tx Transactor, kernel keycloak.TenantOrganizations, cfg Conver
 		metric.WithDescription("One convergence's kernel calls")); err != nil {
 		return nil, err
 	}
+	if c.metric.converged, err = meter.Int64Counter("identity.tenant_projection.converged",
+		metric.WithDescription("Convergences recorded converged, not left pending by a later mark, by priority")); err != nil {
+		return nil, err
+	}
+	if c.metric.delay, err = meter.Float64Histogram("identity.tenant_projection.delivery_to_converged", metric.WithUnit("s"),
+		metric.WithDescription("From the earliest delivery a convergence closes to its record, by priority: "+
+			"above 2 s a warning, above 4 s critical")); err != nil {
+		return nil, err
+	}
+	if c.metric.shared, err = newShared(meter); err != nil {
+		return nil, err
+	}
 	if _, err = meter.Int64ObservableGauge("identity.tenant_projection.unresolved",
-		metric.WithDescription("Tenants parked as unresolved; a priority one is critical"),
+		metric.WithDescription("Tenants parked as unresolved, by priority; a priority one is critical"),
 		metric.WithInt64Callback(func(ctx context.Context, o metric.Int64Observer) error {
-			var count int64
+			var priority, standard int64
 			err := tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
-				return tx.QueryRow(ctx, `SELECT count(*) FROM identity.tenant_convergence WHERE state = 'unresolved'`).
-					Scan(&count)
+				return tx.QueryRow(ctx, `SELECT count(*) FILTER (WHERE priority), count(*) FILTER (WHERE NOT priority)
+				    FROM identity.tenant_convergence WHERE state = 'unresolved'`).Scan(&priority, &standard)
 			})
 			if err == nil {
-				o.Observe(count)
+				o.Observe(priority, metric.WithAttributes(attribute.Bool("priority", true)))
+				o.Observe(standard, metric.WithAttributes(attribute.Bool("priority", false)))
 			}
 			return err
 		})); err != nil {
@@ -116,18 +132,23 @@ JOIN identity.principal_mapping pm ON pm.principal_id = m.principal_id AND pm.re
 WHERE m.tenant_id = $1 AND m.membership_status = 'active' AND pm.keycloak_user_id IS NOT NULL`
 
 // convergedStatement finishes a convergence. The Tenant stays pending when it was marked again
-// after the claim, because that mark may carry state this convergence did not read.
-const convergedStatement = `UPDATE identity.tenant_convergence
-SET state            = CASE WHEN marked_at = $2 THEN 'converged' ELSE 'pending' END,
-    priority         = CASE WHEN marked_at = $2 THEN false ELSE priority END,
-    sweep            = CASE WHEN marked_at = $2 THEN false ELSE sweep END,
+// after the claim, because that mark may carry state this convergence did not read, and it then
+// keeps delivered_at. Recorded converged, it clears delivered_at and answers the delay from it, in
+// the database's clock, which set it (TDD-identity-control-002 2.5.0).
+const convergedStatement = `UPDATE identity.tenant_convergence t
+SET state            = CASE WHEN t.marked_at = $2 THEN 'converged' ELSE 'pending' END,
+    priority         = CASE WHEN t.marked_at = $2 THEN false ELSE t.priority END,
+    sweep            = CASE WHEN t.marked_at = $2 THEN false ELSE t.sweep END,
+    delivered_at     = CASE WHEN t.marked_at = $2 THEN NULL ELSE t.delivered_at END,
     next_attempt_at  = now(),
     lease_until      = NULL,
     attempts         = 0,
     last_error_class = NULL,
-    kernel_org_id    = coalesce(nullif($3, ''), kernel_org_id),
+    kernel_org_id    = coalesce(nullif($3, ''), t.kernel_org_id),
     converged_at     = now()
-WHERE tenant_id = $1`
+FROM (SELECT delivered_at FROM identity.tenant_convergence WHERE tenant_id = $1) held
+WHERE t.tenant_id = $1
+RETURNING t.state = 'converged', extract(epoch FROM now() - held.delivered_at)::float8`
 
 const failedStatement = `UPDATE identity.tenant_convergence
 SET state            = CASE WHEN $2 THEN 'unresolved' ELSE 'pending' END,
@@ -195,10 +216,19 @@ func (c *Converger) RunOnce(ctx context.Context) (bool, error) {
 	attrs := []any{slog.String("tenant_id", cl.tenant.String()), slog.Int("attempt", cl.attempts),
 		slog.Bool("priority", cl.priority)}
 	if err == nil {
-		if finishErr := c.converged(ctx, cl, orgID, changes); finishErr != nil {
+		recorded, delay, finishErr := c.converged(ctx, cl, orgID, changes)
+		if finishErr != nil {
 			return true, finishErr
 		}
 		c.metric.attempts.Add(ctx, 1, metric.WithAttributes(attribute.String("outcome", "converged")))
+		if recorded {
+			priority := metric.WithAttributes(attribute.Bool("priority", cl.priority))
+			c.metric.converged.Add(ctx, 1, priority)
+			if delay != nil {
+				c.metric.delay.Record(ctx, *delay, priority)
+				attrs = append(attrs, slog.Float64("delivery_to_converged_seconds", *delay))
+			}
+		}
 		c.logger.InfoContext(ctx, "tenant converged", attrs...)
 		return true, nil
 	}
@@ -226,10 +256,20 @@ func (c *Converger) RunOnce(ctx context.Context) (bool, error) {
 
 // converged finishes a convergence, and for a sweep's records each change it had to make: in one
 // transaction, so a finding exists exactly when the convergence it describes is recorded.
-func (c *Converger) converged(ctx context.Context, cl claim, orgID string, changes []change) error {
-	return c.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
-		if _, err := tx.Exec(ctx, convergedStatement, cl.tenant.String(), cl.marked, orgID); err != nil {
+//
+// It reports whether the Tenant was recorded converged rather than left pending by a later mark, and
+// the delay from the earliest delivery that convergence closed, nil when no delivery was waiting.
+func (c *Converger) converged(ctx context.Context, cl claim, orgID string, changes []change) (bool, *float64, error) {
+	var (
+		recorded bool
+		delay    *float64
+	)
+	err := c.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		if err := tx.QueryRow(ctx, convergedStatement, cl.tenant.String(), cl.marked, orgID).Scan(&recorded, &delay); err != nil {
 			return fmt.Errorf("tenantcontext: recording the convergence: %w", err)
+		}
+		if !recorded {
+			delay = nil
 		}
 		if !cl.sweep {
 			return nil
@@ -261,6 +301,15 @@ func (c *Converger) converged(ctx context.Context, cl claim, orgID string, chang
 		}
 		return nil
 	})
+	if err != nil {
+		return false, nil, err
+	}
+	if cl.sweep {
+		for _, ch := range changes {
+			c.metric.shared.finding(ctx, ch.class)
+		}
+	}
+	return recorded, delay, nil
 }
 
 func (c *Converger) finish(ctx context.Context, statement string, args ...any) error {

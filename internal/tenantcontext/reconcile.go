@@ -11,7 +11,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go.opentelemetry.io/otel/metric"
 	"log/slog"
+	"time"
 
 	"github.com/anshacerbia2/foundation-platform/db"
 	"github.com/anshacerbia2/foundation-platform/id"
@@ -104,6 +106,8 @@ type Reconciler struct {
 	realm    keycloak.Realm
 	snapshot SnapshotSource
 	logger   *slog.Logger
+	metric   shared
+	now      func() time.Time
 }
 
 // NewReconciler builds the sweep. A nil snapshot source sweeps the kernel alone: a server not yet
@@ -116,11 +120,53 @@ func NewReconciler(desired *Desired, tx Transactor, kernel keycloak.TenantOrgani
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Reconciler{desired: desired, tx: tx, kernel: kernel, realm: realm, snapshot: snapshot, logger: logger}, nil
+	metrics, err := newShared(nil)
+	if err != nil {
+		return nil, err
+	}
+	return &Reconciler{desired: desired, tx: tx, kernel: kernel, realm: realm, snapshot: snapshot, logger: logger,
+		metric: metrics, now: time.Now}, nil
+}
+
+// sweepAgeStatement is the age of the newest finished Tenant context sweep, null before the first.
+const sweepAgeStatement = `SELECT extract(epoch FROM now() - max(finished_at))::float8
+FROM identity.reconcile_run WHERE sweep = 'tenant_context' AND finished_at IS NOT NULL`
+
+// Instrument counts the sweep's marks and findings on the meter, and registers the sweep-age gauge
+// (TDD-identity-control-002 2.5.0 §Sweep Runs). A nil meter records nothing.
+func (r *Reconciler) Instrument(meter metric.Meter) error {
+	if meter == nil {
+		return nil
+	}
+	metrics, err := newShared(meter)
+	if err != nil {
+		return err
+	}
+	r.metric = metrics
+	_, err = meter.Float64ObservableGauge("identity.tenant_projection.sweep_age", metric.WithUnit("s"),
+		metric.WithDescription("Seconds since the newest finished Tenant context sweep: above one interval a warning, two critical"),
+		metric.WithFloat64Callback(func(ctx context.Context, o metric.Float64Observer) error {
+			var age *float64
+			if err := r.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+				return tx.QueryRow(ctx, sweepAgeStatement).Scan(&age)
+			}); err != nil {
+				return err
+			}
+			if age != nil {
+				o.Observe(*age)
+			}
+			return nil
+		}))
+	return err
 }
 
 // SweepResult is what one sweep did.
 type SweepResult struct {
+	// RunID names the sweep's record in identity.reconcile_run, and Outcome is the outcome recorded
+	// there: converged, drift or unresolved (TDD-identity-control-002 2.5.0 §Sweep Runs).
+	RunID   id.UUID
+	Outcome string
+
 	Mark         int64
 	SnapshotRows int
 	// SnapshotErr is a snapshot that could not be read. The kernel half of the sweep runs anyway: a
@@ -138,8 +184,57 @@ const findingStatement = `INSERT INTO identity.projection_finding
 VALUES ($1, $2, $3, (SELECT principal_id FROM identity.principal_mapping
     WHERE keycloak_user_id = $4 AND realm = $5 AND $4 <> ''), $6)`
 
-// Sweep reconciles once: the snapshot, then the kernel's Organizations, then every known Tenant marked.
+// The outcomes a sweep run records, as identity.reconcile_run's check allows them.
+const (
+	OutcomeConverged  = "converged"
+	OutcomeDrift      = "drift"
+	OutcomeUnresolved = "unresolved"
+)
+
+const insertSweepRunStatement = `INSERT INTO identity.reconcile_run (run_id, sweep, started_at)
+VALUES ($1, 'tenant_context', $2)`
+
+const finishSweepRunStatement = `UPDATE identity.reconcile_run
+SET finished_at = $2, outcome = $3, findings = $4
+WHERE run_id = $1 AND finished_at IS NULL`
+
+// Sweep reconciles once, and records the run: the snapshot, then the kernel's Organizations, then
+// every known Tenant marked. A sweep that cannot record its run does not run, so a sweep the gauge
+// counts is one that happened.
 func (r *Reconciler) Sweep(ctx context.Context) (SweepResult, error) {
+	runID, err := id.NewV7()
+	if err != nil {
+		return SweepResult{}, err
+	}
+	if err := r.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		_, err := tx.Exec(ctx, insertSweepRunStatement, runID.String(), r.now())
+		return err
+	}); err != nil {
+		return SweepResult{}, fmt.Errorf("tenantcontext: recording the sweep run: %w", err)
+	}
+	result, sweepErr := r.sweep(ctx)
+	result.RunID = runID
+	switch {
+	case sweepErr != nil || result.SnapshotErr != nil:
+		result.Outcome = OutcomeUnresolved
+	case result.Unknown > 0:
+		result.Outcome = OutcomeDrift
+	default:
+		result.Outcome = OutcomeConverged
+	}
+	// Finished on a context of its own: a sweep cancelled part way is still recorded as unresolved.
+	finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := r.tx.InTx(finishCtx, func(ctx context.Context, tx db.Tx) error {
+		_, err := tx.Exec(ctx, finishSweepRunStatement, runID.String(), r.now(), result.Outcome, result.Unknown)
+		return err
+	}); err != nil && sweepErr == nil {
+		sweepErr = fmt.Errorf("tenantcontext: finishing the sweep run: %w", err)
+	}
+	return result, sweepErr
+}
+
+func (r *Reconciler) sweep(ctx context.Context) (SweepResult, error) {
 	var result SweepResult
 	if r.snapshot != nil {
 		mark, rows, err := r.snapshot.OrganizationSnapshot(ctx)
@@ -205,6 +300,7 @@ func (r *Reconciler) Sweep(ctx context.Context) (SweepResult, error) {
 	if err != nil {
 		return result, err
 	}
+	r.metric.mark(ctx, markSweep, false, result.Marked)
 	r.logger.InfoContext(ctx, "tenant context swept", slog.Int64("mark", result.Mark),
 		slog.Int("snapshot_rows", result.SnapshotRows), slog.Int("unknown_organizations", result.Unknown),
 		slog.Int64("tenants_marked", result.Marked))
@@ -245,6 +341,7 @@ func (r *Reconciler) withdraw(ctx context.Context, org keycloak.Organization) (b
 	if err != nil {
 		return false, fmt.Errorf("tenantcontext: recording the unknown Organization %s: %w", org.Name, err)
 	}
+	r.metric.finding(ctx, "unknown_organization")
 	r.logger.ErrorContext(ctx, "an Organization the authority never created was disabled and emptied",
 		slog.String("organization_id", org.ID), slog.Int("members_removed", len(members)))
 	return true, nil

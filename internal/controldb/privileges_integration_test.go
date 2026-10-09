@@ -373,13 +373,18 @@ func TestWeek1SchemaShape(t *testing.T) {
 		}
 	}
 
+	// TDD-identity-control-001 1.18.0 dropped the partial unique index on (realm, keycloak_user_id):
+	// the column's own unique constraint holds every non-null value unique, which is what is asserted.
+	if queryBool(t, pool, ctx, `SELECT to_regclass('identity.principal_mapping_realm_user') IS NOT NULL`) {
+		t.Error("identity.principal_mapping_realm_user is back; TDD-identity-control-001 1.18.0 removed it as redundant")
+	}
 	if !queryBool(t, pool, ctx,
-		`SELECT indpred IS NOT NULL AND indisunique
+		`SELECT indpred IS NULL AND indisunique
 		   FROM pg_index i
 		   JOIN pg_class c ON c.oid = i.indexrelid
 		   JOIN pg_namespace n ON n.oid = c.relnamespace
-		  WHERE n.nspname = 'identity' AND c.relname = 'principal_mapping_realm_user'`) {
-		t.Error("identity.principal_mapping_realm_user is not a partial unique index")
+		  WHERE n.nspname = 'identity' AND c.relname = 'principal_mapping_keycloak_user_id_key'`) {
+		t.Error("identity.principal_mapping_keycloak_user_id_key is not a unique index over every row")
 	}
 }
 
@@ -401,6 +406,7 @@ func TestRegistrationRecordsAreNeverDeleted(t *testing.T) {
 		{"identity.registration_finding", []string{"SELECT", "INSERT", "UPDATE"}, []string{"DELETE", "TRUNCATE"}},
 		{"identity.drift_exception", []string{"SELECT", "INSERT"}, []string{"UPDATE", "DELETE", "TRUNCATE"}},
 		{"identity.principal_relink", []string{"SELECT", "INSERT"}, []string{"UPDATE", "DELETE", "TRUNCATE"}},
+		{"identity.principal_release", []string{"SELECT", "INSERT"}, []string{"UPDATE", "DELETE", "TRUNCATE"}},
 		{"identity.principal_finding", []string{"SELECT", "INSERT", "UPDATE"}, []string{"DELETE", "TRUNCATE"}},
 		{"identity.client_key", []string{"SELECT", "INSERT"}, []string{"UPDATE", "DELETE", "TRUNCATE"}},
 		{"identity.workload", []string{"SELECT", "INSERT", "UPDATE"}, []string{"DELETE", "TRUNCATE"}},

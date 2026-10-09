@@ -75,7 +75,10 @@ func (d *Desired) applyRepair(ctx context.Context, envelope event.Envelope) (del
 		}
 	}
 
-	var outcome delivery.Outcome
+	var (
+		outcome delivery.Outcome
+		marked  int64
+	)
 	err := d.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
 		first, err := inbox.Guard(ctx, tx, providerauthority.Consumer, envelope.ID, envelope.Type)
 		if err != nil {
@@ -117,6 +120,7 @@ func (d *Desired) applyRepair(ctx context.Context, envelope event.Envelope) (del
 				return fmt.Errorf("tenantcontext: marking tenant %s: %w", tenant, err)
 			}
 		}
+		marked = int64(len(tenants))
 		if _, err := tx.Exec(ctx, providerauthority.AdvanceAppliedStatement, envelope.StreamPosition); err != nil {
 			return fmt.Errorf("tenantcontext: recording the applied position: %w", err)
 		}
@@ -125,6 +129,8 @@ func (d *Desired) applyRepair(ctx context.Context, envelope event.Envelope) (del
 	if err != nil {
 		return delivery.Outcome{}, err
 	}
+	// A repair is a delivery: the marks it makes are measured from it (TDD-identity-control-002 2.5.0).
+	d.metric.mark(ctx, markDelivery, false, marked)
 	return outcome, nil
 }
 

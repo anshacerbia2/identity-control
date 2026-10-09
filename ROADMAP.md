@@ -35,9 +35,9 @@ envelope, idempotency, and problem-details packages from day one, and reimplemen
 any of them here would produce a second revocation enforcement interval while both
 services reported compliance.
 
-Pinned at `v0.2.2`. `v0.2.0` shipped a platform migration set that could only be applied
-once — see the findings table under Week 2½ — and `v0.2.2` added the `request-in-progress`
-problem type this service needed.
+Pinned at `v0.4.0` (`go.mod`). Two earlier pins are kept here for their reasons: `v0.2.0` shipped a
+platform migration set that could only be applied once — see the findings table under Week 2½ — and
+`v0.2.2` added the `request-in-progress` problem type this service needed.
 
 `identity-kernel` is a parallel track, not a predecessor. Keycloak calls in this
 service sit behind a port with a fake implementation, so the full creation and
@@ -86,13 +86,14 @@ dump, a hand-run `GRANT`, a role that predates these files.
 | Atlas in database scope planned `DROP SCHEMA "public" CASCADE`, and would have planned the same for `platform` | Both urls carry `search_path=identity`. The `identity` schema object is created by `identity-migrate -stage=pre`, because a schema-scoped plan may not modify the schema it is scoped to |
 | `GRANT ... ON ALL TABLES IN SCHEMA` over an empty schema is a no-op, not an error | `grants.sql` opens with a guard that raises when its objects are absent. Without it the stage reported success and granted nothing, and the failure surfaced as a runtime that could not read its own tables |
 | `atlas migrate lint` is Atlas Pro only since v0.38 | ADR-GLB-004 names it as the destructive gate, so the mandated mechanism cannot run on the free CLI. CI runs `atlas migrate validate`, which is free and checks directory integrity, plus a text-level destructive gate standing in for the analyzer. **This is debt.** Resolving it means an Atlas Pro login with a CI token, or amending ADR-GLB-004 |
-| `TDD-identity-control-001` specifies both `keycloak_user_id UNIQUE` and a partial unique index on `(realm, keycloak_user_id)` | The first is strictly stronger, so the second adds nothing. Both are implemented as specified; the redundancy is recorded here rather than resolved in the schema |
+| `TDD-identity-control-001` specifies both `keycloak_user_id UNIQUE` and a partial unique index on `(realm, keycloak_user_id)` | The first is strictly stronger, so the second adds nothing. ✅ Resolved 2026-10-09: TDD-001 1.18.0 removes the index and migration `20261009110000_drop_redundant_principal_index` drops it. No statement named it. The repository's text gate flags `DROP INDEX`, so the line carries the reviewed `atlas:destructive-approved` annotation; Atlas's own destructive analyzers name schemas, tables and columns, not indexes, and an index holds no data |
 | Atlas requires the target schema to exist on the dev server before any schema-scoped command | CI creates it on the throwaway dev container before Atlas runs. Absent, the first Atlas step fails with `schema "identity" was not found`, which reads like a broken migration |
 
 ### Week 2 · Principal creation path
 
 - ✅ UUIDv7 generation and idempotency key claim
-- ✅ `POST /v1/principals`, with the rest of the Principal surface still to land
+- ✅ `POST /v1/principals`; the rest of the Principal surface landed with the later weeks (`:relink`,
+  `:release`, the sweep and its listings, and TDD-005's reads and containment)
 - ✅ Keycloak behind a port, with a fake covering create, search, and disable, and the real
   Admin REST client implementing it
 - ✅ Pending-state recovery loop, with the search strategy left as a seam
@@ -501,15 +502,15 @@ Acceptance criteria, also from RESPONSE-4 §4:
   - `POST /v1/registrations:adopt` brings a client a bootstrap script created under registration. It plans first (`dry_run`), refuses a client whose redirect URIs or keys differ from the declaration or that authenticates with a secret or a JWKS URL, converges a repairable difference only when named, and records the adoption insert-only in `identity.registration_adoption`. Only `confidential` is adopted.
   - The sweep records every Keycloak client no registration describes as `unmanaged`. The kernel's built-in clients and this service's two Admin API clients are exempt. `IDENTITY_UNMANAGED_CLIENTS` is `report` by default and `disable` once an estate's bootstrap clients are adopted; production runs `disable`.
   - The `deploy-dev` smoke adopts `identity-control-caller` with the key it already holds, so its sweeps converge; Proof B scenario 8 records a console-created client `unmanaged` and converges it once deleted.
-  - **On the development server:** adopt `identity-experience-bff` with its public key (`deploy/dev/README.md` §Adopting the BFF), then set `IDENTITY_UNMANAGED_CLIENTS=disable`.
+  - A server stood up from zero adopts the caller and `identity-experience-bff`, and ends with `IDENTITY_UNMANAGED_CLIENTS=disable` (`deploy/dev/README.md` §First start, steps 8 to 11; `deploy-dev` runs the last step).
   - An adopted client is not released afterwards (ADR-IAM-001 §5.13, Alternative J): it stops like any registration, below. A declared audience that names this service's own Admin API client cannot be registered, so the caller is adopted with an empty audience; an adoption does not plan audience mappers, and the sweep compares them from TDD-003 1.33.0 (below).
 - ✅ **The token profile** (STD-IAM-002 §3.2 and §3.2.1, TDD-003 1.17.0 §Profiles; identity-kernel compat runs 36775603547 and the claim closure).
   - Every client but a resource is registered with the `access.token.header.type.rfc9068` attribute, so its access tokens carry `typ` `at+jwt`, and a `client_id` mapper naming its `client_key`, which RFC 9068 §2.2 requires and the kernel writes only into a service-account token.
   - Its default and optional client scopes are closed sets: `basic`, `acr` (not for a workload) and its managed audience scope, and `scnehaux-profile` as an optional scope for a confidential client. A built-in `profile`, `email`, `roles` or `web-origins` scope is detached. A workload holds `service_account`, which the kernel attaches again on every update; identity-kernel declares it with its `client_id` mapper alone. No access token carries personal data, roles, or a workload's address.
   - The sweep compares `audience_scope` and `token_format`, both repaired. An adoption names them in `converge` for a client a script made before the profile; the smoke adopts the caller so.
-  - **On the development server:** the clients registered or adopted before this differ in both classes at the first sweep. With no admin event to attribute the difference to, each finding is `unattributed`; apply the registered state once for each, from the Admin Portal or `POST /v1/registrations:reconcile`.
+  - From zero, every client is registered with the profile or adopted with `token_format` and `audience_scope` converged, so none differs; `deploy/dev/README.md` §First start step 10 applies the registered state to any finding that remains.
   - The verifier's `at+jwt` check is the next item.
-- ✅ **The caller's token is typed `at+jwt`** (STD-IAM-002 §3.5 step 5, TDD-001 1.7.0 §Caller Token; foundation-platform `v0.2.13`). `IDENTITY_TOKEN_TYPE` is `report` by default: a token typed `JWT` is accepted and logged with its `azp`. `enforce` refuses it with 401. **On the development server:** watch the log for `not typed at+jwt` after the callers' clients carry the token profile, then set `IDENTITY_TOKEN_TYPE=enforce`.
+- ✅ **The caller's token is typed `at+jwt`** (STD-IAM-002 §3.5 step 5, TDD-001 1.7.0 §Caller Token; foundation-platform `v0.2.13`). `IDENTITY_TOKEN_TYPE` is `report` by default: a token typed `JWT` is accepted and logged with its `azp`. `enforce` refuses it with 401. A server stood up from zero ends with `IDENTITY_TOKEN_TYPE=enforce` (`deploy/dev/README.md` §First start step 11), and `deploy-dev` runs that step on every change: the service recreated in both production settings must still serve its callers, record no client `unmanaged` and log no token `not typed at+jwt` (`scripts/dev-production-switches.ps1`).
 - ✅ **Suspension, restoration, and retirement** (ADR-IAM-001 §5.13, STD-IAM-001 §3.4, SAD-001, TDD-003 1.16.0; decided 2026-09-30 on identity-kernel compat run 36765561606, NIST SP 800-61r3 RS.MI-01/02, and the disable-before-delete practice of Google Cloud and AWS IAM).
   - `POST /v1/registrations/{id}:suspend` records the registration suspended, then disables its client and sets the not-before that ends the refresh tokens it was issued: the kernel accepts a disabled client's refresh tokens again once it is enabled. The sweep holds a suspended client disabled with its not-before (the `suspension` field class), attributed or not.
   - `:restore` writes the registered redirect URIs, keys and lifespan back, enables the client, and resolves the registration's open findings, in one transaction that a kernel failure rolls back. A restore of an active registration changes nothing, so it never lifts a block.
@@ -554,7 +555,8 @@ Acceptance criteria, also from RESPONSE-4 §4:
   - The ceremony registers `identity-control-api`, this service's own resource (ADR-IAM-001 §5.11 rule 5, TDD-identity-control-001 1.11.0), named by `IDENTITY_TOKEN_AUDIENCE`, so a fresh stack's first caller has a resource to name. The dev caller's audience mapper names it, and a server whose ceremony ran before moves by resuming the ceremony and changing its callers' audience (`deploy/dev/README.md`).
   - ✅ The drift sweep compares audience mappers (TDD-identity-control-003 1.33.0): the `audience` field class, every `oidc-audience-mapper` on an active client against one per declared resource, compared as lists, so a hand-made, renamed or repeated mapper is a difference. It is repaired when an admin event names who changed it and `unattributed` otherwise, is confirmed under the registration's share lock first, since an audience change writes the kernel before it commits, and no drift exception covers it (`internal/reconcile`, migration `20261007190438_compare_audience_mappers`).
   - ✅ Lifetime-class changes, the `lifetime_class` kind of a change (ADR-IAM-003 §5.9, STD-IAM-002 1.8.0 §3.3, TDD-identity-control-003 1.37.0): an owner of a resource or a provider proposes the next class, L0 to L3, never a number, approved in production by another provider. The apply writes the class and the resource's version and moves the lifespan of every active caller whose shortest class changes, under the callers' row locks in a fixed order; a kernel refusal puts back the callers already written and rolls back (migration `20261008200000_backchannel_logout_and_lifetime_changes`).
-- ✅ **Back-channel logout URI** (ADR-IAM-009, STD-IAM-001 2.7.0 §3.4, TDD-identity-control-003 1.37.0): a `confidential` registration, adoption or request takes `backchannel_logout_uri`, an absolute URI with no fragment, https in production. Every client but a resource is written with front-channel logout off and "session required" on, explicitly, and the URI when there is one; restore writes them again. The drift sweep compares them as the `logout` field class, repaired when attributed, and adoption converges it when named. `deploy-dev` proves it from zero against the kernel: a client registered with the URI of a receiver on the runner gets a PS256 `logout+jwt` naming its session when `POST /v1/me/sessions/{security_ref}:terminate` ends it (`scripts/dev-back-channel-logout-proof.ps1`). A BFF on a developer's machine registers none, since the kernel cannot reach it (ADR-IAM-009 §5.3). Not built: changing the URI after registration, which no change kind writes yet.
+- ✅ **Back-channel logout URI** (ADR-IAM-009, STD-IAM-001 2.7.0 §3.4, TDD-identity-control-003 1.37.0): a `confidential` registration, adoption or request takes `backchannel_logout_uri`, an absolute URI with no fragment, https in production. Every client but a resource is written with front-channel logout off and "session required" on, explicitly, and the URI when there is one; restore writes them again. The drift sweep compares them as the `logout` field class, repaired when attributed, and adoption converges it when named. `deploy-dev` proves it from zero against the kernel: a client registered with the URI of a receiver on the runner gets a PS256 `logout+jwt` naming its session when `POST /v1/me/sessions/{security_ref}:terminate` ends it (`scripts/dev-back-channel-logout-proof.ps1`). A BFF on a developer's machine registers none, since the kernel cannot reach it (ADR-IAM-009 §5.3).
+  - ✅ Changing the URI after registration (TDD-identity-control-003 1.38.0): the `backchannel_logout_uri` change kind sets, moves or removes it (`""` removes), as the redirect-URI kind changes those: an owner or a provider proposes, validated as registration validates the URI, https in production, applied at once outside production and approved by a provider other than the proposer in production (ADR-IAM-003 §5.2, NIST AC-5). The apply writes desired state and the kernel's `backchannel.logout.url` in one transaction under the row lock, and the sweep confirms a `logout` difference under the share lock before acting, so a change in flight is never repaired back (migration `20261009100000_backchannel_logout_changes`). "Session required" is not registered and stays on. `deploy-dev` moves a registered client's URI and proves the next logout token arrives at the new URI and not the first, the sweep then finds it in sync, and a removal applies (`scripts/dev-back-channel-logout-proof.ps1` steps 5–6). The Developer Console and Admin Portal do not offer it yet (identity-experience).
 - ✅ **Application developer standing, non-production creation** (ADR-IAM-003 §5.3; TDD-003 1.21.0 §Application Developers): `identity.application_developer`, and `GET`/`POST /v1/application-developers` and `:revoke`, a provider's.
   - The standing is granted and revoked by a provider with a reason. It is held only by an active human Principal, counted only while the mapping is active, and insert-only but for its revocation columns.
   - `POST /v1/registrations` admits a caller holding the standing. A caller without it is refused before the body is read. Such a caller registers only:
@@ -879,8 +881,20 @@ Where each stands (2026-10-08):
   - **RPO is not met, and is a recorded gap.** The backup is a daily `pg_dump`, so a restore loses up
     to 24 hours, against `PAD-PLT-001 §6.2`'s 1 minute. That needs continuous WAL archiving with
     point-in-time recovery on the production platform.
-  - A restore to an older point than the kernel's is not drilled. `docs/runbooks/control-database-restore.md`
-    says what the service then reads as drift, and what an operator does.
+  - ✅ A restore to an older point than the kernel's is drilled in the same run (TDD-001 1.18.0
+    §Restore Evidence, `scripts/dev-restore-older-point.ps1`): changes made after the backup, the
+    restored service started in report mode, and the runbook's reconciliation checked case by case. A
+    client registered after it is `unmanaged` and adopted; a redirect URI change blocks the client
+    until the operator applies the restored state and repeats the change; a suspension's record is
+    gone while the user stays disabled, and is repeated; a Membership granted after it is removed by
+    the first sweep as `extra_member` and put back by Organization Control's repair; a Principal
+    created after it is an `orphan` that no route binds again, recorded as a gap. The record is
+    `older-point-evidence.json` in the `restore-evidence` artifact. First passing run: deploy-dev run
+    37918842749, 2026-10-09, all five cases as above, the switches returned and the service ready; the
+    same run restored 47 tables and 581 rows in 2.1 s, and recovered to the verified read in 28.9 s.
+    Its first attempt found the drill itself wrong: compose prefers an exported variable to `.env`, so
+    the restored service had started in `disable` and disabled the client and the orphan. The runbook's
+    step 7 now says so.
 - ✅ **Accept-to-enforcement delay, measured.** `deploy-dev` measures both on every run against the
   live kernel and writes them to the job summary. Above the 60-second propagation budget
   (`SAD-001 §7.7`) the job fails, and above this service's 2-second share it warns.
@@ -892,8 +906,12 @@ Where each stands (2026-10-08):
     refused. `scripts/dev-session-removal-proof.ps1`.
   - First measured on deploy-dev run 37687521673, 2026-10-07: projection removal 0.762 s and
     session removal 0.079 s. Both are inside the 2-second share and the 60-second budget.
-  - TDD-002's own signal, "delivery to converged", has no metric yet: `identity.tenant_projection.duration`
-    times one convergence call, not the delivery. The CI figure stands in until it does.
+  - ✅ TDD-002's own signal, "delivery to converged", has its metric (TDD-002 2.5.0):
+    `identity.tenant_projection.delivery_to_converged`, from `tenant_convergence.delivered_at`, the
+    first delivery a convergence closes, to its record, by `priority`, with `marked`, `converged` and
+    `findings` beside it, the unresolved gauge by `priority`, and `sweep_age` from the Tenant sweep's runs
+    in `identity.reconcile_run`. No alert rule ships in this repository: the thresholds are the TDD's,
+    for the alerting platform.
 - ✅ **Keycloak administration credential rotation, rehearsed.** `deploy/dev/rotate-client-key.sh`
   runs README §Keys' five steps for `identity-control` and `identity-control-registration`.
   `deploy-dev` runs it for both on every run, then proves the new key accepted, the previous one
@@ -903,7 +921,20 @@ Where each stands (2026-10-08):
 - ✅ **Runbooks.** `docs/runbooks/`: unmapped-Principal triage, duplicate-identifier containment,
   pending-mapping recovery, and projection drift repair, which also covers TDD-002's three
   (a revocation not converged in budget, an `unresolved` Tenant, an extra member or unknown
-  Organization). Each names the operator tooling that is not built yet.
+  Organization). Each named the operator tooling that was not built.
+  - ✅ The tooling they named is built (TDD-001 1.18.0, TDD-002 2.5.0), and the runbooks use it:
+    `POST /v1/principals/{id}:release` takes a quarantined mapping to `suspended` once exactly one
+    kernel user carries its identifier, recorded insert-only in `identity.principal_release`, and
+    `:restore` returns it to service; `GET /v1/principals:pending` and `:quarantined`, with the
+    `identity.principal.pending` (by `overdue`) and `identity.principal.quarantined` gauges;
+    `GET /v1/projections/tenant-context:unconverged` and `:findings`,
+    `POST .../tenants/{tenant_id}:redrive` and `POST /v1/projections/tenant-context:sweep`, and the
+    Tenant sweep's runs recorded. Idempotency-Key classes (STD-GLB-001 1.4.0): `:release` is replayed,
+    as `:relink`; the re-drive and the sweep are `keyOptional`, level-driven sweeps. Proof B 6b releases
+    and restores a duplicate against the kernel, and the Tenant proof uses the projection routes.
+  - Still not built, recorded in the runbooks: a human `:retire`; a route binding an orphan's
+    identifier again after a restore; a route ending a quarantined Principal's sessions before its
+    release; a route reading the ceremony record.
   - ✅ One gap they found is fixed: recovery now completes the creating request's
     `Idempotency-Key` (TDD-001 1.14.0, migration `20261008065047_principal_creation_claim`). Before,
     a Principal recovered after a failed create answered its caller's retry with `409`
@@ -925,3 +956,7 @@ covers `identity-control`, `identity-control-registration`, and the development 
 out-of-band `INSERT` that `ADR-ORG-001` prohibits. What remains for the production gate is
 operational rather than architectural: the ceremony needs a runbook naming who is authorized to
 perform it and where the record is reviewed, since the evidence is worthless if nobody reads it.
+✅ `docs/runbooks/bootstrap-ceremony.md` is written from the code: preconditions, the command, resume,
+every refusal, verification. **Owner decision pending:** who may perform it, and where, by whom and when
+the record is reviewed, are explicit placeholders in its §Who performs it, and remain open until the
+owner decides (NIST SP 800-53 AU-6's assignments).

@@ -1,8 +1,9 @@
 package httpapi
 
 // Registration changes at the transport (ADR-IAM-003 §5.2, TDD-identity-control-003 §Registration
-// Changes). An owner proposes and withdraws a change to the redirect URIs or the audience of a
-// registration it owns, or to the lifetime class of a resource it owns (ADR-IAM-003 §5.9); approving and rejecting are a provider's, refused to an owner here before
+// Changes). An owner proposes and withdraws a change to the redirect URIs, the audience or the
+// back-channel logout URI of a registration it owns, or to the lifetime class of a resource it owns
+// (ADR-IAM-003 §5.9); approving and rejecting are a provider's, refused to an owner here before
 // anything is read, and refused to the proposer by the service and the database.
 
 import (
@@ -19,13 +20,15 @@ import (
 	"github.com/anshacerbia2/identity-control/internal/registration"
 )
 
-// proposeChangeRequest carries one of redirect_uris, audience and lifetime_class. An audience of []
-// is a change to no resource, which is why it is a pointer: absent and empty are different requests.
+// proposeChangeRequest carries one of redirect_uris, audience, lifetime_class and
+// backchannel_logout_uri. An audience of [] is a change to no resource, and a backchannel_logout_uri
+// of "" removes the URI, which is why both are pointers: absent and empty are different requests.
 type proposeChangeRequest struct {
-	RedirectURIs    []string  `json:"redirect_uris"`
-	Audience        *[]string `json:"audience"`
-	LifetimeClass   *string   `json:"lifetime_class"`
-	ExpectedVersion int64     `json:"expected_version"`
+	RedirectURIs         []string  `json:"redirect_uris"`
+	Audience             *[]string `json:"audience"`
+	LifetimeClass        *string   `json:"lifetime_class"`
+	BackChannelLogoutURI *string   `json:"backchannel_logout_uri"`
+	ExpectedVersion      int64     `json:"expected_version"`
 }
 
 // ProposeChange handles POST /v1/registrations/{registration_id}/changes, with a reason. It answers
@@ -51,7 +54,7 @@ func (h *Registrations) ProposeChange(w http.ResponseWriter, r *http.Request) {
 	}
 	change, created, err := h.registrar.ProposeChange(r.Context(), registration.Proposal{
 		RegistrationID: registrationID, RedirectURIs: body.RedirectURIs, Audience: body.Audience,
-		LifetimeClass:   body.LifetimeClass,
+		LifetimeClass: body.LifetimeClass, BackChannelLogoutURI: body.BackChannelLogoutURI,
 		ExpectedVersion: body.ExpectedVersion, ProposedBy: principal, Reason: reason, Provider: IsProvider(r.Context())})
 	if err != nil {
 		writeChangeError(w, r, err)
