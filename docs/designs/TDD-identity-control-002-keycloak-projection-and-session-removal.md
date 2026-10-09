@@ -362,6 +362,10 @@ POST /v1/projections/tenant-context:sweep
   left, the same as the scheduled one.
 - **A sweep on request is the scheduled sweep, now.** It runs the same code and records the same run,
   so an operator need not restart the service to force one.
+- **The findings listing carries no kernel identifier.** A convergence's finding records the kernel
+  user in its `detail` as evidence; the listing serves `detail` without `kernel_user_id`, and
+  `principal_id` names the person, as `TDD-identity-control-001` §Operational Notes keeps
+  `keycloak_user_id` out of every response.
 - **No route changes the desired state.** Only an event or a repair does, each with its inbox guard and
   its version rule. These routes schedule work and read records.
 
