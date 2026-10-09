@@ -1012,16 +1012,34 @@ whole with `--create`, the database is as it was, and the migrate job upgrades i
 database. The migrate job still runs after the restore, so `roles.sql`, `grants.sql` and
 `identity_app`'s password from `.env` are asserted again.
 
+**A restore to an older point (1.18.0).** A real restore is older than the kernel, which kept every
+change made after the backup. The same drill proves that case and the reconciliation
+`docs/runbooks/control-database-restore.md` §After a restore to an older point prescribes
+(`scripts/dev-restore-older-point.ps1`): before the backup it registers a resource and a public client,
+creates a Principal and activates a Tenant; after the backup, with the service running again on the
+database it backed up, it creates a Principal, registers a confidential client, changes the public
+client's redirect URIs, suspends the Principal and grants a Membership in the Tenant, each reaching
+the kernel. The restored service starts with `IDENTITY_UNMAPPED_USERS` and `IDENTITY_UNMANAGED_CLIENTS`
+at `report`, as the runbook's step 7 says, and the drill requires, case by case:
+
+| Made after the backup | Seen after the restore | Reconciliation | Required result |
+| :-- | :-- | :-- | :-- |
+| A client registered | `unmanaged`, left enabled | adopted from its declaration | its finding converges |
+| A redirect URI change | a `redirect_uris` difference; the client blocked and disabled | the operator's reconcile applies the restored state, then the change is repeated through the API | the client enabled with the change, nothing open |
+| A suspension | the record gone: the Principal reads `active` while its user stays disabled | the suspension repeated | `suspended`, recorded again |
+| A Membership granted | the sweep removes the member, recorded `extra_member`: it fails closed | Organization Control's repair delivers the authoritative state | the member back, the report holding it |
+| A Principal created | an `orphan`, left enabled | none is built | recorded as a gap: no route binds an orphan's identifier to a mapping again |
+
+The switches return to what they were afterwards, and the service must come back ready. The record is
+`older-point-evidence.json`, inside the `restore-evidence` artifact.
+
 **What it does not prove.**
 
 - **RPO.** A daily dump loses up to 24 hours, against the 1 minute of `PAD-PLT-001 §6.2`. Meeting it
   needs continuous WAL archiving with point-in-time recovery on the production platform. This is a
   recorded gap, not a claim.
-- **A restore to an older point.** The drill restores to the instant of its own backup. A real
-  restore is older than the kernel, and the service then reads the difference as drift: kernel users
-  and clients created after the backup as `orphan` and `unmanaged`, registration changes as drift,
-  and Tenant context events as never received. `docs/runbooks/control-database-restore.md` says
-  what an operator does. No switch holds the registration sweep or the converger meanwhile.
+- **No switch holds the registration sweep or the converger** while a restore older than the kernel
+  is reconciled; the drill below records what they do meanwhile.
 - **Production size.** The duration is measured on CI data.
 - **Erasure.** This service has no right-to-erasure path, so it keeps no tombstones for a restore
   to re-apply (`STD-GLB-007` §GDPR Right-to-Erasure). When one is built, the drill proves it.
