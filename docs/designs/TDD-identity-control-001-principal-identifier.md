@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-001
   title: Canonical Principal Identifier and Creation Path
   owner: Core Platform Team
-  version: 1.17.0
+  version: 1.18.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-10
-  last_reviewed: 2026-10-08
+  last_reviewed: 2026-10-09
   parent_sad: SAD-001
 ---
 
@@ -232,10 +232,6 @@ CREATE TABLE identity.principal_mapping (
     CONSTRAINT principal_mapping_active_linked_check
         CHECK (state <> 'active' OR keycloak_user_id IS NOT NULL)
 );
-
-CREATE UNIQUE INDEX principal_mapping_realm_user
-    ON identity.principal_mapping (realm, keycloak_user_id)
-    WHERE keycloak_user_id IS NOT NULL;
 ```
 
 **Departure recorded: the row carries the creation payload.** Two columns were added during
@@ -259,13 +255,17 @@ second authority for identity attributes: Keycloak owns the live values, and a c
 there is not reflected here. `username` is refused as empty before the insert rather than at
 the database, so the failure names the reason instead of a column.
 
-**Departure recorded: the global unique constraint on `keycloak_user_id` makes the partial
-index redundant.** `keycloak_user_id TEXT UNIQUE` already enforces global uniqueness of
-non-null values, and PostgreSQL treats nulls as distinct, so it permits many pending rows.
-The partial unique index on `(realm, keycloak_user_id)` therefore adds nothing. Both are
-implemented as specified above; the redundancy is recorded rather than resolved, because
-removing a constraint named as a deliverable belongs in a review rather than in an
-implementation commit.
+**1.18.0 removes the partial unique index on `(realm, keycloak_user_id)`.** Up to 1.17.0 the design
+specified it beside `keycloak_user_id TEXT UNIQUE`, and both were built. The column's own constraint
+already makes every non-null value unique across all realms, and PostgreSQL treats nulls as distinct,
+so it permits many pending rows; a pair is unique whenever one of its members is, so the index could
+refuse nothing the constraint admits. No statement names it: every lookup by `keycloak_user_id` is an
+equality the constraint's own index serves, and no `ON CONFLICT` infers it. The redundancy was
+recorded and left for a review rather than resolved in an implementation commit; this version is
+that review. Migration `20261009110000_drop_redundant_principal_index` drops it. It is not a
+destructive change in the sense of `STD-GLB-002`, which names data loss: an index holds none, and
+the constraint keeps the invariant unchanged. The repository's text gate matches `DROP INDEX`, so
+the statement carries its reviewed annotation.
 
 `principal_id` is the primary key and the enterprise-wide reference. `keycloak_user_id`
 is nullable while the mapping is `pending`, and is never exposed outside this module.
@@ -284,8 +284,8 @@ pending ──→ active ──→ retired
    │ restore │  │ suspend│
    │         │  ↓        │
    │        suspended ───┘
-   │          │
-   └──────────┴────→ quarantined
+   │          │  ↑ release (1.18.0)
+   └──────────┴──┴─→ quarantined
 ```
 
 **`suspended` is containment, and it is reversible.** An administrator suspends a Principal to
@@ -294,8 +294,9 @@ stop it signing in while an incident is investigated, and restores it afterwards
 sessions ended, and nothing else changes: its Memberships, ownerships and grants are kept, as
 Okta keeps a suspended user's assignments and reinstates them on unsuspend. **`quarantined` is
 different.** It is the reconciler's hold on a mapping whose invariants are broken: a Principal made
-outside the authorized path, or a duplicate. No administrator sets it, and only a relink or a
-retirement leaves it. A suspended Principal may be retired.
+outside the authorized path, or a duplicate. No administrator sets it. It is left by `:release`
+(1.18.0, §Leaving Quarantine), which lands in `suspended`, or by a retirement. A suspended Principal
+may be retired.
 
 **`relink` is the one way back from `active`.** A Principal outlives its Keycloak user.
 The user can be deleted in the console, or lost with a realm rebuilt from nothing, and
@@ -359,6 +360,20 @@ fills it for the dangling findings recorded before.
 `principal_relink` is insert-only for the runtime role: a Principal's move to a new
 Keycloak user is exactly the change whose record must not be rewritable by the process
 that made it. A finding is kept after it resolves, and the runtime deletes none.
+
+```sql
+-- 1.18.0: a quarantined mapping released to suspended, insert-only for the runtime role
+CREATE TABLE identity.principal_release (
+    release_id                UUID        PRIMARY KEY,
+    principal_id              UUID        NOT NULL REFERENCES identity.principal_mapping(principal_id),
+    previous_keycloak_user_id TEXT,       -- null for a mapping recovery quarantined, which held none
+    keycloak_user_id          TEXT        NOT NULL,
+    quarantine_reason         TEXT,       -- the reason the mapping was held, as it stood
+    released_by               UUID        NOT NULL,
+    reason                    TEXT        NOT NULL CHECK (btrim(reason) <> ''),
+    released_at               TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
 
 ### Keycloak
 
@@ -480,11 +495,23 @@ POST   /v1/principals
 GET    /v1/principals/{principal_id}
 POST   /v1/principals/{principal_id}:quarantine
 POST   /v1/principals/{principal_id}:relink
+POST   /v1/principals/{principal_id}:release        (1.18.0)
 POST   /v1/principals/{principal_id}:retire
 GET    /v1/principals:unmapped
 GET    /v1/principals:dangling
+GET    /v1/principals:pending                       (1.18.0)
+GET    /v1/principals:quarantined                   (1.18.0)
 POST   /v1/principals:reconcile
 ```
+
+`GET /v1/principals:pending` (1.18.0) lists the mappings in `pending`, oldest first, at most 500:
+`{"pending": [{"principal_id", "subject_type", "username", "created_at", "overdue"}]}`. `overdue` is
+true past `IDENTITY_PENDING_RECOVERY_AFTER`, the age at which recovery takes a mapping up, so an
+overdue mapping is one recovery has had at least one chance to resolve. `GET /v1/principals:quarantined`
+lists the mappings in `quarantined`, oldest first, at most 500: `{"quarantined": [{"principal_id",
+"subject_type", "username", "quarantined_at", "quarantine_reason", "linked"}]}`, `linked` saying
+whether the mapping holds a kernel user (one recovery quarantined holds none). Both are a provider's,
+and neither carries `keycloak_user_id`.
 
 `GET /v1/principals:unmapped` (1.13.0) lists the open `unmapped`, `orphan` and `duplicate`
 findings, oldest first: `{"unmapped": [{"finding_id", "finding_class", "principal_id",
@@ -493,7 +520,14 @@ for the classes that have them. `GET /v1/principals:dangling` keeps its shape an
 findings only. `POST /v1/principals:reconcile` answers what the sweep it ran found:
 `{"recovered", "dangling", "unmapped", "orphan", "duplicate"}`. All three are a provider's.
 `:quarantine` and `:retire` for a human are not built: quarantine is the reconciler's hold, which
-no administrator sets (§Data Model).
+no administrator sets (§Data Model). `:release` is (1.18.0, §Leaving Quarantine).
+
+`:release` takes `X-Administrative-Reason`, an `Idempotency-Key` replayed as `:relink`'s is, and
+`{"username": "<the kernel user the triage decided is the person>"}`. It answers `200` with
+`{"principal_id", "state": "suspended"}`; `404` for no such Principal; `409` for a mapping that is not
+quarantined, for a workload, when the kernel holds no user or more than one carrying the identifier
+(the count is named), or when the one user's username is not the one named; and `503` when the
+kernel did not answer or did not confirm the containment, with nothing recorded.
 
 `:relink` requires an `Idempotency-Key` (1.15.0), and a retry with it is answered the first
 relink's response (`TDD-identity-control-003` §The Idempotency-Key on Every Command).
@@ -700,6 +734,57 @@ does not cover: an import, or a profile changed later. It is defense in depth, n
 the primary mechanism. The primary mechanism is closing every unauthorized creation
 path.
 
+### Leaving Quarantine
+
+1.18.0. A quarantined mapping is held because its invariant broke: two kernel users carried its
+identifier. The duplicate runbook contains it, finds the cause, decides with the Principal's owner and
+security which user is the person, and deletes the other in the kernel. Until 1.18.0 nothing let the
+mapping go after that, and the Principal, every Membership held under it included, stayed unusable.
+
+```text
+release(principal, username, reason, caller):           provider only
+    refuse unless the mapping is quarantined                         409
+    refuse a workload                                                409
+    users := every kernel user carrying principal_id (exact, every page)
+    refuse unless exactly one                                        409, naming the count
+    refuse unless its username is the one named                      409
+    in one transaction, under the mapping's row lock, still quarantined:
+        bind keycloak_user_id to that user; state suspended; version + 1
+        record principal_release, with the reason the mapping was held
+        disable the user and end its sessions; a kernel failure rolls back   503
+```
+
+- **It lands in `suspended`, not `active`.** Release ends the reconciler's hold and leaves the
+  containment in place: the user stays disabled and its sessions are ended, which is what
+  `suspended` already means (`TDD-identity-control-005` §Containment Is Reversible). Access comes back
+  only through `:restore`, a separate command with its own reason and record, which refuses while
+  any finding about the Principal is open. A duplicate finding resolves `user_absent` once a complete
+  sweep no longer returns the deleted user, so `:restore` follows the sweep that proves the
+  duplicate is gone. NIST CSF 2.0 lists "Incidents are contained" (RS.MI-01) apart from "The integrity
+  of restored assets is verified, systems and services are restored, and normal operating status is
+  confirmed" (RC.RP-05) [R1]: release is the verification, and restore the return to service.
+- **The hold is lifted by evidence, not by a decision.** `TDD-identity-control-005` keeps containment
+  apart from this hold because "Making it reversible by an administrator would let a decision about an
+  incident lift a hold about integrity". Release does not: it refuses unless the kernel shows the
+  invariant holds again, exactly one user carrying the identifier, and what it lands in is
+  containment. The name is not 1.0.0's containment action of that design, which became `:restore`.
+- **The kernel is read, not trusted from the record.** A recovery quarantine holds no
+  `keycloak_user_id`, and a sweep quarantine holds the user the mapping had, which the triage may have
+  decided is the extra one. So release searches by the attribute, as recovery does, and binds whichever
+  single user remains.
+- **The caller names the user.** The username is the triage's decision, stated in the request, and
+  release refuses when the one user left is not that one: a deletion of the wrong user is caught
+  before the Principal is bound to it.
+- **Containment holds even if a session survived.** Disabling an already-disabled user and ending
+  sessions are both idempotent, and both run before the commit, so a release that fails changes
+  nothing and a retry repeats them.
+- **Zero users are refused.** The Principal outlives its kernel user, but a release with no user to
+  bind would be a relink by another name, and a relink returns to `pending`, where recovery creates a
+  fresh, enabled user without anyone deciding it. Retiring a human Principal is not built; until it
+  is, a quarantined mapping whose users were all deleted stays quarantined.
+- **A workload is refused.** Its user is its client's service account, rebuilt with the client
+  (`TDD-identity-control-004`); its quarantine is not this route's.
+
 ### Verifier Invariant
 
 A protected resource accepting an internal Scnehaux token rejects the token when
@@ -874,6 +959,14 @@ Alerts:
 | Pending mappings exceeding the recovery threshold | warning |
 | Reconciliation sweep age exceeding two intervals | warning |
 
+1.18.0 gives the pending alert an instrument. `identity.principal.pending` is a gauge of the
+mappings in `pending`, by `overdue` (`true` past `IDENTITY_PENDING_RECOVERY_AFTER`, `false`
+otherwise), and `identity.principal.quarantined` a gauge of the mappings in `quarantined`. Both are
+state metrics in the sense of `STD-GLB-003` 1.1.0 §State Metrics, read from the Control Database
+when the reader collects, under a timeout, every attribute value observed with zero included; a
+failed read observes nothing, so an alert on the gauge fires on its absence too. The warning is
+`identity.principal.pending{overdue="true"}` above zero.
+
 Runbooks required before production: unmapped-Principal triage, duplicate-identifier
 containment, pending-mapping recovery, administration credential rotation, and, from 1.16.0,
 Control Database restore (`docs/runbooks/control-database-restore.md`).
@@ -945,6 +1038,8 @@ database. The migrate job still runs after the restore, so `roles.sql`, `grants.
 | Enterprise constraint | EAD-006 — identity correlation is limited to justified realm and purpose |
 | Consumed by | STD-IAM-002 Token and Verification Profile, which fixes the verifier invariant |
 | Related design | `TDD-identity-control-002` - Membership projection and session removal |
+| Conforms to | NIST CSF 2.0 RS.MI-01, RC.RP-05 — a quarantined Principal is released to containment, and returns to service by a separate restore (1.18.0) [R1] |
+| Conforms to | STD-GLB-003 1.1.0 §State Metrics — the pending and quarantined gauges (1.18.0) |
 
 ### Open Proof-of-Concept Questions
 
@@ -965,3 +1060,11 @@ Keycloak release:
    (`identity-kernel` question 4). The `iss` retained in evidence therefore names the
    realm. This design is unaffected, because it already retains `iss` and `sub` beside
    `principal_id` precisely so that a future issuer change stays reconcilable.
+
+## References
+
+- **[R1]** NIST, _The NIST Cybersecurity Framework (CSF) 2.0_, NIST CSWP 29, February 26, 2024,
+  <https://nvlpubs.nist.gov/nistpubs/CSWP/NIST.CSWP.29.pdf>, accessed 2026-10-09. RESPOND, Incident
+  Mitigation: "RS.MI-01: Incidents are contained". RECOVER, Incident Recovery Plan Execution:
+  "RC.RP-05: The integrity of restored assets is verified, systems and services are restored, and
+  normal operating status is confirmed".

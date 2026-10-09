@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-005
   title: Account Security and Investigation API Mediation
   owner: Core Platform Team
-  version: 2.11.1
+  version: 2.11.2
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-14
-  last_reviewed: 2026-10-08
+  last_reviewed: 2026-10-09
   parent_sad: SAD-001
 ---
 
@@ -716,7 +716,8 @@ ownerships and grants, and stops only sign-in.
 
 **Not the integrity hold.** 1.0.0 called this quarantine. `TDD-identity-control-001`'s
 `quarantined` is the reconciler's hold on a mapping whose invariants are broken, left only by a
-relink or a retirement. Making it reversible by an administrator would let a decision about an
+relink, a retirement, or, from `TDD-identity-control-001` 1.18.0, a release that the kernel's own
+state justifies and that lands in `suspended`. Making it reversible by an administrator would let a decision about an
 incident lift a hold about integrity. So containment is its own state, `suspended`
 (`TDD-identity-control-001` 1.12.0).
 

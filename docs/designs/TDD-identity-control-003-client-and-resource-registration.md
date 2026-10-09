@@ -284,7 +284,7 @@ CREATE TABLE identity.reconcile_run (
     outcome      TEXT,
     attribution  BOOLEAN,
     findings     INTEGER     NOT NULL DEFAULT 0,
-    CONSTRAINT reconcile_run_sweep_check CHECK (sweep IN ('registration')),
+    CONSTRAINT reconcile_run_sweep_check CHECK (sweep IN ('registration', 'tenant_context')),
     CONSTRAINT reconcile_run_outcome_check
         CHECK (outcome IS NULL OR outcome IN ('converged', 'drift', 'unresolved')),
     CONSTRAINT reconcile_run_finished_check CHECK ((finished_at IS NULL) = (outcome IS NULL))
@@ -340,6 +340,12 @@ CREATE TABLE identity.drift_exception (
         CHECK (expires_at > granted_at AND expires_at <= granted_at + interval '24 hours')
 );
 ```
+
+**`tenant_context` runs (1.38.0).** The Tenant context sweep (`TDD-identity-control-002` 2.5.0 §Sweep
+Runs) records its runs here, with the same outcomes and its unknown Organizations as `findings`. A
+registration finding names a `registration` run; nothing references a `tenant_context` run, whose
+findings are `identity.projection_finding`'s. The operator's `last_run` and the registration sweep's
+age read `sweep = 'registration'` only, so the two sweeps never stand in for each other.
 
 A run that never finished is visible as one: `outcome` is null while it runs, and the
 last run's start, finish and outcome are what `GET /v1/registrations:drift` reports
