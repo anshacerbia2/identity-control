@@ -263,6 +263,9 @@ func (r *Reconciler) Resolve(ctx context.Context, resolution Resolution) error {
 		case Audience:
 			audience := sortedList(t.reg.audience)
 			patch.Audience = &audience
+		case Logout:
+			target := t.reg.backChannelLogoutURI
+			patch.BackChannelLogoutURL = &target
 		}
 		converged, err := r.apply(ctx, t.reg, t.field, patch)
 		if err != nil {

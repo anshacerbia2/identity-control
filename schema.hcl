@@ -503,6 +503,13 @@ table "client_registration" {
     type = sql("text[]")
   }
 
+  // Where the kernel posts a confidential client's logout tokens, or null for a client the kernel
+  // cannot reach. ADR-IAM-009 §5.1, TDD-identity-control-003 1.37.0.
+  column "backchannel_logout_uri" {
+    null = true
+    type = text
+  }
+
   column "state" {
     null = false
     type = text
@@ -553,6 +560,11 @@ table "client_registration" {
 
   check "client_profile_check" {
     expr = "profile IN ('confidential', 'public', 'workload', 'resource')"
+  }
+
+  // ADR-IAM-009 §5.1: only a back end that holds sessions receives a logout token.
+  check "client_backchannel_logout_check" {
+    expr = "(backchannel_logout_uri IS NULL) OR (profile = 'confidential')"
   }
 
   check "client_audience_class_check" {
@@ -768,7 +780,7 @@ table "registration_finding" {
   }
 
   check "registration_finding_field_check" {
-    expr = "field_class IS NULL OR field_class IN ('redirect_uris', 'token_lifespan', 'audience_scope', 'signing_algorithm', 'profile', 'client_keys', 'suspension', 'token_format', 'audience')"
+    expr = "field_class IS NULL OR field_class IN ('redirect_uris', 'token_lifespan', 'audience_scope', 'signing_algorithm', 'profile', 'client_keys', 'suspension', 'token_format', 'audience', 'logout')"
   }
 
   check "registration_finding_class_check" {
@@ -1557,7 +1569,7 @@ table "registration_owner" {
 
 table "registration_change" {
   schema  = schema.identity
-  comment = "A change to a registration's redirect URIs or audience, proposed, then applied or decided against. TDD-identity-control-003."
+  comment = "A change to a registration's redirect URIs, audience or lifetime class, proposed, then applied or decided against. TDD-identity-control-003."
 
   column "change_id" {
     null = false
@@ -1603,6 +1615,18 @@ table "registration_change" {
   column "audience" {
     null = true
     type = sql("text[]")
+  }
+
+  // A resource's lifetime class when the change was proposed, and the class proposed
+  // (ADR-IAM-003 §5.9).
+  column "previous_lifetime_class" {
+    null = true
+    type = text
+  }
+
+  column "lifetime_class" {
+    null = true
+    type = text
   }
 
   // Fixed when the change is proposed, from IDENTITY_ENVIRONMENT, so the record states the rule it
@@ -1682,7 +1706,11 @@ table "registration_change" {
   }
 
   check "registration_change_kind_check" {
-    expr = "(kind = ANY (ARRAY['redirect_uris'::text, 'audience'::text])) AND ((kind = 'redirect_uris'::text) = ((redirect_uris IS NOT NULL) AND (previous_redirect_uris IS NOT NULL))) AND ((kind = 'audience'::text) = ((audience IS NOT NULL) AND (previous_audience IS NOT NULL)))"
+    expr = "(kind = ANY (ARRAY['redirect_uris'::text, 'audience'::text, 'lifetime_class'::text])) AND ((kind = 'redirect_uris'::text) = ((redirect_uris IS NOT NULL) AND (previous_redirect_uris IS NOT NULL))) AND ((kind = 'audience'::text) = ((audience IS NOT NULL) AND (previous_audience IS NOT NULL))) AND ((kind = 'lifetime_class'::text) = ((lifetime_class IS NOT NULL) AND (previous_lifetime_class IS NOT NULL)))"
+  }
+
+  check "registration_change_lifetime_check" {
+    expr = "(lifetime_class IS NULL OR lifetime_class IN ('L0', 'L1', 'L2', 'L3')) AND (previous_lifetime_class IS NULL OR previous_lifetime_class IN ('L0', 'L1', 'L2', 'L3'))"
   }
 
   check "registration_change_reason_check" {

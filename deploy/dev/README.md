@@ -450,6 +450,17 @@ Content-Type: application/json
  "converge":["token_format","audience_scope"],"dry_run":true}
 ```
 
+**No back-channel logout URI is declared for this BFF** (`ADR-IAM-009 §5.3`): it runs on a
+developer's machine, which the kernel cannot reach, so a session the kernel removes ends at the BFF's
+next refresh, within four minutes. `create-bff-client.sh` made it with front-channel logout off, which
+is what the plan's `logout` class expects, so the declaration above adopts it with no `logout`
+difference. A BFF the kernel can reach declares `"backchannel_logout_uri"`, its
+`/auth/back-channel-logout` on an address the kernel's container resolves, in the registration or the
+adoption, and names `logout` in `converge` for a client made without it (`TDD-identity-control-003`
+1.37.0). `deploy-dev` proves that path from zero with `scripts/dev-back-channel-logout-proof.ps1`: a
+client registered with a receiver's URI on the runner gets a logout token naming its session when the
+API ends that session.
+
 `deploy-dev` runs this procedure on every change, against a client made by `create-bff-client.sh`
 the way this server's was and then given a second device's key with `set-client-key.sh`
 (`scripts/dev-bff-adoption-proof.ps1`, STD-GLB-009 1.3.0). It also checks that a wrong declaration,
@@ -464,7 +475,7 @@ route would refuse it. This section said `internal` until 2026-10-05. Such a dec
 refused at the plan, on `audience_profile` (`TDD-identity-control-003` 1.30.0).
 
 The answer is the plan. `adoptable: true` means the client runs as declared. A `token_lifespan`,
-`audience_scope`, `enabled` or `token_format` difference is converged only if named in
+`audience_scope`, `enabled`, `token_format` or `logout` difference is converged only if named in
 `"converge": [...]`. A client a script made before the token profile differs in `token_format` (no
 at+jwt attribute, no `client_id` mapper) and `audience_scope` (the realm's old default scopes, which
 put email, names and roles into its access tokens), so name both:

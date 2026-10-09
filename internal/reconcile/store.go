@@ -50,7 +50,8 @@ var desiredStatement = `SELECT r.registration_id::text,
        r.suspended_at,
        r.audience_class,
        coalesce(r.privileged_form, ''),
-       coalesce(r.audience, '{}'::text[])
+       coalesce(r.audience, '{}'::text[]),
+       coalesce(r.backchannel_logout_uri, '')
 FROM identity.client_registration r
 WHERE r.realm = $1 AND r.state IN ('active', 'suspended') AND r.kc_client_id IS NOT NULL
 ORDER BY r.client_key`
@@ -117,6 +118,12 @@ FOR SHARE OF r`
 const lockedAudienceStatement = `SELECT coalesce(audience, '{}'::text[]) FROM identity.client_registration
 WHERE registration_id = $1 FOR SHARE`
 
+// lifespanStatement derives one registration's lifespan. It is read after lockRegistrationStatement
+// has taken the share lock a lifetime-class change's and an audience change's update lock on the row
+// excludes, in a statement of its own, so it sees what the change committed.
+var lifespanStatement = `SELECT ` + clientregistration.LifespanSQL("r.realm", "r.audience") + `
+FROM identity.client_registration r WHERE r.registration_id = $1`
+
 // lockRegistrationStatement takes the same share lock when the registration holds no key at all,
 // which the join above would return no row, and so no lock, for.
 const lockRegistrationStatement = `SELECT 1 FROM identity.client_registration WHERE registration_id = $1 FOR SHARE`
@@ -135,7 +142,7 @@ func readRegistrations(ctx context.Context, tx db.Tx, realm keycloak.Realm) ([]r
 			clientID string
 		)
 		if err := rows.Scan(&raw, &reg.clientKey, &clientID, &reg.profile, &reg.redirectURIs, &reg.lifespan, &reg.state,
-			&reg.suspendedAt, &reg.audienceClass, &reg.privilegedForm, &reg.audience); err != nil {
+			&reg.suspendedAt, &reg.audienceClass, &reg.privilegedForm, &reg.audience, &reg.backChannelLogoutURI); err != nil {
 			return nil, fmt.Errorf("reconcile: scan desired state: %w", err)
 		}
 		parsed, err := id.Parse(raw)

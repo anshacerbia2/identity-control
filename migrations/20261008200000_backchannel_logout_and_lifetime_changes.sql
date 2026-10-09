@@ -1,0 +1,11 @@
+-- Modify "client_registration" table
+-- The back-channel logout URI (ADR-IAM-009 §5.1, TDD-identity-control-003 1.37.0).
+ALTER TABLE "identity"."client_registration" ADD COLUMN "backchannel_logout_uri" text NULL, ADD CONSTRAINT "client_backchannel_logout_check" CHECK ((backchannel_logout_uri IS NULL) OR (profile = 'confidential'::text));
+-- Modify "registration_change" table
+-- The lifetime_class kind (ADR-IAM-003 §5.9, TDD-identity-control-003 1.37.0).
+ALTER TABLE "identity"."registration_change" ADD COLUMN "previous_lifetime_class" text NULL, ADD COLUMN "lifetime_class" text NULL, DROP CONSTRAINT "registration_change_kind_check", ADD CONSTRAINT "registration_change_kind_check" CHECK ((kind = ANY (ARRAY['redirect_uris'::text, 'audience'::text, 'lifetime_class'::text])) AND ((kind = 'redirect_uris'::text) = ((redirect_uris IS NOT NULL) AND (previous_redirect_uris IS NOT NULL))) AND ((kind = 'audience'::text) = ((audience IS NOT NULL) AND (previous_audience IS NOT NULL))) AND ((kind = 'lifetime_class'::text) = ((lifetime_class IS NOT NULL) AND (previous_lifetime_class IS NOT NULL)))), ADD CONSTRAINT "registration_change_lifetime_check" CHECK (((lifetime_class IS NULL) OR (lifetime_class = ANY (ARRAY['L0'::text, 'L1'::text, 'L2'::text, 'L3'::text]))) AND ((previous_lifetime_class IS NULL) OR (previous_lifetime_class = ANY (ARRAY['L0'::text, 'L1'::text, 'L2'::text, 'L3'::text])))); -- atlas:destructive-approved: widening a CHECK, reviewed 2026-10-08
+-- Set comment to table: "registration_change"
+COMMENT ON TABLE "identity"."registration_change" IS 'A change to a registration''s redirect URIs, audience or lifetime class, proposed, then applied or decided against. TDD-identity-control-003.';
+-- Modify "registration_finding" table
+-- The logout field class (ADR-IAM-009 §5.2, TDD-identity-control-003 1.37.0).
+ALTER TABLE "identity"."registration_finding" DROP CONSTRAINT "registration_finding_field_check", ADD CONSTRAINT "registration_finding_field_check" CHECK ((field_class IS NULL) OR (field_class = ANY (ARRAY['redirect_uris'::text, 'token_lifespan'::text, 'audience_scope'::text, 'signing_algorithm'::text, 'profile'::text, 'client_keys'::text, 'suspension'::text, 'token_format'::text, 'audience'::text, 'logout'::text]))); -- atlas:destructive-approved: widening a CHECK, reviewed 2026-10-08

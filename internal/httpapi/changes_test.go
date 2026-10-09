@@ -108,7 +108,7 @@ func TestChangeRoutesRefuseMalformedRequests(t *testing.T) {
 			r.Header.Del(httpapi.AdministrativeReasonHeader)
 			return r
 		}(), http.StatusBadRequest},
-		"unknown field":    {changeRequest(http.MethodPost, base, `{"lifetime_class":"L0","expected_version":1}`), http.StatusBadRequest},
+		"unknown field":    {changeRequest(http.MethodPost, base, `{"signing_algorithm":"RS256","expected_version":1}`), http.StatusBadRequest},
 		"not json":         {changeRequest(http.MethodPost, base, `redirect`), http.StatusBadRequest},
 		"unknown action":   {changeRequest(http.MethodPost, base+"/"+owned.String()+":merge", ""), http.StatusNotFound},
 		"malformed change": {changeRequest(http.MethodPost, base+"/nope:withdraw", ""), http.StatusBadRequest},

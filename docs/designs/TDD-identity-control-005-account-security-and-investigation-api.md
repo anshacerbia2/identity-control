@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-005
   title: Account Security and Investigation API Mediation
   owner: Core Platform Team
-  version: 2.11.0
+  version: 2.11.1
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -155,7 +155,16 @@ GET   /v1/me/security-operations/{operation_id}
 - **What a self command carries.** It carries an `Idempotency-Key` and nothing else: no reason and
   no `expected_version`. §Data Model already makes the reason "absent for ordinary self-service
   operations". The operation records the subject's version at acceptance as `expected_version`, and
-  advances it as every command does.
+  advances it as every command does. STD-GLB-001 1.5.0 §A Version Where an Update Can Be Lost, a
+  Reason Where One Acts for Another states why (2.11.1):
+  - **No version.** Each command ends or adds one object named by a handle from a fresh read, so
+    there is no representation to overwrite, the "lost update" `If-Match` and `428` exist for
+    (RFC 9110 §13.1.1, RFC 6585 §3). The executor re-checks at execution what the command depends
+    on, the last authenticator among them, and a handle expires (below, A handle differs on every read).
+    Microsoft Graph's `DELETE /me/authentication/...` and Okta's MyAccount API take no precondition.
+  - **No reason.** The actor and the subject are the same Principal, and the record already names
+    them, the object and the outcome, which is what NIST SP 800-53 AU-3 asks of an audit record. A
+    reason is required where an actor acts on another's record (`X-Administrative-Reason`).
   - An administrator's next command therefore names a newer `security_version`. That is the point:
     the record changed.
   - Self and administrative commands share one sequence per Principal, so they run in the order they

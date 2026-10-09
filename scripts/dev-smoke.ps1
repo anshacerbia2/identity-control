@@ -14,6 +14,7 @@
 #  9b. the development caller is adopted          ADR-IAM-001 5.12, TDD-identity-control-003 Adoption
 #  10. the registration sweep runs and reports    TDD-identity-control-003, Proof B step 4
 #   9. clients are registered from desired state  TDD-identity-control-003, Proof B step 5
+#      and a resource's lifetime class moves its caller's lifespan          ADR-IAM-003 5.9
 #  11. a workload is created, and its own token names it    TDD-identity-control-004
 #
 # SECRETS: read from the environment.
@@ -154,6 +155,7 @@ $r = Send-Json "POST" "/v1/registrations" `
     '{"client_key":"smoke-orders","profile":"resource","audience_class":"internal","application_ref":"smoke","lifetime_class":"L1"}' `
     $token "smoke-register-orders"
 Expect "resource registered" $r.code 201
+$orders = if ($r.code -eq 201) { $r.body | ConvertFrom-Json } else { $null }
 $r = Send-Json "POST" "/v1/registrations" `
     '{"client_key":"smoke-web","profile":"public","audience_class":"internal","application_ref":"smoke","audience":["smoke-orders"],"redirect_uris":["http://127.0.0.1:9999/callback"]}' `
     $token "smoke-register-web"
@@ -164,6 +166,34 @@ if ($r.code -eq 201) {
     Expect "lifespan derived from L1" $web.access_token_lifespan 540
     $g = Send-Json "GET" "/v1/registrations/$($web.registration_id)" $null $token $null
     Expect "read back" $g.code 200
+
+    # A lifetime-class change against the real kernel (ADR-IAM-003 5.9, TDD-identity-control-003
+    # 1.37.0): the apply moves the caller's lifespan with its resource's class, which step 10's sweep
+    # then finds as the classes derive it. It toggles, so a rerun on a long-lived server changes it
+    # back rather than proposing the registered class again.
+    function Send-ChangeOf($registrationId, $body, $key) {
+        $change = New-Object System.Net.Http.HttpRequestMessage("POST", "$api/v1/registrations/$registrationId/changes")
+        $change.Headers.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", $token)
+        $change.Headers.Add("X-Administrative-Reason", "smoke: a lifetime-class change reaches the kernel")
+        $change.Headers.Add("Idempotency-Key", $key)
+        $change.Content = New-Object System.Net.Http.StringContent($body, [System.Text.Encoding]::UTF8, "application/json")
+        $sent = $client.SendAsync($change).Result
+        return @{ code = [int]$sent.StatusCode; body = $sent.Content.ReadAsStringAsync().Result }
+    }
+    if ($orders) {
+        $resource = (Send-Json "GET" "/v1/registrations/$($orders.registration_id)" $null $token $null).body | ConvertFrom-Json
+        $nextClass = if ($resource.lifetime_class -eq "L1") { "L0" } else { "L1" }
+        $lifetime = Send-ChangeOf $orders.registration_id `
+            "{`"lifetime_class`":`"$nextClass`",`"expected_version`":$($resource.version)}" `
+            "smoke-lifetime-change-$([Guid]::NewGuid().ToString('N'))"
+        Expect "lifetime-class change applied" $lifetime.code 201
+        if ($lifetime.code -ne 201) { Write-Host "        $($lifetime.body)" }
+        $caller = (Send-Json "GET" "/v1/registrations/$($web.registration_id)" $null $token $null).body | ConvertFrom-Json
+        if (@($caller.audience) -contains "smoke-orders") {
+            Expect "the caller's lifespan follows the class" $caller.access_token_lifespan $(if ($nextClass -eq "L0") { 240 } else { 540 })
+        }
+        $g = Send-Json "GET" "/v1/registrations/$($web.registration_id)" $null $token $null
+    }
 
     # An audience change against the real kernel (TDD-identity-control-003 Registration Changes):
     # the apply rewrites the client's audience mappers, which only the fake was checked against

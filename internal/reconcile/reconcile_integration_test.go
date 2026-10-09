@@ -1237,3 +1237,52 @@ func TestAudienceMappersChangedInTheConsoleAreHeldToTheRegistration(t *testing.T
 		t.Errorf("a repeated mapper was kept: %v", got)
 	}
 }
+
+// ADR-IAM-009 §5.2: front-channel logout turned on in the console removes the back channel for the
+// client, and a back-channel URL removed is a logout that no longer arrives. Both are the logout
+// field class, repaired when an admin event names who changed it.
+func TestTheLogoutConfigurationIsHeldAndRepaired(t *testing.T) {
+	h := newHarness(t)
+	caller := h.caller()
+	const target = "https://bff.example.com/auth/back-channel-logout"
+	if err := h.pool.InTx(context.Background(), func(ctx context.Context, tx db.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE identity.client_registration SET backchannel_logout_uri = $2 WHERE registration_id = $1`,
+			caller.id.String(), target)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h.kernel.ConsoleChange("", caller.client, func(c *keycloak.Client) { c.Logout = keycloak.DesiredLogout(target) })
+	h.tick(time.Second)
+	if run := h.sweep(); run.Outcome != Converged {
+		t.Fatalf("a client holding its logout configuration swept %+v", run)
+	}
+
+	seen := 0
+	for name, change := range map[string]func(*keycloak.Client){
+		"front channel on":  func(c *keycloak.Client) { c.Logout.FrontChannel = true },
+		"the URL removed":   func(c *keycloak.Client) { c.Logout.BackChannelURL = "" },
+		"the URL elsewhere": func(c *keycloak.Client) { c.Logout.BackChannelURL = "https://elsewhere.example.com/logout" },
+		"no session named":  func(c *keycloak.Client) { c.Logout.SessionRequired = false },
+	} {
+		h.tick(time.Second)
+		h.kernel.ConsoleChange(admin, caller.client, change)
+		h.tick(time.Second)
+		run := h.sweep()
+		if run.Outcome != Drift {
+			t.Errorf("%s: run %+v, want drift", name, run)
+		}
+		if live := h.live(caller.client).Logout; live != keycloak.DesiredLogout(target) {
+			t.Errorf("%s: the logout configuration is %+v after the sweep", name, live)
+		}
+		repaired := 0
+		for _, f := range h.findings(caller.client) {
+			if f.field == string(Logout) && f.class == string(Repaired) && f.actor == admin && f.convergedAt != nil {
+				repaired++
+			}
+		}
+		if seen++; repaired != seen {
+			t.Errorf("%s: %d repaired logout findings, want %d: %+v", name, repaired, seen, h.findings(caller.client))
+		}
+	}
+}

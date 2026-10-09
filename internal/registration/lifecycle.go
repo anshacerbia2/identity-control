@@ -331,8 +331,8 @@ func (s *Service) restoreWithin(ctx context.Context, tx db.Tx, change StateChang
 	return true, nil
 }
 
-// activePatch is an active registration's desired client: its redirect URIs, lifespan and keys as
-// registered, and enabled. The redirect URIs and keys are written because the sweep compares a
+// activePatch is an active registration's desired client: its redirect URIs, lifespan, keys and
+// logout configuration as registered, and enabled. They are written because the sweep compares a
 // suspended registration for its suspension only, so a console change made meanwhile would
 // otherwise come back to life with it.
 func (s *Service) activePatch(ctx context.Context, tx db.Tx, registrationID id.UUID) (keycloak.ClientPatch, error) {
@@ -344,6 +344,10 @@ func (s *Service) activePatch(ctx context.Context, tx db.Tx, registrationID id.U
 	patch := keycloak.ClientPatch{Enabled: &enabled}
 	redirects, lifespan := append([]string{}, registration.RedirectURIs...), registration.AccessTokenLifespan
 	patch.RedirectURIs, patch.AccessTokenLifespan = &redirects, &lifespan
+	if registration.Profile != ProfileResource {
+		logout := registration.BackChannelLogoutURI
+		patch.BackChannelLogoutURL = &logout
+	}
 	if keyed(registration.Profile) {
 		keys, err := liveKeys(ctx, tx, registrationID)
 		if err != nil {

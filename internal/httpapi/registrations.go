@@ -114,6 +114,8 @@ type registerRequest struct {
 	Audience       []string        `json:"audience"`
 	RedirectURIs   []string        `json:"redirect_uris"`
 	PublicKey      json.RawMessage `json:"public_key"`
+
+	BackChannelLogoutURI string `json:"backchannel_logout_uri"`
 }
 
 // Register handles POST /v1/registrations.
@@ -146,6 +148,7 @@ func (h *Registrations) Register(w http.ResponseWriter, r *http.Request) {
 		PrivilegedForm: body.PrivilegedForm,
 		ApplicationRef: body.ApplicationRef, LifetimeClass: body.LifetimeClass,
 		Audience: body.Audience, RedirectURIs: body.RedirectURIs, PublicKey: body.PublicKey,
+		BackChannelLogoutURI: body.BackChannelLogoutURI,
 	})
 	if err != nil {
 		writeRegistrationError(w, r, err)
@@ -168,6 +171,8 @@ type adoptRequest struct {
 	PublicKeys     []json.RawMessage `json:"public_keys"`
 	DryRun         bool              `json:"dry_run"`
 	Converge       []string          `json:"converge"`
+
+	BackChannelLogoutURI string `json:"backchannel_logout_uri"`
 }
 
 // Adopt handles POST /v1/registrations:adopt. A dry run answers 200 with the plan and changes
@@ -206,7 +211,7 @@ func (h *Registrations) Adopt(w http.ResponseWriter, r *http.Request) {
 			ClientKey: body.ClientKey, Profile: body.Profile, AudienceClass: body.AudienceClass,
 			PrivilegedForm: body.PrivilegedForm,
 			ApplicationRef: body.ApplicationRef, LifetimeClass: body.LifetimeClass, Audience: body.Audience,
-			RedirectURIs: body.RedirectURIs},
+			RedirectURIs: body.RedirectURIs, BackChannelLogoutURI: body.BackChannelLogoutURI},
 		PublicKeys: body.PublicKeys, Reason: reason, DryRun: body.DryRun, Converge: body.Converge,
 	})
 	switch {

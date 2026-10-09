@@ -179,6 +179,10 @@ type Request struct {
 	// PublicKey is a confidential or workload client's first public key, as a JWK. The client
 	// generated the pair and keeps the private half.
 	PublicKey json.RawMessage `json:"public_key,omitempty"`
+
+	// BackChannelLogoutURI is where the kernel posts a confidential client's logout tokens, or empty
+	// for a client the kernel cannot reach (ADR-IAM-009 §5.1, §5.3).
+	BackChannelLogoutURI string `json:"backchannel_logout_uri,omitempty"`
 }
 
 // Registration is desired state as the API reports it. It carries no secret, because none exists:
@@ -198,6 +202,7 @@ type Registration struct {
 	Audience             []string  `json:"audience"`
 	RedirectURIs         []string  `json:"redirect_uris"`
 	AccessTokenLifespan  int       `json:"access_token_lifespan,omitempty"`
+	BackChannelLogoutURI string    `json:"backchannel_logout_uri,omitempty"`
 	State                string    `json:"state"`
 	Version              int64     `json:"version"`
 	CreatedAt            time.Time `json:"created_at"`
@@ -337,6 +342,12 @@ func validate(req Request) error {
 		return invalid("a workload registers the workload audience class")
 	case !keyed(req.Profile) && submitted(req.PublicKey):
 		return invalid("a public client or a resource holds no key")
+	case req.BackChannelLogoutURI != "" && req.Profile != ProfileConfidential:
+		return invalid("only a confidential client registers a backchannel_logout_uri: it is a back end that holds sessions (ADR-IAM-009 §5.1)")
+	case req.BackChannelLogoutURI != "":
+		if err := validateBackChannelLogout(req.BackChannelLogoutURI); err != nil {
+			return invalid("%v", err)
+		}
 	}
 	for _, resource := range req.Audience {
 		if !clientKeyPattern.MatchString(resource) {
@@ -397,6 +408,35 @@ func validateRedirect(raw string) error {
 	case uri.Scheme == "http" && local:
 	default:
 		return errors.New("a redirect URI must be https, or http on a loopback host for local development")
+	}
+	return nil
+}
+
+// validateBackChannelLogout holds a back-channel logout URI to OpenID Connect Back-Channel Logout 1.0
+// §2.2: an absolute URI with no fragment, https or, for a confidential client, http (ADR-IAM-009 §5.1).
+// Whether http is accepted here is the deployment's: checkBackChannelLogout refuses it in production.
+func validateBackChannelLogout(raw string) error {
+	uri, err := url.Parse(raw)
+	switch {
+	case strings.Contains(raw, "*"):
+		return errors.New("a backchannel_logout_uri must not contain a wildcard")
+	case err != nil || uri.Host == "" || uri.Opaque != "" || !uri.IsAbs():
+		return errors.New("a backchannel_logout_uri must be an absolute URI, with a host")
+	case uri.User != nil:
+		return errors.New("a backchannel_logout_uri must not carry credentials")
+	case uri.Fragment != "" || strings.Contains(raw, "#"):
+		return errors.New("a backchannel_logout_uri must not carry a fragment")
+	case uri.Scheme != "https" && uri.Scheme != "http":
+		return errors.New("a backchannel_logout_uri must be https, or http outside production")
+	}
+	return nil
+}
+
+// checkBackChannelLogout refuses an http back-channel logout URI in production, where a logout token
+// travels only over TLS (ADR-IAM-009 §5.1).
+func (s *Service) checkBackChannelLogout(req Request) error {
+	if s.cfg.Production && req.BackChannelLogoutURI != "" && !strings.HasPrefix(req.BackChannelLogoutURI, "https://") {
+		return fmt.Errorf("%w: a backchannel_logout_uri is https in production", ErrInvalid)
 	}
 	return nil
 }
@@ -499,6 +539,9 @@ type Prepared struct {
 func (s *Service) Prepare(ctx context.Context, req Request) (Prepared, error) {
 	req = req.normalized()
 	if err := validate(req); err != nil {
+		return Prepared{}, err
+	}
+	if err := s.checkBackChannelLogout(req); err != nil {
 		return Prepared{}, err
 	}
 	prepared := Prepared{req: req}
@@ -665,7 +708,7 @@ func spec(r Registration, keys []keycloak.JWK) keycloak.ClientSpec {
 		return keycloak.ClientSpec{ClientID: r.ClientKey, Resource: true}
 	}
 	out := keycloak.ClientSpec{ClientID: r.ClientKey, RedirectURIs: r.RedirectURIs,
-		AccessTokenLifespan: r.AccessTokenLifespan, Audience: r.Audience}
+		AccessTokenLifespan: r.AccessTokenLifespan, Audience: r.Audience, BackChannelLogoutURL: r.BackChannelLogoutURI}
 	switch r.Profile {
 	case ProfilePublic:
 		out.Public = true

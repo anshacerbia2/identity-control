@@ -55,6 +55,7 @@ func (h *Registrations) ProposeRegistration(w http.ResponseWriter, r *http.Reque
 			PrivilegedForm: body.PrivilegedForm,
 			ApplicationRef: body.ApplicationRef, LifetimeClass: body.LifetimeClass,
 			Audience: body.Audience, RedirectURIs: body.RedirectURIs, PublicKey: body.PublicKey,
+			BackChannelLogoutURI: body.BackChannelLogoutURI,
 		},
 		Owners: owners, Reason: reason,
 	})

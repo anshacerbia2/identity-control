@@ -56,6 +56,11 @@ const (
 	// Audience is a client's audience mappers: one per resource its registration declares, and no
 	// other (TDD-identity-control-003 1.33.0).
 	Audience FieldClass = "audience"
+
+	// Logout is a client's front-channel logout setting, off, and its back-channel logout URL and
+	// "session required", as its registration declares them (ADR-IAM-009, TDD-identity-control-003
+	// 1.37.0).
+	Logout FieldClass = "logout"
 )
 
 // FindingClass is what the sweep did about a divergence.
@@ -195,6 +200,9 @@ type registration struct {
 
 	// audience is the resources the client's tokens name, as registered.
 	audience []string
+
+	// backChannelLogoutURI is where the kernel posts the client's logout tokens, or "" for none.
+	backChannelLogoutURI string
 }
 
 // comparesTokenProfile reports whether the profile is issued tokens, and so holds a token format
@@ -369,7 +377,7 @@ func (r *Reconciler) Sweep(ctx context.Context) (Run, error) {
 			diverged = diverged || differs
 			continue
 		}
-		for _, field := range []FieldClass{TokenLifespan, RedirectURIs, ClientKeys, AudienceScope, TokenFormat, Audience} {
+		for _, field := range []FieldClass{TokenLifespan, RedirectURIs, ClientKeys, AudienceScope, TokenFormat, Audience, Logout} {
 			wrote, differs, err := r.reconcileField(ctx, run.ID, reg, client, scopes[reg.client], field, open, exceptions,
 				latest, attribution)
 			if err != nil {
@@ -442,6 +450,14 @@ func (r *Reconciler) reconcileField(
 	case TokenLifespan:
 		applies = reg.comparesLifespan()
 		differs = client.AccessTokenLifespan != reg.lifespan
+		if applies && differs {
+			// Confirmed first: a lifetime-class change, and an audience change, write the kernel's
+			// lifespan before they commit the class or the audience this sweep derived it from.
+			var err error
+			if reg, client, differs, err = r.confirmLifespanDrift(ctx, reg); err != nil {
+				return false, false, err
+			}
+		}
 		desired, observed = reg.lifespan, lifespanValue(client.AccessTokenLifespan)
 		lifespan := reg.lifespan
 		repair.AccessTokenLifespan = &lifespan
@@ -488,6 +504,15 @@ func (r *Reconciler) reconcileField(
 		desired, observed = sortedList(reg.audience), sortedList(client.Audience)
 		audience := sortedList(reg.audience)
 		repair.Audience = &audience
+	case Logout:
+		// A URL changed or removed in the console is a logout that no longer arrives, and front-channel
+		// logout turned on removes the back channel for the client altogether (ADR-IAM-009 §5.2). It
+		// is repaired under the attribution rule, as a lifespan is.
+		applies = reg.comparesTokenProfile()
+		differs = !client.Logout.Matches(reg.backChannelLogoutURI)
+		desired, observed = keycloak.DesiredLogout(reg.backChannelLogoutURI), client.Logout
+		target := reg.backChannelLogoutURI
+		repair.BackChannelLogoutURL = &target
 	}
 	if !applies {
 		return false, false, nil
@@ -651,6 +676,8 @@ func (r *Reconciler) apply(ctx context.Context, reg registration, field FieldCla
 		return after.RFC9068 && after.ClientIDClaim == reg.clientKey, nil
 	case Audience:
 		return sameList(after.Audience, reg.audience), nil
+	case Logout:
+		return after.Logout.Matches(reg.backChannelLogoutURI), nil
 	}
 	return false, nil
 }
@@ -670,6 +697,27 @@ func (r *Reconciler) confirmAudienceDrift(ctx context.Context, reg registration)
 		return reg, keycloak.Client{}, true, fmt.Errorf("reconcile: read %s again: %w", reg.clientKey, err)
 	}
 	return reg, client, !sameList(client.Audience, reg.audience), nil
+}
+
+// confirmLifespanDrift derives the registration's lifespan again under the share lock that a
+// lifetime-class change's and an audience change's update lock on the row excludes, then reads the
+// client again, and reports whether they still differ.
+func (r *Reconciler) confirmLifespanDrift(ctx context.Context, reg registration) (registration, keycloak.Client, bool, error) {
+	if err := r.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		if _, err := tx.Exec(ctx, lockRegistrationStatement, reg.id.String()); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx, lifespanStatement, reg.id.String()).Scan(&reg.lifespan)
+	}); err != nil {
+		return reg, keycloak.Client{}, true, fmt.Errorf("reconcile: derive %s's lifespan again: %w", reg.clientKey, err)
+	}
+	client, err := call(ctx, r.cfg.CallTimeout, func(ctx context.Context) (keycloak.Client, error) {
+		return r.kernel.GetClient(ctx, r.cfg.Realm, reg.client)
+	})
+	if err != nil {
+		return reg, keycloak.Client{}, true, fmt.Errorf("reconcile: read %s again: %w", reg.clientKey, err)
+	}
+	return reg, client, client.AccessTokenLifespan != reg.lifespan, nil
 }
 
 // sameList reports whether two lists hold the same values the same number of times. A second mapper

@@ -21,7 +21,8 @@ var bffKey = keycloak.JWK{KID: "k1", N: "bg", E: "AQAB"}
 func runningBFF() keycloak.Client {
 	return keycloak.Client{ID: "c", ClientID: "bff", Enabled: true, RedirectURIs: []string{"https://bff.example.com/cb"},
 		AccessTokenLifespan: 240, Credential: keycloak.ClientCredential{Authenticator: "client-jwt", HeldJWKS: true,
-			Keys: []keycloak.JWK{bffKey}}, RFC9068: true, ClientIDClaim: "bff"}
+			Keys: []keycloak.JWK{bffKey}}, RFC9068: true, ClientIDClaim: "bff",
+		Logout: keycloak.DesiredLogout("")}
 }
 
 func differs(plan Plan, class string) bool {
@@ -66,6 +67,11 @@ func TestThePlanRefusesWhatTheDeclarationDoesNotMatch(t *testing.T) {
 		"disabled, named":           {func(c *keycloak.Client) { c.Enabled = false }, []string{ClassEnabled}, ClassEnabled, true},
 		"no at+jwt, not named":      {func(c *keycloak.Client) { c.RFC9068 = false }, nil, ClassTokenFormat, false},
 		"no client_id, named":       {func(c *keycloak.Client) { c.ClientIDClaim = "" }, []string{ClassTokenFormat}, ClassTokenFormat, true},
+		// ADR-IAM-009 §5.2: a client using front-channel logout gets no back channel from the kernel.
+		"front-channel logout, not named": {func(c *keycloak.Client) { c.Logout.FrontChannel = true }, nil, ClassLogout, false},
+		"front-channel logout, named":     {func(c *keycloak.Client) { c.Logout.FrontChannel = true }, []string{ClassLogout}, ClassLogout, true},
+		"a back-channel URL nobody declared": {func(c *keycloak.Client) { c.Logout.BackChannelURL = "https://elsewhere/logout" },
+			[]string{ClassLogout}, ClassLogout, true},
 	} {
 		client := runningBFF()
 		c.change(&client)
@@ -141,5 +147,21 @@ func TestAPerSignInClientHoldsNoDefaultProfile(t *testing.T) {
 	plan = planAdoption(perSignIn, runningBFF(), provider, 240, []keycloak.JWK{bffKey})
 	if plan.Adoptable || !differs(plan, ClassAudienceProfile) {
 		t.Errorf("a per-sign-in client holding scnehaux-provider as a default was adoptable: %+v", plan)
+	}
+}
+
+// The declaration's back-channel logout URI is what the logout class compares and converges to
+// (ADR-IAM-009 §5.1).
+func TestAdoptionComparesTheDeclaredBackChannelLogoutURI(t *testing.T) {
+	declared := adoptable(ClassLogout)
+	declared.BackChannelLogoutURI = "https://bff.example.com/auth/back-channel-logout"
+	plan := planAdoption(declared, runningBFF(), bffScopes(), 240, []keycloak.JWK{bffKey})
+	if !plan.Adoptable || !differs(plan, ClassLogout) || plan.backChannelLogoutURI != declared.BackChannelLogoutURI {
+		t.Errorf("a client without the declared URI: %+v", plan)
+	}
+	client := runningBFF()
+	client.Logout = keycloak.DesiredLogout(declared.BackChannelLogoutURI)
+	if plan := planAdoption(declared, client, bffScopes(), 240, []keycloak.JWK{bffKey}); differs(plan, ClassLogout) {
+		t.Errorf("a client holding the declared URI differs: %+v", plan)
 	}
 }
