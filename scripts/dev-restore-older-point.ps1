@@ -291,10 +291,11 @@ Case "client registered after the backup" "unmanaged, left enabled (report)" "ad
 Write-Host "2. a registration changed after the backup"
 $beforeKey = "rd-before-$($s.run)"
 $blocked = @((Api "GET" "/v1/registrations/$($s.before)/findings" $null $null).json.findings |
-        Where-Object { $_.field_class -eq "redirect_uris" -and -not (Get-Prop $_ "converged_at") })
+        Where-Object { (Get-Prop $_ "field_class") -eq "redirect_uris" -and -not (Get-Prop $_ "converged_at") })
 Expect "the restored redirect URIs are a difference" $blocked.Count 1
 Expect "which blocks the client" (Client-Of $beforeKey).enabled $false
-$r = Api "POST" "/v1/registrations:reconcile" "{`"findings`":[`"$($blocked[0].finding_id)`"]}" (Reason "apply the restored state, then repeat the change")
+$finding = Get-Prop ($blocked | Select-Object -First 1) "finding_id"
+$r = Api "POST" "/v1/registrations:reconcile" "{`"findings`":[`"$finding`"]}" (Reason "apply the restored state, then repeat the change")
 Expect "the operator applies the restored state" $r.code 200
 Expect "the client is enabled with the restored URIs" "$((Client-Of $beforeKey).enabled) $(@((Client-Of $beforeKey).redirectUris) -join ',')" "True $redirectBefore"
 $read = Api "GET" "/v1/registrations/$($s.before)" $null $null
@@ -346,9 +347,10 @@ Case "Membership granted after the backup" "the sweep removed the member as extr
 
 Write-Host "5. a Principal created after the backup"
 $orphan = @((Api "GET" "/v1/principals:unmapped" $null $null).json.unmapped | Where-Object { (Get-Prop $_ "username") -eq "rd.after.$($s.run)" })
-Expect "recorded as an orphan" (Get-Prop $orphan[0] "finding_class") "orphan"
-Expect "left enabled in report mode" (Get-Prop $orphan[0] "user_disabled") $false
-Expect "carrying the identifier the API issued" (Get-Prop $orphan[0] "claimed_principal_id") $s.after
+$first = $orphan | Select-Object -First 1
+Expect "recorded as an orphan" (Get-Prop $first "finding_class") "orphan"
+Expect "left enabled in report mode" (Get-Prop $first "user_disabled") $false
+Expect "carrying the identifier the API issued" (Get-Prop $first "claimed_principal_id") $s.after
 Case "Principal created after the backup" "orphan: a kernel user carrying an identifier no mapping holds; enabled (report)" `
     "none built: no route binds an orphan's identifier to a mapping again" `
     "gap: the principal_id stays unknown here; under disable the user would be disabled" ($orphan.Count -eq 1)

@@ -344,7 +344,7 @@ Expect "the duplicate is disabled" (Kc "GET" "/users/$copy" $null).json.enabled 
 Expect "and so is the Principal's own user" (Kc "GET" "/users/$duplicatedOwn" $null).json.enabled $false
 $held = @((Api "GET" "/v1/principals:quarantined" $null $null).json.quarantined | Where-Object { $_.principal_id -eq $duplicated })
 Expect "the quarantined mapping is listed" $held.Count 1
-Expect "bound to its own user" (Get-Prop $held[0] "linked") $true
+Expect "bound to its own user" (Get-Prop ($held | Select-Object -First 1) "linked") $true
 $releaseReason = @{ "X-Administrative-Reason" = "proof-b: the console copy was the extra user and is deleted" }
 $r = Api "POST" "/v1/principals/${duplicated}:release" "{`"username`":`"proofb.duplicated.$run6`"}" $releaseReason
 Expect "a release while two users carry it is refused" $r.code 409

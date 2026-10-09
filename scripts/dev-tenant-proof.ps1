@@ -322,14 +322,14 @@ function Unconverged-Tenant {
     if ($listed.code -ne 200) { throw "the unconverged listing answered $($listed.code): $($listed.body)" }
     return @($listed.json.tenants | Where-Object { $_.tenant_id -eq $tenant })
 }
-Expect "the converged Tenant is not listed unconverged" (Unconverged-Tenant).Count 0
+Expect "the converged Tenant is not listed unconverged" @(Unconverged-Tenant).Count 0
 $findings = Operator "GET" "/v1/projections/tenant-context:findings?limit=50" $null
 Expect "the projection findings are read" $findings.code 200
 $r = Operator "POST" "/v1/projections/tenant-context/tenants/${tenant}:redrive" "deploy-dev: converge the Tenant again"
 Expect "a re-drive is accepted" $r.code 202
 $converged = $false
 for ($i = 0; $i -lt 60; $i++) {
-    if ((Unconverged-Tenant).Count -eq 0) { $converged = $true; break }
+    if (@(Unconverged-Tenant).Count -eq 0) { $converged = $true; break }
     Start-Sleep -Milliseconds 500
 }
 Expect "the re-driven Tenant converges again" $converged $true

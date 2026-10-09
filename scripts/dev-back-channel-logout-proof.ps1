@@ -73,6 +73,11 @@ function Decode-Part([string] $jwt, [int] $index) {
     return [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($s)) | ConvertFrom-Json
 }
 
+function Get-Prop($object, [string] $name) {
+    if ($null -ne $object -and $object.PSObject.Properties.Name -contains $name) { return $object.$name }
+    return $null
+}
+
 $failures = 0
 function Expect($label, $got, $want) {
     if ($got -eq $want) { Write-Host "  ok    $label ($got)" }
@@ -215,11 +220,11 @@ $change = Send "POST" "$api/v1/registrations/$registrationId/changes" `
     @{ "Idempotency-Key" = "logout-proof-move-$run"; "X-Administrative-Reason" = "deploy-dev: the BFF's logout endpoint moves" }
 Expect "the change is recorded" $change.code 201
 if ($change.code -ne 201) { Write-Host "        $($change.text)"; exit 1 }
-Expect "of the backchannel_logout_uri kind" $change.json.kind "backchannel_logout_uri"
-Expect "applied at once outside production" $change.json.state "applied"
-Expect "naming the URI it replaces" $change.json.previous_backchannel_logout_uri $ReceiverUrl
+Expect "of the backchannel_logout_uri kind" (Get-Prop $change.json "kind") "backchannel_logout_uri"
+Expect "applied at once outside production" (Get-Prop $change.json "state") "applied"
+Expect "naming the URI it replaces" (Get-Prop $change.json "previous_backchannel_logout_uri") $ReceiverUrl
 $after = Send "GET" "$api/v1/registrations/$registrationId" $null $provider $null
-Expect "the registration names the new URI" $after.json.backchannel_logout_uri $movedUrl
+Expect "the registration names the new URI" (Get-Prop $after.json "backchannel_logout_uri") $movedUrl
 Expect "at the next version" $after.json.version ($read.json.version + 1)
 $moved = End-Session "moved"
 Expect "a logout request arrived after the change" ([bool]$moved.record) $true
@@ -234,18 +239,18 @@ Write-Host "6. a sweep finds the client in sync, and a second change removes the
 $sweep = Send "POST" "$api/v1/registrations:reconcile" $null $provider $null
 Expect "the registrations are swept" $sweep.code 200
 $findings = Send "GET" "$api/v1/registrations/$registrationId/findings" $null $provider $null
-$open = @($findings.json.findings | Where-Object { $_.field_class -eq "logout" -and -not $_.converged_at })
+$open = @($findings.json.findings | Where-Object { (Get-Prop $_ "field_class") -eq "logout" -and -not (Get-Prop $_ "converged_at") })
 Expect "no open logout finding" $open.Count 0
 $removal = Send "POST" "$api/v1/registrations/$registrationId/changes" `
     (@{ backchannel_logout_uri = ""; expected_version = $after.json.version } | ConvertTo-Json -Compress) $provider `
     @{ "Idempotency-Key" = "logout-proof-remove-$run"; "X-Administrative-Reason" = "deploy-dev: the BFF stops receiving logouts" }
 Expect "the removal is applied" "$($removal.code) $($removal.json.state)" "201 applied"
-Expect "the change records no URI after it" ($null -eq $removal.json.backchannel_logout_uri) $true
+Expect "the change records no URI after it" ($null -eq (Get-Prop $removal.json "backchannel_logout_uri")) $true
 $removed = Send "GET" "$api/v1/registrations/$registrationId" $null $provider $null
-Expect "the registration names no URI" ([string]::IsNullOrEmpty($removed.json.backchannel_logout_uri)) $true
+Expect "the registration names no URI" ([string]::IsNullOrEmpty((Get-Prop $removed.json "backchannel_logout_uri"))) $true
 $sweep = Send "POST" "$api/v1/registrations:reconcile" $null $provider $null
 $findings = Send "GET" "$api/v1/registrations/$registrationId/findings" $null $provider $null
-$open = @($findings.json.findings | Where-Object { $_.field_class -eq "logout" -and -not $_.converged_at })
+$open = @($findings.json.findings | Where-Object { (Get-Prop $_ "field_class") -eq "logout" -and -not (Get-Prop $_ "converged_at") })
 Expect "still no open logout finding after the removal" $open.Count 0
 
 $summary = @("## Back-channel logout · a registered client", "",
