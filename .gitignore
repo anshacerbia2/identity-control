@@ -34,3 +34,7 @@ Thumbs.db
 
 # The Makefile's fmt gate writes and removes this; a failed run can leave it.
 .fmt.tmp
+
+# scripts/image-scan.sh and scripts/atlas-execute-path.sh work here outside CI: the vulnerability
+# database, saved images and traces.
+.image-scan/
