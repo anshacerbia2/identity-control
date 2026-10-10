@@ -1169,20 +1169,41 @@ standard library fixes above. The tag has since been rebuilt under a new digest,
 stays: it already carries go1.26.9.
 
 **What the scan enforces.** This is `STD-GLB-009` §5 Enforcement item 4. `scripts/image-scan.sh`
-reads `.grype.yaml` before it scans, and it fails on any rule:
+runs `scripts/image-scan-rules.py` on `.grype.yaml` before it scans. Both files are byte-identical
+in identity-kernel, identity-control and organization-control. The checker fails on any rule:
 
-- whose review date has passed;
+- that lacks `vulnerability`, `package.name`, `package.version` or `package.type`;
+- for a package found inside a file, which is any type but an operating system package database
+  (`apk`, `deb`, `rpm`), that lacks `package.location`;
+- that gives a `package.location` which is not a full path, or which uses a wildcard;
 - whose `reason` lacks rule 5's parts in order: `review-by`, `affected` or `not_affected/` with a
   justification rule 7 accepts, `detected`, the images, and the statement;
-- whose `review-by` is more than 90 days ahead, or, for `affected`, more than 90 days after
-  `detected`, which is rule 8's longest time;
-- whose `detected` is after today or after its `review-by`;
-- that lacks `vulnerability`, `package.name` or `package.version`;
-- that lacks `package.location`, or gives one that is relative or uses a wildcard.
+- whose review date has passed, is more than 90 days ahead, or is before `detected`;
+- whose `detected` is in the future;
+- for `affected`, whose `review-by` is more than 90 days after `detected`, which is rule 8's longest
+  time.
 
-Every package Grype reports is found in a file: a Go module in the binary that holds it, an operating
-system package in its package database. Every rule therefore names a file. Whether a statement is
-true is left to review.
+Every rule here gives a location. The Go modules name `/usr/local/bin/atlas`. The zlib rule, whose
+type does not require one, names `/lib/apk/db/installed` as well. Whether a statement is true is
+left to review. Outside CI, the scan's database and image archives go under `./.image-scan`, which
+git ignores, and never under `/tmp`.
+
+**The migrate image is built, never pulled.** `deploy/dev/compose.yaml` gives the migrate service
+both a `build` and an image name, so the one-off tasks can reuse what it built. Compose's
+specification says what that does: "When Compose is confronted with both a build subsection for a
+service and an image attribute, it follows the rules defined by the pull_policy attribute. If
+pull_policy is missing from the service definition, Compose attempts to pull the image first and
+then builds from source if the image isn't found in the registry or platform cache" [R9]. An
+image published under the same name would therefore run in place of this one, along with every
+statement above. The migrate service sets `pull_policy: build`, which reads "Compose builds the
+image. Compose rebuilds the image if it's already present". The one-off tasks name the same image
+without building it and set `pull_policy: never`, which reads "Compose doesn't pull the image from a
+registry and relies on the platform cached image. If there is no cached image, a failure is
+reported" [R10]. The default for a service that does not build is `missing`, under which a task run
+before the first build would have pulled the name. `deploy-dev` asserts both on every run. Every image
+the stack names without a digest must carry `build` where its service builds it and `never`
+elsewhere, and the migrate image in use must have no registry digest, which shows it was built and
+not pulled.
 
 **Residual risk.**
 
@@ -1210,7 +1231,7 @@ true is left to review.
 | Related design | `TDD-identity-control-002` - Membership projection and session removal |
 | Conforms to | NIST CSF 2.0 RS.MI-01, RC.RP-05 — a quarantined Principal is released to containment, and returns to service by a separate restore (1.18.0) [R1] |
 | Conforms to | STD-GLB-003 1.1.0 §State Metrics — the pending and quarantined gauges (1.18.0) |
-| Conforms to | STD-GLB-009 1.8.0 §Container Images rules 4, 5, 7, 8 and 10 — the migrate image's exceptions as VEX statements, and the zlib upgrade; 1.8.0 lands with scnehaux-architecture #86 (1.19.0) [R2]–[R8] |
+| Conforms to | STD-GLB-009 1.8.0 §Container Images rules 4, 5, 7, 8 and 10 — the migrate image's exceptions as VEX statements, and the zlib upgrade; 1.8.0 lands with scnehaux-architecture #86 (1.19.0) [R2]–[R10] |
 
 ### Open Proof-of-Concept Questions
 
@@ -1276,3 +1297,16 @@ Keycloak release:
   <https://www.postgresql.org/developer/roadmap/>, accessed 2026-10-10. "The PostgreSQL project aims
   to make at least one minor release every quarter, on a predefined schedule"; "The current schedule
   for upcoming releases is: November 12th, 2026".
+- **[R9]** Docker, _Compose Build Specification_, §Using build and image,
+  <https://docs.docker.com/reference/compose-file/build/>, accessed 2026-10-10. "When Compose is
+  confronted with both a build subsection for a service and an image attribute, it follows the rules
+  defined by the pull_policy attribute. If pull_policy is missing from the service definition,
+  Compose attempts to pull the image first and then builds from source if the image isn't found in
+  the registry or platform cache."
+- **[R10]** Docker, _Compose file reference: Services_, `pull_policy`,
+  <https://docs.docker.com/reference/compose-file/services/#pull_policy>, accessed 2026-10-10.
+  "never: Compose doesn't pull the image from a registry and relies on the platform cached image. If
+  there is no cached image, a failure is reported"; "missing: Compose pulls the image only if it's
+  not available in the platform cache. This is the default option if you are not also using the
+  Compose Build Specification"; "build: Compose builds the image. Compose rebuilds the image if it's
+  already present."
