@@ -21,8 +21,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$api    = if ($env:IDENTITY_API_URL) { $env:IDENTITY_API_URL } else { "http://127.0.0.1:8082" }
-$kcBase = if ($env:KC_BASE_URL) { $env:KC_BASE_URL } else { "http://127.0.0.1:8081" }
+. "$PSScriptRoot\dev-env.ps1"   # IDENTITY_API_URL, KC_BASE_URL, the operator TOTP: derived from deploy/dev/.env
+$api    = Get-DevApiUrl
+$kcBase = Get-DevKernelUrl
 $realm  = if ($env:KC_REALM) { $env:KC_REALM } else { "scnehaux" }
 
 Add-Type -AssemblyName System.Net.Http
@@ -57,7 +58,7 @@ $r = Client-Token $PreviousKeyFile
 Expect "the previous key is refused" ($r.code -in @(400, 401)) $true
 Expect "as invalid_client" $r.error "invalid_client"
 
-$operatorTotp = if ($env:IDENTITY_OPERATOR_TOTP_FILE) { @{ OperatorTotpFile = $env:IDENTITY_OPERATOR_TOTP_FILE } } else { @{} }
+$operatorTotp = Get-DevOperatorTotp
 $token = Get-ScnehauxToken -Username "bootstrap-operator" -Password $env:IDENTITY_CALLER_PASSWORD `
     -KeyFile $env:IDENTITY_CALLER_KEY_FILE @operatorTotp
 function Post([string] $path) {

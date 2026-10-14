@@ -33,8 +33,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$api    = if ($env:IDENTITY_API_URL) { $env:IDENTITY_API_URL } else { "http://127.0.0.1:8082" }
-$kcBase = if ($env:KC_BASE_URL) { $env:KC_BASE_URL } else { "http://127.0.0.1:8081" }
+. "$PSScriptRoot\dev-env.ps1"   # IDENTITY_API_URL, KC_BASE_URL, the operator TOTP: derived from deploy/dev/.env
+$api    = Get-DevApiUrl
+$kcBase = Get-DevKernelUrl
 $realm  = if ($env:KC_REALM) { $env:KC_REALM } else { "scnehaux" }
 $commandBudget = 2.0
 $propagationBudget = 60.0
@@ -84,7 +85,7 @@ function Expect($label, $got, $want) {
     else { Write-Host "  FAIL  $label (got $got, want $want)"; $script:failures++ }
 }
 
-$operatorTotp = if ($env:IDENTITY_OPERATOR_TOTP_FILE) { @{ OperatorTotpFile = $env:IDENTITY_OPERATOR_TOTP_FILE } } else { @{} }
+$operatorTotp = Get-DevOperatorTotp
 $redirect = "http://127.0.0.1:8099/callback"
 
 Write-Host "1. a confidential client is registered with a back-channel logout URI"

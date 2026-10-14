@@ -21,12 +21,17 @@
 #   $env:IDENTITY_CALLER_KEY_FILE = '...'   # the caller's private key, printed by create-kernel-clients.sh
 #   $env:IDENTITY_CALLER_PASSWORD = '...'
 #
-# Usage: pwsh ./scripts/dev-smoke.ps1
+# ADDRESSES: scripts/dev-env.ps1 derives the API (IDENTITY_CONTROL_PORT), the kernel's public origin
+# (KEYCLOAK_ISSUER) and the operator's TOTP file from deploy/dev/.env; IDENTITY_API_URL, KC_BASE_URL
+# and IDENTITY_OPERATOR_TOTP_FILE override them.
+#
+# Usage, from the repository root after `set -a; . deploy/dev/.env; set +a`: pwsh ./scripts/dev-smoke.ps1
 
 $ErrorActionPreference = "Stop"
 
-$api    = if ($env:IDENTITY_API_URL) { $env:IDENTITY_API_URL } else { "http://127.0.0.1:8090" }
-$kcBase = if ($env:KC_BASE_URL) { $env:KC_BASE_URL } else { "http://127.0.0.1:8081" }
+. "$PSScriptRoot\dev-env.ps1"   # IDENTITY_API_URL, KC_BASE_URL, the operator TOTP: derived from deploy/dev/.env
+$api    = Get-DevApiUrl
+$kcBase = Get-DevKernelUrl
 $realm  = if ($env:KC_REALM) { $env:KC_REALM } else { "scnehaux" }
 
 foreach ($name in @("IDENTITY_CALLER_KEY_FILE", "IDENTITY_CALLER_PASSWORD")) {
@@ -42,8 +47,9 @@ Add-Type -AssemblyName System.Net.Http
 # privileged token: auth_time exists only for an authentication ceremony.
 . "$PSScriptRoot\dev-token.ps1"
 # Every provider route requires aal2 (ADR-IAM-004). With IDENTITY_OPERATOR_TOTP_FILE set, as the CI stack
-# sets it, the operator's TOTP is enrolled into that file on first use and read from it after.
-$operatorTotp = if ($env:IDENTITY_OPERATOR_TOTP_FILE) { @{ OperatorTotpFile = $env:IDENTITY_OPERATOR_TOTP_FILE } } else { @{} }
+# sets it, the operator's TOTP is enrolled into that file on first use and read from it after; unset, the
+# server's deploy/dev/keys/operator-totp.json is read when it exists (dev-env.ps1).
+$operatorTotp = Get-DevOperatorTotp
 $token = Get-ScnehauxToken -Username "bootstrap-operator" `
     -Password $env:IDENTITY_CALLER_PASSWORD -KeyFile $env:IDENTITY_CALLER_KEY_FILE @operatorTotp
 

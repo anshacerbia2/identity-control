@@ -42,8 +42,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$api     = if ($env:IDENTITY_API_URL) { $env:IDENTITY_API_URL } else { "http://127.0.0.1:8082" }
-$kcBase  = if ($env:KC_BASE_URL) { $env:KC_BASE_URL } else { "http://127.0.0.1:8081" }
+. "$PSScriptRoot\dev-env.ps1"   # IDENTITY_API_URL, KC_BASE_URL, the operator TOTP: derived from deploy/dev/.env
+$api     = Get-DevApiUrl
+$kcBase  = Get-DevKernelUrl
 $kcAdmin = if ($env:KC_ADMIN_URL) { $env:KC_ADMIN_URL } else { "http://127.0.0.1:8080" }
 $realm   = if ($env:KC_REALM) { $env:KC_REALM } else { "scnehaux" }
 $adminUser = if ($env:KC_BOOTSTRAP_ADMIN_USERNAME) { $env:KC_BOOTSTRAP_ADMIN_USERNAME } else { "admin" }
@@ -55,7 +56,7 @@ if ($PSVersionTable.PSEdition -ne 'Core') { throw "PowerShell 7 is needed to mak
 Add-Type -AssemblyName System.Net.Http
 . "$PSScriptRoot\dev-token.ps1"
 $http = New-Object System.Net.Http.HttpClient
-$operatorTotp = if ($env:IDENTITY_OPERATOR_TOTP_FILE) { @{ OperatorTotpFile = $env:IDENTITY_OPERATOR_TOTP_FILE } } else { @{} }
+$operatorTotp = Get-DevOperatorTotp
 
 $failures = 0
 function Expect($label, $got, $want) {
