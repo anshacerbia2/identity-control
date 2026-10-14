@@ -24,9 +24,10 @@
 # and checked, and the rollout switches returned afterwards. Its record is older-point-evidence.json.
 #
 # It deletes the database, so it refuses to run outside CI. The environment is deploy/dev/.env's,
-# plus IDENTITY_API_URL, KC_BASE_URL, KC_ADMIN_URL and IDENTITY_OPERATOR_TOTP_FILE for the API reads,
-# as the other deploy-dev steps set them, and TENANT_PROOF_STATE, the Tenant proof's state file, whose
-# delivering workload stands in for Organization Control.
+# plus KC_ADMIN_URL and IDENTITY_OPERATOR_TOTP_FILE for the API reads, as the other deploy-dev steps set
+# them (the API and the kernel's origin are derived from .env, scripts/dev-env.ps1), and
+# TENANT_PROOF_STATE, the Tenant proof's state file, whose delivering workload stands in for
+# Organization Control.
 #
 #   bash scripts/dev-restore-drill.sh "$RUNNER_TEMP/restore-drill"
 set -euo pipefail
@@ -42,7 +43,7 @@ deploy="$root/deploy/dev"
 database=identity_control
 service=identity-control
 volume=scnehaux-identity-control-dev_postgres
-ready_url="${IDENTITY_API_URL:-http://127.0.0.1:8082}/readyz"
+ready_url="${IDENTITY_API_URL:-http://127.0.0.1:${IDENTITY_CONTROL_PORT:-8082}}/readyz"
 rto_seconds=900
 # TDD-identity-control-001 §Restore Evidence: the tables deploy-dev is known to fill. Each must hold
 # rows in the source, or the drill would be comparing empty tables.

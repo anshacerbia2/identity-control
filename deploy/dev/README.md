@@ -103,19 +103,24 @@ design, not a fault.
    ```sh
    cd identity-control
    set -a; . deploy/dev/.env; set +a
-   export IDENTITY_API_URL=http://127.0.0.1:8082 KC_BASE_URL=https://<KEYCLOAK_HOSTNAME>
-   pwsh ./scripts/dev-adopt-caller.ps1            # the plan
+   # The first sign-in binds the server's TOTP for the bootstrap operator into this file; later runs find it.
+   IDENTITY_OPERATOR_TOTP_FILE=deploy/dev/keys/operator-totp.json pwsh ./scripts/dev-adopt-caller.ps1   # the plan
    pwsh ./scripts/dev-adopt-caller.ps1 -Apply     # adopt
    ```
+
+   Nothing else is exported: the scripts take the API's address and the kernel's public origin from
+   `.env` (§One-off tasks, Where the scripts call).
 
    The plan names `token_format` and `audience_scope` as differences it converges: the script made the
    caller before the token profile. A `redirect_uris` or `client_keys` difference means the
    declaration is wrong, and is fixed in the declaration, never in the console. A second run answers
-   that the caller is registered already. Provider routes need `aal2`, so export
-   `IDENTITY_OPERATOR_TOTP_FILE=$PWD/deploy/dev/keys/operator-totp.json` first: the script then signs
-   in with the server's TOTP for the bootstrap operator, and binds one there on the first sign-in if
-   the operator has no second factor yet. Where the owner's TOTP is enrolled already, bind the server's
-   with one of the owner's codes first (§Updating, The server's own TOTP).
+   that the caller is registered already. Provider routes need `aal2`, so the scripts sign in with the
+   server's TOTP for the bootstrap operator, `deploy/dev/keys/operator-totp.json`, whenever that file
+   exists. On a server stood up from zero it does not exist yet, so the first run above names it in
+   `IDENTITY_OPERATOR_TOTP_FILE`: the script then binds one there on that sign-in if the operator has
+   no second factor yet, and every later script finds the file without being told. Where the owner's
+   TOTP is enrolled already, bind the server's with one of the owner's codes first (§Updating, The
+   server's own TOTP), and run the plan without the variable.
 9. **Adopt the BFF,** once `identity-experience`'s `create-bff-client.sh` has made it: §Wiring to other
    services, Adopting the BFF.
 10. **Apply the registered state, if anything differs.** Both adoptions converge `token_format` and
@@ -173,9 +178,12 @@ Get-ScnehauxToken -Username bootstrap-operator -Password $env:IDENTITY_CALLER_PA
   -KeyFile $env:IDENTITY_CALLER_KEY_FILE -EnrollTotpFile deploy/dev/keys/operator-totp.json -Otp <code>
 ```
 
-The script signs in at `aal2` and asks the kernel to set up another TOTP labelled `dev-server`. It
-then writes the secret to `deploy/dev/keys/operator-totp.json`, mode 0600. The secret is never
-printed, and the script refuses when the file exists. From then on:
+Run it from the repository root in `pwsh` started from a shell that loaded `.env`
+(`set -a; . deploy/dev/.env; set +a`): the kernel's origin is derived from `KEYCLOAK_ISSUER`
+(§One-off tasks, Where the scripts call). The script signs in at `aal2` and asks the kernel to set up
+another TOTP labelled `dev-server`. It then writes the secret to `deploy/dev/keys/operator-totp.json`,
+mode 0600. The secret is never printed, and the script refuses when the file exists. From then on
+every script in `scripts/` signs in with it without being told, and by hand:
 
 ```powershell
 Get-ScnehauxToken … -AcrValues aal2 -TotpSecretFile deploy/dev/keys/operator-totp.json
@@ -206,11 +214,28 @@ until Organization's first emergency `provider:identity-control` grant is projec
 the API with it. They are the same scripts CI runs:
 
 ```sh
+cd identity-control
 set -a; . deploy/dev/.env; set +a
-# KC_BASE_URL is the kernel's public origin: the origin of KEYCLOAK_ISSUER, which is the tunnel host in tunnel mode
-export IDENTITY_API_URL=http://127.0.0.1:8082 KC_BASE_URL=https://<KEYCLOAK_HOSTNAME>
 pwsh ./scripts/dev-smoke.ps1
 ```
+
+#### Where the scripts call
+
+The scripts in `scripts/` read `.env` from the environment, after `set -a; . deploy/dev/.env; set +a`
+in the repository root, and derive where they call from it. `scripts/dev-env.ps1` holds the
+derivation, and every script dot-sources it, `dev-token.ps1` among them. A variable set in the shell
+overrides the derived value:
+
+| What | Derived from `.env` | Override |
+| :-- | :-- | :-- |
+| The API | `http://127.0.0.1:<IDENTITY_CONTROL_PORT>`, the loopback port `compose.yaml` publishes; `8082` when unset, as there | `IDENTITY_API_URL` |
+| The kernel's public origin, where its login form is served | The origin of `KEYCLOAK_ISSUER`: scheme, host and port. `https://<the kernel host>/realms/scnehaux` gives `https://<the kernel host>`, the tunnel host in tunnel mode | `KC_BASE_URL` |
+| The bootstrap operator's TOTP | `deploy/dev/keys/operator-totp.json` in this checkout, found from the scripts' own location, when the file exists (§Updating, The server's own TOTP). Otherwise none: the token is `aal1`, which every provider route refuses, and the script says so on stderr | `IDENTITY_OPERATOR_TOTP_FILE` |
+
+With neither `KC_BASE_URL` nor `KEYCLOAK_ISSUER` set, a script stops and says to load `.env`. Nothing
+reads or prints the TOTP file's contents but the sign-in itself. `KC_ADMIN_URL`, the kernel's private
+`/admin` address that only CI's proofs use, is not derived. `deploy-dev` runs every script with the
+same derivation; it names only the TOTP file, which it keeps outside the checkout.
 
 **Log in on the public origin, never the private port.** Keycloak's hostname is fixed, so its
 login form always posts to the public origin. A login started on `http://127.0.0.1:8081` stores
@@ -536,7 +561,8 @@ artifact. A daily dump loses up to 24 hours of changes, against the 1-minute RPO
 | `/readyz` does not answer | The service waits for the migrate job. `docker compose logs migrate` shows which stage failed; the service starts only once it succeeds |
 | A setting in `.env` changes nothing | compose passes a container only the variables `compose.yaml` lists, a restart keeps the environment the container was created with, and a variable exported in the shell wins over `.env` (a shell that ran `set -a; . deploy/dev/.env; set +a` holds the old values). Check the variable is listed, `unset` it in the shell or open a new one, then `docker compose up -d identity-control` |
 | The login form answers "Restart login cookie not found" | The login started on the private port. Log in on the public origin (§One-off tasks, Calling the API) |
-| Every provider route answers 401 with `insufficient_user_authentication` | The token is not `aal2`: a provider route asks for a password and a TOTP code (ADR-IAM-004). Pass `IDENTITY_OPERATOR_TOTP_FILE` to the scripts (§Updating, The server's own TOTP) |
+| Every provider route answers 401 with `insufficient_user_authentication` | The token is not `aal2`: a provider route asks for a password and a TOTP code (ADR-IAM-004). The script found no `deploy/dev/keys/operator-totp.json` and said so on stderr: bind the server's TOTP (§Updating, The server's own TOTP), or name the file in `IDENTITY_OPERATOR_TOTP_FILE` |
+| A script stops with "neither KC_BASE_URL nor KEYCLOAK_ISSUER is set" | `.env` is not in the environment. Run `set -a; . deploy/dev/.env; set +a` in the repository root, then the script (§One-off tasks, Where the scripts call) |
 | Every call answers 401 after §First start step 11 | A caller's token is typed `JWT`, not `at+jwt`: its client was not adopted with `token_format` converged. The log names it by `azp`; apply its registered state (step 10) |
 | The BFF's sessions all end at once | `IDENTITY_UNMANAGED_CLIENTS=disable` was set before the BFF was adopted. Adopt it (§Wiring to other services) and re-enable it with the registered state |
 | The ceremony is refused | It ran already; that is the design (§First start). Resume it only to finish an interrupted one |

@@ -16,7 +16,8 @@
 
 $ErrorActionPreference = "Stop"
 
-$api = if ($env:IDENTITY_API_URL) { $env:IDENTITY_API_URL } else { "http://127.0.0.1:8082" }
+. "$PSScriptRoot\dev-env.ps1"   # IDENTITY_API_URL, KC_BASE_URL, the operator TOTP: derived from deploy/dev/.env
+$api = Get-DevApiUrl
 foreach ($name in @("IDENTITY_CALLER_KEY_FILE", "IDENTITY_CALLER_PASSWORD")) {
     if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) { throw "$name is required." }
 }
@@ -46,7 +47,7 @@ function Call($method, $path, $token) {
     return @{ code = [int]$response.StatusCode; json = $json }
 }
 
-$operatorTotp = if ($env:IDENTITY_OPERATOR_TOTP_FILE) { @{ OperatorTotpFile = $env:IDENTITY_OPERATOR_TOTP_FILE } } else { @{} }
+$operatorTotp = Get-DevOperatorTotp
 Write-Host "1. the caller's token is typed at+jwt"
 $token = Get-ScnehauxToken -Username "bootstrap-operator" -Password $env:IDENTITY_CALLER_PASSWORD `
     -KeyFile $env:IDENTITY_CALLER_KEY_FILE @operatorTotp

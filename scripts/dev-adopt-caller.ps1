@@ -16,7 +16,8 @@
 #   $env:IDENTITY_CALLER_KEY_FILE      the caller's private key: the token is signed with it, and its
 #                                      public half is the key the adoption is held to. Never printed.
 #   $env:IDENTITY_CALLER_PASSWORD      the bootstrap operator's password
-#   $env:IDENTITY_OPERATOR_TOTP_FILE   optional, the operator's TOTP file (dev-token.ps1)
+#   $env:IDENTITY_OPERATOR_TOTP_FILE   optional, the operator's TOTP file (dev-token.ps1); unset, the
+#                                      server's deploy/dev/keys/operator-totp.json when it exists (dev-env.ps1)
 #
 # Usage, from the repository root after `set -a; . deploy/dev/.env; set +a`:
 #   pwsh ./scripts/dev-adopt-caller.ps1            # plan
@@ -30,7 +31,8 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
-$api = if ($env:IDENTITY_API_URL) { $env:IDENTITY_API_URL } else { "http://127.0.0.1:8082" }
+. "$PSScriptRoot\dev-env.ps1"   # IDENTITY_API_URL, KC_BASE_URL, the operator TOTP: derived from deploy/dev/.env
+$api = Get-DevApiUrl
 foreach ($name in @("IDENTITY_CALLER_KEY_FILE", "IDENTITY_CALLER_PASSWORD")) {
     if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
         throw "$name is required."
@@ -46,7 +48,7 @@ try {
     $public = @{ kty = "RSA"; n = (ConvertTo-Base64Url $parameters.Modulus); e = (ConvertTo-Base64Url $parameters.Exponent) }
 } finally { $rsa.Dispose() }
 
-$operatorTotp = if ($env:IDENTITY_OPERATOR_TOTP_FILE) { @{ OperatorTotpFile = $env:IDENTITY_OPERATOR_TOTP_FILE } } else { @{} }
+$operatorTotp = Get-DevOperatorTotp
 $token = Get-ScnehauxToken -Username "bootstrap-operator" `
     -Password $env:IDENTITY_CALLER_PASSWORD -KeyFile $env:IDENTITY_CALLER_KEY_FILE @operatorTotp
 

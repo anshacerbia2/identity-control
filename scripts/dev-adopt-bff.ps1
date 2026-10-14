@@ -17,7 +17,8 @@
 # SECRETS: read from the environment, as dev-smoke.ps1 reads them.
 #   $env:IDENTITY_CALLER_KEY_FILE      the development caller's private key
 #   $env:IDENTITY_CALLER_PASSWORD      the bootstrap operator's password
-#   $env:IDENTITY_OPERATOR_TOTP_FILE   optional, the operator's TOTP file (dev-token.ps1)
+#   $env:IDENTITY_OPERATOR_TOTP_FILE   optional, the operator's TOTP file (dev-token.ps1); unset, the
+#                                      server's deploy/dev/keys/operator-totp.json when it exists (dev-env.ps1)
 # Each BFF file is a PUBLIC JWK, the one scripts/new-client-key.mjs wrote beside a private key. A file
 # holding a private member is refused, and nothing read from one is printed.
 #
@@ -43,7 +44,8 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
-$api = if ($env:IDENTITY_API_URL) { $env:IDENTITY_API_URL } else { "http://127.0.0.1:8090" }
+. "$PSScriptRoot\dev-env.ps1"   # IDENTITY_API_URL, KC_BASE_URL, the operator TOTP: derived from deploy/dev/.env
+$api = Get-DevApiUrl
 foreach ($name in @("IDENTITY_CALLER_KEY_FILE", "IDENTITY_CALLER_PASSWORD")) {
     if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
         throw "$name is required."
@@ -71,7 +73,7 @@ $publicKeys = @(foreach ($file in $files) {
 
 Add-Type -AssemblyName System.Net.Http
 . "$PSScriptRoot\dev-token.ps1"
-$operatorTotp = if ($env:IDENTITY_OPERATOR_TOTP_FILE) { @{ OperatorTotpFile = $env:IDENTITY_OPERATOR_TOTP_FILE } } else { @{} }
+$operatorTotp = Get-DevOperatorTotp
 $token = Get-ScnehauxToken -Username "bootstrap-operator" `
     -Password $env:IDENTITY_CALLER_PASSWORD -KeyFile $env:IDENTITY_CALLER_KEY_FILE @operatorTotp
 

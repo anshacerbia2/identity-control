@@ -16,14 +16,16 @@
 # SECRETS: read from the environment, as dev-proof-b.ps1 reads them. None is printed.
 #   IDENTITY_CALLER_KEY_FILE, IDENTITY_CALLER_PASSWORD, IDENTITY_OPERATOR_TOTP_FILE   the sign-in
 #   KC_BOOTSTRAP_ADMIN_USERNAME, KC_BOOTSTRAP_ADMIN_PASSWORD   the kernel's own session list
-# KC_BASE_URL is where the login form is served, KC_ADMIN_URL the kernel's private /admin address.
+# KC_BASE_URL is where the login form is served (unset, the origin of KEYCLOAK_ISSUER: dev-env.ps1),
+# KC_ADMIN_URL the kernel's private /admin address.
 #
 # Usage: pwsh ./scripts/dev-session-removal-proof.ps1
 
 $ErrorActionPreference = "Stop"
 
-$api       = if ($env:IDENTITY_API_URL) { $env:IDENTITY_API_URL } else { "http://127.0.0.1:8082" }
-$kcBase    = if ($env:KC_BASE_URL) { $env:KC_BASE_URL } else { "http://127.0.0.1:8081" }
+. "$PSScriptRoot\dev-env.ps1"   # IDENTITY_API_URL, KC_BASE_URL, the operator TOTP: derived from deploy/dev/.env
+$api       = Get-DevApiUrl
+$kcBase    = Get-DevKernelUrl
 $kcAdmin   = if ($env:KC_ADMIN_URL) { $env:KC_ADMIN_URL } else { "http://127.0.0.1:8081" }
 $realm     = if ($env:KC_REALM) { $env:KC_REALM } else { "scnehaux" }
 $adminUser = if ($env:KC_BOOTSTRAP_ADMIN_USERNAME) { $env:KC_BOOTSTRAP_ADMIN_USERNAME } else { "admin" }
@@ -81,7 +83,7 @@ function Expect($label, $got, $want) {
     else { Write-Host "  FAIL  $label (got $got, want $want)"; $script:failures++ }
 }
 
-$operatorTotp = if ($env:IDENTITY_OPERATOR_TOTP_FILE) { @{ OperatorTotpFile = $env:IDENTITY_OPERATOR_TOTP_FILE } } else { @{} }
+$operatorTotp = Get-DevOperatorTotp
 
 Write-Host "1. the bootstrap operator signs in"
 $signin = Get-ScnehauxToken -Username "bootstrap-operator" -Password $env:IDENTITY_CALLER_PASSWORD `

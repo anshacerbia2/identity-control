@@ -39,16 +39,17 @@
 #   IDENTITY_CALLER_KEY_FILE, IDENTITY_CALLER_PASSWORD  a provider-scope token, as dev-smoke.ps1
 #   KC_BOOTSTRAP_ADMIN_USERNAME, KC_BOOTSTRAP_ADMIN_PASSWORD   the console administrator
 #
-# KC_BASE_URL is where the login form is served, KC_ADMIN_URL the kernel's private address where
-# /admin is reachable, and KERNEL_KEYCLOAK_CONTAINER the container scenario 10 stops. It is for a
-# kernel that exists for the length of a CI job. Scenario 10 stops Keycloak: never run it against a
-# shared server.
+# KC_BASE_URL is where the login form is served (unset, the origin of KEYCLOAK_ISSUER: dev-env.ps1),
+# KC_ADMIN_URL the kernel's private address where /admin is reachable, and KERNEL_KEYCLOAK_CONTAINER
+# the container scenario 10 stops. It is for a kernel that exists for the length of a CI job. Scenario
+# 10 stops Keycloak: never run it against a shared server.
 #
 # Usage: pwsh ./scripts/dev-proof-b.ps1
 
 $ErrorActionPreference = "Stop"
 
-$api       = if ($env:IDENTITY_API_URL) { $env:IDENTITY_API_URL } else { "http://127.0.0.1:8082" }
+. "$PSScriptRoot\dev-env.ps1"   # IDENTITY_API_URL, KC_BASE_URL, the operator TOTP: derived from deploy/dev/.env
+$api       = Get-DevApiUrl
 $kcAdmin   = if ($env:KC_ADMIN_URL) { $env:KC_ADMIN_URL } else { "http://127.0.0.1:8081" }
 $realm     = if ($env:KC_REALM) { $env:KC_REALM } else { "scnehaux" }
 $container = if ($env:KERNEL_KEYCLOAK_CONTAINER) { $env:KERNEL_KEYCLOAK_CONTAINER } else { "scnehaux-identity-dev-keycloak-1" }
@@ -101,7 +102,7 @@ $script:apiToken = $null
 $script:apiTokenAt = [datetime]::MinValue
 function Api($method, $path, $body, $headers) {
     if (((Get-Date) - $script:apiTokenAt).TotalSeconds -gt 150) {
-        $operatorTotp = if ($env:IDENTITY_OPERATOR_TOTP_FILE) { @{ OperatorTotpFile = $env:IDENTITY_OPERATOR_TOTP_FILE } } else { @{} }
+        $operatorTotp = Get-DevOperatorTotp
         $script:apiToken = Get-ScnehauxToken -Username "bootstrap-operator" `
             -Password $env:IDENTITY_CALLER_PASSWORD -KeyFile $env:IDENTITY_CALLER_KEY_FILE @operatorTotp
         $script:apiTokenAt = Get-Date

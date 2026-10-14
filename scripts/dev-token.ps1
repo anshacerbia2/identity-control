@@ -28,6 +28,7 @@
 Add-Type -AssemblyName System.Web
 Set-StrictMode -Version Latest
 . "$PSScriptRoot\client-assertion.ps1"
+. "$PSScriptRoot\dev-env.ps1"
 
 # Add-LoopbackCookies copies Set-Cookie values into the session with Secure cleared.
 #
@@ -113,7 +114,8 @@ function Get-ScnehauxToken {
     param(
         [Parameter(Mandatory = $true)] [string] $Username,
         [Parameter(Mandatory = $true)] [string] $Password,
-        [string] $KcBase   = $(if ($env:KC_BASE_URL) { $env:KC_BASE_URL } else { "http://127.0.0.1:8081" }),
+        # The kernel's public origin: KC_BASE_URL, else the origin of KEYCLOAK_ISSUER (dev-env.ps1).
+        [string] $KcBase   = $(Get-DevKernelUrl),
         [string] $Realm    = $(if ($env:KC_REALM) { $env:KC_REALM } else { "scnehaux" }),
         [string] $ClientId = "identity-control-caller",
         # The caller's private key. The code is exchanged with an assertion signed by it; the

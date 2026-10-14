@@ -223,8 +223,17 @@ own key source would choose the key that validates it.
 
 ```powershell
 $env:IDENTITY_CALLER_KEY_FILE = (Resolve-Path deploy/dev/keys/identity-control-caller.pem).Path
+# Where the scripts call. On a server they derive both from deploy/dev/.env (scripts/dev-env.ps1);
+# this run has no .env, so name the service of §6 and the Keycloak of §2.
+$env:IDENTITY_API_URL = 'http://127.0.0.1:8090'
+$env:KC_BASE_URL      = 'http://127.0.0.1:8081'
 ./scripts/dev-smoke.ps1
 ```
+
+Without `KC_BASE_URL`, or a `KEYCLOAK_ISSUER` to derive it from, the scripts stop and say so; without
+`IDENTITY_API_URL` they call `127.0.0.1:8082`, the port the development server's compose stack
+publishes. `scripts/dev-keycloak.ps1` and `scripts/dev-bootstrap.ps1` read `KC_BASE_URL` too, as the
+Admin API's address, and default it to `http://127.0.0.1:8081`: this local Keycloak serves both.
 
 Expected output, abbreviated:
 
@@ -277,7 +286,8 @@ go run ./cmd/client-key new -out "$keys\identity-control-workload.pem"
 
 ### 8.2 Register the resource and the workloads in identity-control
 
-With a provider token from the running identity-control:
+With a provider token from the running identity-control, in the session of §7, whose `KC_BASE_URL`
+`Get-ScnehauxToken` signs in on:
 
 ```powershell
 . ./scripts/dev-token.ps1
