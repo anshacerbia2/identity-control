@@ -62,7 +62,8 @@ On the server, from `identity-control/deploy/dev`:
    - `KERNEL_DEPLOY_DIR`, the kernel checkout's `deploy/dev`, whose key tools the scripts use;
    - `GOPROXY=direct`, only where the network intercepts TLS to the module proxy (§Before you start).
 2. **Register this service's two clients,** each with its own key in `./keys`:
-   `./create-kernel-clients.sh >> .env`.
+   `./create-kernel-clients.sh >> .env`. It appends `IDENTITY_CALLER_KEY_FILE`, which `.env.example`
+   leaves out so the line appears once.
 3. **Register the registration client,** with its key: `./create-registration-client.sh`.
 4. **Make the key ring that seals `security_ref` handles:** `./create-security-ref-key.sh`.
 5. **Start the stack:** `docker compose up -d --build`.
