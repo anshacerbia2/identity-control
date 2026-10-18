@@ -1173,6 +1173,8 @@ finding in an upstream image "is fixed by moving the pin to a release that fixes
 and Grype does not report it. The gate passes on the migrate image with no rule about the binary;
 the zlib rule is the only one left.
 
+organization-control makes the same move, in its TDD-001 1.25.0.
+
 **What was rejected.**
 
 - **A `not_affected` statement for GO-2026-6617 on 1.3.3.** The evidence above would support it, but
@@ -1225,8 +1227,8 @@ in identity-kernel, identity-control and organization-control. The checker fails
 - for `affected`, whose `review-by` is more than 90 days after `detected`, which is rule 8's longest
   time.
 
-Every rule here gives a location. The Go modules name `/usr/local/bin/atlas`. The zlib rule, whose
-type does not require one, names `/lib/apk/db/installed` as well. Whether a statement is true is
+Every rule here gives a location. Until 1.20.0 the Go modules named `/usr/local/bin/atlas`. The
+zlib rule, whose type does not require one, names `/lib/apk/db/installed` as well. Whether a statement is true is
 left to review. Outside CI, the scan's database and image archives go under `./.image-scan`, which
 git ignores, and never under `/tmp`.
 
