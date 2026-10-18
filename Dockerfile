@@ -22,17 +22,20 @@ COPY . .
 # CGO off, so the binaries run on distroless static and on the Postgres image alike.
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/ ./cmd/identity-control ./cmd/identity-migrate ./cmd/identity-bootstrap ./cmd/identity-provider-bootstrap
 
-# arigaio/atlas:1.3.3
-FROM arigaio/atlas@sha256:07f3f92fa46e684ed789d5ef344a25494a4fa6844ef1ea1fa4e138522c2c37ac AS atlas
+# arigaio/atlas:1.3.4, resolved from Docker Hub on 2026-10-18: Atlas v1.3.4, built with go1.26.9,
+# golang.org/x/net v0.60.0 and google.golang.org/grpc v1.83.2, the fixed versions of every Go advisory
+# the gate found in 1.3.3's binary, GO-2026-6617 among them (TDD-identity-control-001 §The Migrate
+# Image and Its Exceptions).
+FROM arigaio/atlas@sha256:3cd6883d5ec2703741f750fd5f9efed3a61f8e164b9dcea93ab7a7be429a1b5b AS atlas
 
 # postgres:17.11-alpine -- the same image the Control Database runs, so psql matches the server.
 FROM postgres@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24 AS migrate
 COPY --from=atlas /atlas /usr/local/bin/atlas
 # Atlas checks for a newer release over HTTPS around every command unless ATLAS_NO_UPDATE_NOTIFIER is
 # set, and may send anonymous telemetry unless ATLAS_NO_ANON_TELEMETRY is true. With both off it
-# connects to nothing but the database, which the not_affected statements for this file in
-# .grype.yaml rest on: removing either line voids them (TDD-identity-control-001 §The Migrate Image
-# and Its Exceptions; scripts/atlas-execute-path.sh proves it on every scan).
+# connects to nothing but the database. scripts/atlas-execute-path.sh proves it on every scan, so a
+# new advisory in this file is decided against current evidence (TDD-identity-control-001 §The
+# Migrate Image and Its Exceptions).
 ENV ATLAS_NO_UPDATE_NOTIFIER=true \
     ATLAS_NO_ANON_TELEMETRY=true
 COPY --from=build /out/identity-migrate /out/identity-bootstrap /out/identity-provider-bootstrap /usr/local/bin/

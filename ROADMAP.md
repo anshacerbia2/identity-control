@@ -824,9 +824,10 @@ Two decisions are recorded here:
   the scan enforces. Since STD-GLB-009 1.8.0 (scnehaux-architecture #86) each is a VEX statement
   about one file, and the scan also checks its form. The migrate image's statements, its zlib
   upgrade and the trace that proves Atlas calls nothing but the database are in TDD-001 1.19.0 §The
-  Migrate Image and Its Exceptions. Two dates are open: the Control Database's zlib exception,
-  2026-11-16, and Atlas's statements, 2026-12-09. A registry and image signing for the production
-  path remain production-gate items.
+  Migrate Image and Its Exceptions. On 2026-10-17 a new advisory in Atlas, GO-2026-6617, failed the
+  daily scan; TDD-001 1.20.0 moves the pin to Atlas 1.3.4, which carries every fix, and drops all of
+  Atlas's statements. One date is open: the Control Database's zlib exception, 2026-11-16. A registry
+  and image signing for the production path remain production-gate items.
 
 - ✅ **An `Idempotency-Key` on every command** (STD-GLB-001 1.4.0; TDD-003 1.35.0 §The
   Idempotency-Key on Every Command). Every mutating route is classified in
