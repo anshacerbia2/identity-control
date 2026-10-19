@@ -147,7 +147,7 @@ services:
       IDENTITY_UNMAPPED_USERS: ${IDENTITY_UNMAPPED_USERS:-report}
       # Account security notifications (TDD-identity-control-008): standin on a development server
       # accepts them and delivers none, until the Notification Platform exists. Empty records and
-      # waits.
+      # waits. .env.example sets standin (README §First start, step 1).
       IDENTITY_NOTIFICATION_DELIVERY: ${IDENTITY_NOTIFICATION_DELIVERY:-}
       IDENTITY_TOKEN_TYPE: ${IDENTITY_TOKEN_TYPE:-report}
       # Provider routes require acr aal2 (ADR-IAM-004). report serves a lower token and logs it, for a

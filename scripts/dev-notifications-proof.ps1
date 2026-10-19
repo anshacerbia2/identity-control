@@ -10,6 +10,11 @@
 #      refused, its proof request goes to it alone and the stand-in accepts it without the code ever
 #      being shown, the pending address is removed, and the last active address cannot be.
 #
+# The right code is not proven here. It goes to the new address alone, and the stand-in delivers
+# nothing and logs no code, so nothing on this server can read it. The integration tests prove it
+# (internal/securitynotify/addresses_integration_test.go); TDD-identity-control-008 1.6.0 §Proving an
+# Address on a Development Server lists the options for a development server, none chosen yet.
+#
 # SECRETS: read from the environment, as dev-smoke.ps1 reads them. No address is printed.
 #
 # Usage: pwsh ./scripts/dev-notifications-proof.ps1
