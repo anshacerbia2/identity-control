@@ -61,6 +61,15 @@ On the server, from `identity-control/deploy/dev`:
    - `KC_BOOTSTRAP_ADMIN_PASSWORD`, copied from the kernel's `deploy/dev/.env`;
    - `KERNEL_DEPLOY_DIR`, the kernel checkout's `deploy/dev`, whose key tools the scripts use;
    - `GOPROXY=direct`, only where the network intercepts TLS to the module proxy (§Before you start).
+
+   Keep `IDENTITY_NOTIFICATION_DELIVERY=standin`, which `.env.example` sets. It runs the account
+   security notification dispatcher with the development stand-in for the Notification Platform
+   (`TDD-identity-control-008` §The Adapter): each request is handed over and recorded `submitted`, and
+   the log names its event and recipient count, never an address or a code. No mail leaves the server.
+   Empty, the service's default, runs no dispatcher, and every request waits in `requested`. The
+   service refuses `standin` in production. A notification address a person adds cannot be proven on
+   this server, because its code goes to that address alone and the stand-in delivers nothing
+   (`TDD-identity-control-008` §Proving an Address on a Development Server).
 2. **Register this service's two clients,** each with its own key in `./keys`:
    `./create-kernel-clients.sh >> .env`. It appends `IDENTITY_CALLER_KEY_FILE`, which `.env.example`
    leaves out so the line appears once.
@@ -82,6 +91,7 @@ cp .env.example .env
 #   POSTGRES_PASSWORD, IDENTITY_APP_PASSWORD, IDENTITY_CALLER_PASSWORD
 #   KC_BOOTSTRAP_ADMIN_PASSWORD, copied from the kernel's deploy/dev/.env
 #   KERNEL_DEPLOY_DIR         the kernel checkout's deploy/dev, whose key tools the scripts use
+# keep IDENTITY_NOTIFICATION_DELIVERY=standin, the development stand-in for the Notification Platform
 
 ./create-kernel-clients.sh >> .env           # both clients, each with its own key in ./keys
 ./create-registration-client.sh              # the registration client, with its key
@@ -567,4 +577,6 @@ artifact. A daily dump loses up to 24 hours of changes, against the 1-minute RPO
 | The BFF's sessions all end at once | `IDENTITY_UNMANAGED_CLIENTS=disable` was set before the BFF was adopted. Adopt it (§Wiring to other services) and re-enable it with the registered state |
 | The ceremony is refused | It ran already; that is the design (§First start). Resume it only to finish an interrupted one |
 | `create-kernel-clients.sh` refuses to run | The realm is not applied, or lacks `scnehaux-provider`: apply identity-kernel's realm first (§Before you start) |
+| Security notifications stay `requested` at `GET /v1/principals/{id}/security-notifications` | No dispatcher runs: `IDENTITY_NOTIFICATION_DELIVERY` is empty. Set it to `standin` in `.env` (§First start, step 1) and `docker compose up -d identity-control` |
+| A notification address a person added stays pending | Its code goes only to the new address, and the stand-in delivers nothing, so it cannot be proven on this server (`TDD-identity-control-008` §Proving an Address on a Development Server). Remove it in the account application |
 | The Principal sweep lists users at `GET /v1/principals:unmapped` | Users in the realm that no mapping accounts for. On this server they are reported, not disabled (`IDENTITY_UNMAPPED_USERS`); triage each, then delete it in the console |

@@ -745,6 +745,12 @@ slice:
      command and the sweep share one key per credential, so it is told once.
    - Not yet: the Notification Platform client, which waits on that platform. Until it is in
      production, this remains a production gate.
+   - The development server runs the stand-in (1.6.0): `deploy/dev/.env.example` sets
+     `IDENTITY_NOTIFICATION_DELIVERY=standin`, and its README says why.
+   - Open (1.6.0), each an owner decision: how an added address is proven on a development server,
+     whose code the stand-in delivers to no one (TDD-008 §Proving an Address on a Development Server,
+     four options); and a provider adding an address for a person with none, which ADR-IAM-007 §5.2
+     names and no design specifies (§A Person With No Address).
 
 ## Waiting on the Keycloak proof-of-concept
 

@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-008
   title: Account Security Notifications
   owner: Core Platform Team
-  version: 1.5.0
+  version: 1.6.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-10-06
-  last_reviewed: 2026-10-08
+  last_reviewed: 2026-10-19
   parent_sad: SAD-001
 ---
 
@@ -47,6 +47,11 @@ hands it to the Notification Platform (`PAD-PLT-005`) to deliver. The kernel sen
 - **The Identity Experience page** that serves these routes. It follows in `identity-experience`.
 - **The Notification Platform client.** It waits on that platform. Until then no notification leaves
   a development server.
+- **Proving an added address on a development server (1.6.0).** The code goes to the new address
+  alone, and the stand-in delivers nothing, so no one can read it there. The options are in §Proving
+  an Address on a Development Server; none is chosen.
+- **A provider adding an address for a person (1.6.0).** `ADR-IAM-007 §5.2` says "A provider can do
+  it through assisted recovery". No route does, and this design has none (§A Person With No Address).
 
 ## Technical Context
 
@@ -231,6 +236,68 @@ the sweep reads the admin ACTION on users/{user}/credentials/{credential}:
 
 The Notification Platform's client replaces the stand-in when that platform exists.
 
+**A development server runs `standin` (1.6.0).** `deploy/dev/.env.example` sets it, and its README
+says why, as `deploy-dev` in CI already did. Empty would leave every request `requested` on that
+server, so the dispatch path, the backoff and the seal's clearing would run only in CI. The stand-in
+delivers nothing, so `standin` on a development server tells no one anything: what it adds is that
+the server records each request as handed over, as production will.
+
+### Proving an Address on a Development Server (1.6.0, open)
+
+A person adds an address in the account application, and it stays pending until its code comes back
+(§A Person's Own Addresses). On a development server the code goes to the stand-in, which delivers
+nothing and logs no code. So nobody can complete `:verify` there: `scripts/dev-notifications-proof.ps1`
+proves only that a wrong code leaves the address pending, and the integration tests
+(`addresses_integration_test.go`) prove the right code against the sealed request. This design does
+not define a development way to read the code. Each option below keeps the code out of every log and
+every response in a mode that is not development, which the sources require of a secret:
+
+- OWASP ASVS 4.0.3 7.1.1: "Verify that the application does not log credentials or payment
+  details." [R1]
+- OWASP Logging Cheat Sheet, data to exclude: "Authentication passwords", "Access tokens" and
+  "Encryption keys and other primary secrets" [R2].
+- OWASP ASVS 4.0.3 14.3.2: "Verify that web or application server and application framework debug
+  modes are disabled in production to eliminate debug features, developer consoles, and unintended
+  security disclosures." [R1]
+
+The code proves that the person controls the address. NIST SP 800-63B-4 §4.6 has notifications go
+"to the notification addresses stored in the subscriber account", which "may be any means by which
+the subscriber can be reliably contacted" [R3]. A code read anywhere but at the address proves
+nothing about it, so every option below is for a development server only, and production refuses it
+at startup as it refuses `standin`.
+
+| Option | What it is | For | Against |
+| :-- | :-- | :-- | :-- |
+| A. A development mail catcher | A second development adapter, `smtp-catcher`, hands each request to a local catcher such as Mailpit, "an email & SMTP testing tool with API for developers", whose "REST API" serves "Integration testing using the REST API to view, read and process messages" [R4]. The catcher runs in the development stack, on an internal network, with no relay | The code reaches an inbox, as it will in production, and no log or response carries it. `deploy-dev` could read the message through the catcher's API and prove `:verify` end to end | A new container and adapter in this repository. This service would render a message, which `ADR-IAM-007 §5.3` gives the Notification Platform ("It does not render or send anything itself"), so it needs that decision's owner to accept a development-only exception |
+| B. A sealed file the operator reads | The stand-in writes the opened code to a file on a development-only volume, mode `0600`, owned by the service user, and logs nothing | No new container. The code is never in a log or a response | A secret at rest on the server's disk, read with shell access. It is a second, development-only code path in the dispatcher |
+| C. A development-only read route | `GET /v1/me/notification-addresses/{id}/proof-code` answers the opened code to its own person, only when `IDENTITY_ENVIRONMENT` is not production | The account application could show it; the proof script could use it | A code in a response is the disclosure ASVS 14.3.2 names. Its whole safety rests on one switch, which production must never carry |
+| D. Leave it unproven on development servers | Today's state, stated | Nothing new to secure | The account application's add path cannot be completed on a development server, and only the integration tests prove the right code |
+
+**No option is chosen.** Option A is the closest to production and the only one that puts no code
+on disk or in a response, but it touches `ADR-IAM-007 §5.3`, which is cross-cutting and belongs to the
+architecture repository. Until a decision is recorded there, this design keeps option D.
+
+| Ref | Source |
+| :-- | :-- |
+| R1 | OWASP, *Application Security Verification Standard 4.0.3*, V7 and V14, <https://github.com/OWASP/ASVS/tree/v4.0.3/4.0/en>, accessed 2026-10-19: 7.1.1 "Verify that the application does not log credentials or payment details. Session tokens should only be stored in logs in an irreversible, hashed form."; 14.3.2 "Verify that web or application server and application framework debug modes are disabled in production to eliminate debug features, developer consoles, and unintended security disclosures." |
+| R2 | OWASP, *Logging Cheat Sheet*, Data to exclude, <https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html>, accessed 2026-10-19: "Session identification values", "Access tokens", "Authentication passwords", "Encryption keys and other primary secrets" |
+| R3 | NIST, *SP 800-63B-4*, §4.6 Subscriber Notifications, <https://pages.nist.gov/800-63-4/sp800-63b.html>, accessed 2026-10-19: "Events that require notification SHALL cause a notification to be sent to the notification addresses stored in the subscriber account. Notification addresses may be any means by which the subscriber can be reliably contacted" |
+| R4 | Mailpit, <https://mailpit.axllent.org/>, accessed 2026-10-19: "email & SMTP testing tool with API for developers"; "Integration testing using the REST API to view, read and process messages" |
+
+### A Person With No Address (1.6.0, open)
+
+A Principal created without an email holds no address, and every request for it is `no_address`
+(§Dispatch). Up to 1.5.0 §Operational Notes said "give them one". Only the person can:
+
+- **The person adds one,** in the account application, at a recent `aal2`, and proves it with its
+  code (§A Person's Own Addresses). Until that is proven they still hold none, and the first address
+  has no address held before it to notify.
+- **No provider route adds one.** `ADR-IAM-007 §5.2` says "A provider can do it through assisted
+  recovery", and this design has no such command. It is not built, because what it needs is not
+  designed: whether a provider-added address is proven by its code like the person's, which address is
+  told, and how it is recorded as assisted recovery's evidence. A route is not added without that
+  design.
+
 ## API / Interface
 
 ```text
@@ -334,7 +401,7 @@ impossible to lose without losing the event as well.
 | Signal | Meaning |
 | :-- | :-- |
 | A request `failed` | The adapter refused it ten times; the person was not told |
-| A request `no_address` | A person with no notification address; give them one |
+| A request `no_address` | A person with no notification address. Ask them to add one in the account application; no provider route adds one (§A Person With No Address) |
 | Requests `requested` with no dispatcher | `IDENTITY_NOTIFICATION_DELIVERY` is empty; expected until the Notification Platform exists |
 
 ## Traceability
