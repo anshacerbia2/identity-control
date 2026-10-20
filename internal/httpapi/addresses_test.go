@@ -42,6 +42,13 @@ func (s *stubAddresses) Remove(_ context.Context, principal, _ id.UUID) error {
 	return s.err
 }
 
+func (s *stubAddresses) SendProof(_ context.Context, principal, addressID id.UUID) (securitynotify.Address, error) {
+	s.principal, s.verb = principal, "send-proof"
+	expires := time.Date(2026, 10, 19, 12, 10, 0, 0, time.UTC)
+	return securitynotify.Address{AddressID: addressID, Address: "me@example.com", Origin: "creation", State: "active",
+		ProofExpiresAt: &expires}, s.err
+}
+
 func addressHandler(t *testing.T, stub *stubAddresses) http.Handler {
 	t.Helper()
 	me, err := httpapi.NewMe(&stubSelf{}, 5*time.Minute)
@@ -100,6 +107,14 @@ func TestAPersonManagesTheirOwnAddresses(t *testing.T) {
 		t.Errorf("remove: %d %s", w.Code, w.Body)
 	}
 
+	// Sending a proof to an address already held needs no step-up either: the code goes to that address,
+	// and proving it changes no recipient (TDD-identity-control-008 1.7.0).
+	r, person = asPerson(t, httptest.NewRequest(http.MethodPost, "/v1/me/notification-addresses/"+addressID+":send-proof", nil), time.Hour)
+	if w := serve(handler, r); w.Code != http.StatusOK || stub.verb != "send-proof" || stub.principal != person ||
+		!strings.Contains(w.Body.String(), `"proof_expires_at":"2026-10-19T12:10:00Z"`) {
+		t.Errorf("send-proof: %d %s", w.Code, w.Body)
+	}
+
 	r, _ = asPerson(t, httptest.NewRequest(http.MethodPost, "/v1/me/notification-addresses/not-an-id:remove", nil), time.Minute)
 	if w := serve(handler, r); w.Code != http.StatusNotFound {
 		t.Errorf("a malformed address id answered %d; want 404", w.Code)
@@ -118,6 +133,22 @@ func TestAddressRefusalsAreTold(t *testing.T) {
 		handler := addressHandler(t, &stubAddresses{err: err})
 		r, _ := asPerson(t, httptest.NewRequest(http.MethodPost, "/v1/me/notification-addresses",
 			strings.NewReader(`{"address":"x@example.com"}`)), time.Minute)
+		if w := serve(handler, r); w.Code != want {
+			t.Errorf("%v answered %d; want %d", err, w.Code, want)
+		}
+	}
+}
+
+// A send-proof's refusals: no such address, an address already proven or pending, and a code still good.
+func TestSendProofRefusalsAreTold(t *testing.T) {
+	addressID := mustUUID(t).String()
+	for err, want := range map[error]int{
+		securitynotify.ErrNoSuchAddress:    http.StatusNotFound,
+		securitynotify.ErrProven:           http.StatusConflict,
+		securitynotify.ErrProofOutstanding: http.StatusConflict,
+	} {
+		handler := addressHandler(t, &stubAddresses{err: err})
+		r, _ := asPerson(t, httptest.NewRequest(http.MethodPost, "/v1/me/notification-addresses/"+addressID+":send-proof", nil), time.Minute)
 		if w := serve(handler, r); w.Code != want {
 			t.Errorf("%v answered %d; want %d", err, w.Code, want)
 		}

@@ -9,6 +9,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -66,8 +67,24 @@ type Config struct {
 
 	// NotificationDelivery is IDENTITY_NOTIFICATION_DELIVERY: empty, no dispatcher runs and account
 	// security notifications are recorded and wait; "standin", the development server's stand-in for
-	// the Notification Platform accepts them, which production refuses (TDD-identity-control-008).
+	// the Notification Platform accepts them, which production refuses (TDD-identity-control-008);
+	// "smtp-catcher", the development adapter renders each and hands it to a mail catcher, which only
+	// IDENTITY_ENVIRONMENT=development admits (TDD-identity-control-008 1.7.0, ADR-IAM-007 §5.3).
 	NotificationDelivery string
+
+	// SMTPCatcherAddress and SMTPCatcherFrom are the mail catcher's SMTP listener, host:port, and the
+	// sender its messages name, for IDENTITY_NOTIFICATION_DELIVERY=smtp-catcher.
+	SMTPCatcherAddress string
+	SMTPCatcherFrom    string
+
+	// TemporaryPasswordTTL is IDENTITY_TEMPORARY_PASSWORD_TTL: how long an issued temporary password
+	// lasts unused before the sweep removes it. 24 hours by default and at most, 1 hour at least
+	// (ADR-IAM-010 §5.2, STD-IAM-001 2.8.0 §3.1).
+	TemporaryPasswordTTL time.Duration
+
+	// TemporaryPasswordSweepInterval is IDENTITY_TEMPORARY_PASSWORD_SWEEP_INTERVAL: how often the lapse
+	// sweep runs. It removes a value up to one interval before its lapse, never after.
+	TemporaryPasswordSweepInterval time.Duration
 
 	// RegistrationReconcileInterval is the registration drift sweep cadence. identity-kernel keeps
 	// admin events for 7 days, and a change must still carry its event when a sweep reads it.
@@ -113,6 +130,10 @@ type Config struct {
 	// owners (ADR-IAM-003 §5.1). Production unless stated, so a deployment that forgets to say
 	// gets the stricter rule.
 	Production bool
+
+	// Development is IDENTITY_ENVIRONMENT=development: a development server, which is non-production
+	// and the one environment that admits the mail catcher adapter (ADR-IAM-007 §5.3, 2026-10-19).
+	Development bool
 
 	// TokenIssuer and TokenAudience are the verifier's contract. The issuer is compared for
 	// exact equality, so a value with a stray trailing slash rejects every token rather than
@@ -283,8 +304,10 @@ func Load() (Config, error) {
 	case "production":
 		cfg.Production = true
 	case "non-production":
+	case "development":
+		cfg.Development = true
 	default:
-		problems = append(problems, fmt.Errorf("IDENTITY_ENVIRONMENT is %q; it is production or non-production", environment))
+		problems = append(problems, fmt.Errorf("IDENTITY_ENVIRONMENT is %q; it is production, non-production or development", environment))
 	}
 	switch mode := strings.TrimSpace(os.Getenv("IDENTITY_NOTIFICATION_DELIVERY")); mode {
 	case "":
@@ -294,8 +317,32 @@ func Load() (Config, error) {
 				"it accepts every notification and delivers none, so the person would not be told"))
 		}
 		cfg.NotificationDelivery = mode
+	case "smtp-catcher":
+		// A development server only, never production (ADR-IAM-007 §5.3): ASVS 5.0 13.4.2, "debug modes
+		// are disabled for all components in production environments".
+		if !cfg.Development {
+			problems = append(problems, errors.New("IDENTITY_NOTIFICATION_DELIVERY=smtp-catcher is refused unless "+
+				"IDENTITY_ENVIRONMENT is development: it renders messages, codes included, for a mail catcher that "+
+				"delivers nothing"))
+		}
+		cfg.NotificationDelivery = mode
+		cfg.SMTPCatcherAddress = strings.TrimSpace(os.Getenv("IDENTITY_SMTP_CATCHER_ADDRESS"))
+		cfg.SMTPCatcherFrom = stringOr("IDENTITY_SMTP_CATCHER_FROM", "identity-control@scnehaux.local")
+		if _, _, err := net.SplitHostPort(cfg.SMTPCatcherAddress); err != nil {
+			problems = append(problems, errors.New("IDENTITY_SMTP_CATCHER_ADDRESS is required as host:port while "+
+				"IDENTITY_NOTIFICATION_DELIVERY is smtp-catcher"))
+		}
 	default:
-		problems = append(problems, fmt.Errorf("IDENTITY_NOTIFICATION_DELIVERY is %q; it is empty or standin", mode))
+		problems = append(problems, fmt.Errorf("IDENTITY_NOTIFICATION_DELIVERY is %q; it is empty, standin or smtp-catcher", mode))
+	}
+	cfg.TemporaryPasswordTTL = durationOr("IDENTITY_TEMPORARY_PASSWORD_TTL", 24*time.Hour, &problems)
+	if cfg.TemporaryPasswordTTL < time.Hour || cfg.TemporaryPasswordTTL > 24*time.Hour {
+		problems = append(problems, errors.New("IDENTITY_TEMPORARY_PASSWORD_TTL must be at least 1h and at most 24h "+
+			"(STD-IAM-001 2.8.0 §3.1: a temporary password is gone within 24 hours)"))
+	}
+	cfg.TemporaryPasswordSweepInterval = durationOr("IDENTITY_TEMPORARY_PASSWORD_SWEEP_INTERVAL", 5*time.Minute, &problems)
+	if cfg.TemporaryPasswordSweepInterval < time.Second || cfg.TemporaryPasswordSweepInterval > 15*time.Minute {
+		problems = append(problems, errors.New("IDENTITY_TEMPORARY_PASSWORD_SWEEP_INTERVAL must be between 1s and 15m"))
 	}
 	switch mode := stringOr("IDENTITY_UNMANAGED_CLIENTS", "report"); mode {
 	case "report":

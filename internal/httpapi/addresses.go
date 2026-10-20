@@ -23,6 +23,7 @@ type AddressService interface {
 	Add(ctx context.Context, principal id.UUID, address string) (securitynotify.Address, error)
 	Verify(ctx context.Context, principal, addressID id.UUID, code string) error
 	Remove(ctx context.Context, principal, addressID id.UUID) error
+	SendProof(ctx context.Context, principal, addressID id.UUID) (securitynotify.Address, error)
 }
 
 // UseAddresses mounts the address routes on the self handler.
@@ -42,6 +43,11 @@ func writeAddressError(w http.ResponseWriter, r *http.Request, err error) {
 		httpapi.Problem(w, r, httpapi.StateTransitionRefused, "The last active notification address cannot be removed; add and prove another first")
 	case errors.Is(err, securitynotify.ErrNotPending):
 		httpapi.Problem(w, r, httpapi.StateTransitionRefused, "The address is not waiting for a code")
+	case errors.Is(err, securitynotify.ErrProven):
+		httpapi.Problem(w, r, httpapi.StateTransitionRefused, "The address is not an active address waiting to be proven")
+	case errors.Is(err, securitynotify.ErrProofOutstanding):
+		httpapi.Problem(w, r, httpapi.StateTransitionRefused,
+			"A code sent to this address is still good; enter it, or ask again after it expires")
 	case errors.Is(err, securitynotify.ErrWrongCode):
 		httpapi.Problem(w, r, httpapi.ValidationFailed, "The code is wrong, has expired, or has been tried too often")
 	default:
@@ -107,8 +113,8 @@ type verifyAddressRequest struct {
 	Code string `json:"code"`
 }
 
-// NotificationAddressAction handles POST /v1/me/notification-addresses/{address_id}:verify and
-// .../{address_id}:remove.
+// NotificationAddressAction handles POST /v1/me/notification-addresses/{address_id}:verify,
+// .../{address_id}:remove and .../{address_id}:send-proof (TDD-identity-control-008 1.7.0).
 func (h *Me) NotificationAddressAction(w http.ResponseWriter, r *http.Request) {
 	principal, ok := h.caller(w, r)
 	if !ok {
@@ -131,6 +137,16 @@ func (h *Me) NotificationAddressAction(w http.ResponseWriter, r *http.Request) {
 			writeAddressError(w, r, err)
 			return
 		}
+	case "send-proof":
+		// Any level: the code goes to an address the person already holds, and proving it changes no
+		// recipient (TDD-identity-control-008 1.7.0 §Proving an Address Already Held).
+		address, err := h.addresses.SendProof(r.Context(), principal, addressID)
+		if err != nil {
+			writeAddressError(w, r, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"notification_address": address})
+		return
 	case "remove":
 		if !h.stepUp(w, r) {
 			return

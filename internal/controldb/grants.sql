@@ -63,6 +63,8 @@ BEGIN
               ('identity.kernel_event_mark'),
               ('identity.notification_address'),
               ('identity.security_notification'),
+              ('identity.temporary_password_issuance'),
+              ('identity.temporary_password_outcome'),
               ('platform.outbox'),
               ('platform.processed_event'),
               ('platform.dead_letter'),
@@ -211,6 +213,11 @@ REVOKE DELETE, TRUNCATE ON identity.kernel_event_mark FROM identity_runtime;
 -- that the person was told, or that they could not be: its state moves forward and nothing deletes one.
 REVOKE DELETE, TRUNCATE ON identity.notification_address FROM identity_runtime;
 REVOKE DELETE, TRUNCATE ON identity.security_notification FROM identity_runtime;
+-- A temporary password's issuance and its outcome (ADR-IAM-010, TDD-identity-control-005 2.12.0): the
+-- record of who gave a person a first credential, why, and how it ended. Insert-only, so the provider
+-- who issued it cannot rewrite either. Neither holds the value.
+REVOKE UPDATE, DELETE, TRUNCATE ON identity.temporary_password_issuance FROM identity_runtime;
+REVOKE UPDATE, DELETE, TRUNCATE ON identity.temporary_password_outcome FROM identity_runtime;
 -- The ceremony grant ends once, by an insert, and is never revived: insert-only like the ceremony
 -- row it retires (TDD-identity-control-006 §The Ceremony's Grant).
 REVOKE UPDATE, DELETE, TRUNCATE ON identity.ceremony_grant_retirement FROM identity_runtime;

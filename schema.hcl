@@ -2997,3 +2997,117 @@ table "security_notification" {
     expr = "(sealed_secret IS NULL) OR (event = 'notification_address_proof' AND state = 'requested')"
   }
 }
+
+// A provider's temporary password for a person who has never set one (ADR-IAM-010,
+// TDD-identity-control-005 2.12.0 §A First Credential). The issuance is recorded before the kernel
+// holds the value, and never the value itself (STD-IAM-001 2.8.0 §3.1). Insert-only.
+table "temporary_password_issuance" {
+  schema  = schema.identity
+  comment = "Each temporary password a provider issued, never its value. Insert-only. ADR-IAM-010, TDD-identity-control-005 2.12.0."
+
+  column "issuance_id" {
+    null = false
+    type = uuid
+  }
+  column "principal_id" {
+    null = false
+    type = uuid
+  }
+  column "issued_by" {
+    null = false
+    type = uuid
+  }
+  column "reason" {
+    null = false
+    type = text
+  }
+  column "correlation_id" {
+    null = false
+    type = text
+  }
+  // The provider decision's basis was an emergency grant.
+  column "emergency" {
+    null = false
+    type = boolean
+  }
+  // The issuing provider's acr and auth_time.
+  column "assurance" {
+    null = false
+    type = text
+  }
+  column "issued_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+  column "lapses_at" {
+    null = false
+    type = timestamptz
+  }
+
+  primary_key {
+    columns = [column.issuance_id]
+  }
+
+  foreign_key "temporary_password_issuance_principal_id_fkey" {
+    columns     = [column.principal_id]
+    ref_columns = [table.principal_mapping.column.principal_id]
+    on_update   = NO_ACTION
+    on_delete   = NO_ACTION
+  }
+
+  // A Principal's issuances, oldest first: the lapse sweep and the replacement read.
+  index "temporary_password_issuance_principal" {
+    columns = [column.principal_id, column.issued_at]
+  }
+  index "temporary_password_issuance_lapse" {
+    columns = [column.lapses_at]
+  }
+
+  check "temporary_password_issuance_reason_named" {
+    expr = "btrim(reason) <> ''::text"
+  }
+  check "temporary_password_issuance_not_self" {
+    expr = "issued_by <> principal_id"
+  }
+  // Gone within 24 hours (STD-IAM-001 2.8.0 §3.1).
+  check "temporary_password_issuance_lapse_bounded" {
+    expr = "(lapses_at > issued_at) AND (lapses_at <= (issued_at + '24:00:00'::interval))"
+  }
+}
+
+// How an issuance ended, recorded once: used, lapsed, replaced by a later issuance, or failed at the
+// kernel. Insert-only.
+table "temporary_password_outcome" {
+  schema  = schema.identity
+  comment = "How each temporary password ended, once. Insert-only. ADR-IAM-010, TDD-identity-control-005 2.12.0."
+
+  column "issuance_id" {
+    null = false
+    type = uuid
+  }
+  column "outcome" {
+    null = false
+    type = text
+  }
+  column "recorded_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+
+  primary_key {
+    columns = [column.issuance_id]
+  }
+
+  foreign_key "temporary_password_outcome_issuance_id_fkey" {
+    columns     = [column.issuance_id]
+    ref_columns = [table.temporary_password_issuance.column.issuance_id]
+    on_update   = NO_ACTION
+    on_delete   = NO_ACTION
+  }
+
+  check "temporary_password_outcome_check" {
+    expr = "outcome = ANY (ARRAY['used'::text, 'lapsed'::text, 'replaced'::text, 'failed'::text])"
+  }
+}

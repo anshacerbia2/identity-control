@@ -57,7 +57,9 @@ var authenticatorTypes = map[string]string{
 //   - recovery codes issued are UPDATE_CREDENTIAL naming recovery-authn-codes;
 //   - a recovery code used is a LOGIN naming recovery-authn-codes with no required action; the LOGIN
 //     ending enrolment names the same type and carries CONFIGURE_RECOVERY_AUTHN_CODES;
-//   - a removal through the Admin API is an admin ACTION on users/{user}/credentials/{credential}.
+//   - a removal through the Admin API is an admin ACTION on users/{user}/credentials/{credential};
+//   - a password set through the Admin API, a temporary one among them, is an admin ACTION on
+//     users/{user}/reset-password, a binding by an administrator.
 func Classify(e keycloak.KernelEvent) (Notified, bool) {
 	if e.Error != "" {
 		return Notified{}, false
@@ -85,6 +87,13 @@ func Classify(e keycloak.KernelEvent) (Notified, bool) {
 			if len(parts) == 4 && parts[0] == "users" && parts[1] != "" && parts[2] == "credentials" && parts[3] != "" {
 				return Notified{Event: EventAuthenticatorRemoved, Subject: parts[1], Credential: parts[3],
 					Details: map[string]string{"actor": ActorAdministrator}}, true
+			}
+			// A password set through the Admin API, such as a provider's temporary password
+			// (ADR-IAM-010 §5.3 item 4, TDD-identity-control-008 1.7.0): a password bound by an
+			// administrator.
+			if len(parts) == 3 && parts[0] == "users" && parts[1] != "" && parts[2] == "reset-password" {
+				return Notified{Event: EventAuthenticatorBound, Subject: parts[1],
+					Details: map[string]string{"authenticator": "password", "actor": ActorAdministrator}}, true
 			}
 		}
 	}

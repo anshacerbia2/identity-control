@@ -18,6 +18,7 @@ It is **development only**, and three things make it so:
 | `migrate` | built, `migrate` target | Once per `up`: roles and platform schema, Atlas, privileges, the `identity_app` login role, and an assertion of the privilege shape. The service starts only if it succeeds |
 | `identity-control` | built, `service` target (distroless, non-root) | The API, on `127.0.0.1:8082` |
 | `bootstrap` | built, `migrate` target | Only through `bootstrap.sh`: the ceremony of ADR-IAM-001 §5.11 |
+| `mailpit` | `axllent/mailpit:v1.31.6`, pinned | The development mail catcher (ADR-IAM-007 §5.3, 2026-10-19). It receives every account security notification, proof codes included, and delivers nothing. SMTP on the internal network only; its web interface and API on `127.0.0.1:8025` (§Reading a code in the mail catcher) |
 
 The compose project is `scnehaux-identity-control-dev`, and the network other stacks call this service
 on is `scnehaux-identity-control-api`; both are the defaults STD-GLB-009 §Development Server Deployment
@@ -62,14 +63,15 @@ On the server, from `identity-control/deploy/dev`:
    - `KERNEL_DEPLOY_DIR`, the kernel checkout's `deploy/dev`, whose key tools the scripts use;
    - `GOPROXY=direct`, only where the network intercepts TLS to the module proxy (§Before you start).
 
-   Keep `IDENTITY_NOTIFICATION_DELIVERY=standin`, which `.env.example` sets. It runs the account
-   security notification dispatcher with the development stand-in for the Notification Platform
-   (`TDD-identity-control-008` §The Adapter): each request is handed over and recorded `submitted`, and
-   the log names its event and recipient count, never an address or a code. No mail leaves the server.
-   Empty, the service's default, runs no dispatcher, and every request waits in `requested`. The
-   service refuses `standin` in production. A notification address a person adds cannot be proven on
-   this server, because its code goes to that address alone and the stand-in delivers nothing
-   (`TDD-identity-control-008` §Proving an Address on a Development Server).
+   Keep `IDENTITY_NOTIFICATION_DELIVERY=smtp-catcher`, which `.env.example` sets. It runs the account
+   security notification dispatcher with the development adapter (`TDD-identity-control-008` 1.7.0
+   §The Adapter): each request is rendered as a plain message and handed by SMTP to the stack's mail
+   catcher, `mailpit`, which relays nothing. So a proof code can be read on this server, in the
+   catcher's web interface (§Reading a code in the mail catcher), and nowhere else: the log names a
+   notification's event and recipient count, never an address or a code. `compose.yaml` runs the
+   service as `IDENTITY_ENVIRONMENT=development`, the one environment that admits the adapter; any
+   other refuses it at startup. `standin` hands every request over and delivers nothing. Empty, the
+   service's default, runs no dispatcher, and every request waits in `requested`.
 2. **Register this service's two clients,** each with its own key in `./keys`:
    `./create-kernel-clients.sh >> .env`. It appends `IDENTITY_CALLER_KEY_FILE`, which `.env.example`
    leaves out so the line appears once.
@@ -91,7 +93,7 @@ cp .env.example .env
 #   POSTGRES_PASSWORD, IDENTITY_APP_PASSWORD, IDENTITY_CALLER_PASSWORD
 #   KC_BOOTSTRAP_ADMIN_PASSWORD, copied from the kernel's deploy/dev/.env
 #   KERNEL_DEPLOY_DIR         the kernel checkout's deploy/dev, whose key tools the scripts use
-# keep IDENTITY_NOTIFICATION_DELIVERY=standin, the development stand-in for the Notification Platform
+# keep IDENTITY_NOTIFICATION_DELIVERY=smtp-catcher, the development mail catcher
 
 ./create-kernel-clients.sh >> .env           # both clients, each with its own key in ./keys
 ./create-registration-client.sh              # the registration client, with its key
@@ -213,6 +215,44 @@ Each is a service behind a profile that runs the migrate image, and never starts
 | :-- | :-- | :-- |
 | `bootstrap` | `./bootstrap.sh "<operator>" "<reason>"` the first time; to resume, `docker compose run --rm bootstrap -operator … -resume …` | once per Control Database (ADR-IAM-001 §5.11) |
 | `provider-bootstrap` | `docker compose run --rm provider-bootstrap` | once Organization Control serves this consumer, and again after its registration changes; organization-control's `deploy/dev/README.md` says when. It bootstraps provider authority and the Tenant context, and records the lower mark |
+
+### Reading a code in the mail catcher
+
+Every account security notification on this server lands in `mailpit`, the development mail catcher
+(ADR-IAM-007 §5.3, 2026-10-19). Nothing leaves the server: Mailpit relays only with a relay
+configuration file, and this stack gives it none ("To enable SMTP relaying, the configuration file
+(yaml syntax) must be provided to Mailpit"). Its messages live in its memory, at most 500, and go when
+it restarts.
+
+A proof code is read there:
+
+- **From a laptop,** through the dev tunnel: add the port to the server's tunnel as owner-only,
+  `devtunnel port create <tunnel> -p 8025` with no `--anonymous`, as for the Control Database in
+  §Running the code from a laptop, and open its tunnel origin signed in as the tunnel's owner. The
+  interface lists each message by recipient and subject; the code is in the message titled "Your code
+  to prove this address".
+- **On the server,** with its API: `curl -s http://127.0.0.1:8025/api/v1/messages` lists them, newest
+  first, and `curl -s http://127.0.0.1:8025/api/v1/message/<ID>` reads one, the code in its `Text`.
+  `scripts/dev-notifications-proof.ps1` does the same in `deploy-dev`.
+
+Who reads it is whoever can reach that port, so the code proves less here than in an inbox: it proves
+the address only on a server whose catcher the owner alone reaches. Never relay a code from it in a
+ticket or a chat, and never publish port `8025` on any address but `127.0.0.1` (STD-GLB-009 rule 6).
+
+### Giving a person a first credential
+
+A person a provider creates holds no password, so they cannot sign in until a provider issues them a
+temporary one (ADR-IAM-010, `TDD-identity-control-005` 2.12.0 §A First Credential). In the Admin
+Portal, as a provider at `aal2`, after creating the person: **Issue a temporary password**, with a
+reason. The value is shown once, lapses after 24 hours unused (`IDENTITY_TEMPORARY_PASSWORD_TTL`), and is
+never shown again; issuing again replaces it. Verify the person, then hand it over on a channel other
+than the one that carries the username. At their first sign-in the kernel requires a new password and
+refuses the temporary value as the new one (identity-kernel `passwordHistory`). Once they have set
+their own, the command answers `409` `credential-established`.
+
+The route is `POST /v1/principals/{principal_id}:issue-temporary-password` with `Idempotency-Key` and
+`X-Administrative-Reason`; `scripts/dev-first-credential-proof.ps1` runs it end to end in `deploy-dev`.
+The value is never logged or stored by this service, so a lost one is issued again, never looked up.
 
 ### Calling the API
 

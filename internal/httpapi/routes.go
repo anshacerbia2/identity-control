@@ -64,6 +64,16 @@ type RoutesConfig struct {
 	Deliveries       Applier
 	DeliveryVerifier TokenVerifier
 
+	// Identifiers answers whether a Principal holds an address, proven, and IdentifierVerifier admits
+	// Organization Control's workload alone (TDD-identity-control-008 1.7.0). Either nil, the route
+	// answers 503.
+	Identifiers        IdentifierMatcher
+	IdentifierVerifier TokenVerifier
+
+	// TemporaryPasswords serves a provider's :issue-temporary-password (TDD-identity-control-005
+	// 2.12.0). Nil, the action is unknown.
+	TemporaryPasswords *TemporaryPasswords
+
 	// Keys is where a command's Idempotency-Key is claimed and its answer recorded, for the routes
 	// replayedKey names (commands.go). The pool satisfies it. Nil, as in a handler's unit test, the
 	// key is still required and nothing is recorded.
@@ -94,6 +104,10 @@ type Surface struct {
 	// Deliveries is the acceptance API Organization Control's dispatcher posts to. It verifies its
 	// own caller, the delivering workload, and no caller route's authentication applies to it.
 	Deliveries http.Handler
+
+	// Identifiers is the identifier match Organization Control asks at an invitation's acceptance. It
+	// verifies its own caller, Organization Control's workload, as Deliveries does.
+	Identifiers http.Handler
 }
 
 // Routes builds the HTTP surface.
@@ -260,7 +274,8 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	api.HandleFunc("GET /v1/workloads:unused", p(cfg.Workloads.Unused))
 	api.HandleFunc("GET /v1/workloads:reviews-overdue", p(cfg.Workloads.ReviewsOverdue))
 
-	return Surface{Probes: probes, API: api, Deliveries: deliveryIntake(cfg.DeliveryVerifier, cfg.Deliveries)}, nil
+	return Surface{Probes: probes, API: api, Deliveries: deliveryIntake(cfg.DeliveryVerifier, cfg.Deliveries),
+		Identifiers: identifierMatch(cfg.IdentifierVerifier, cfg.Identifiers, cfg.Telemetry)}, nil
 }
 
 // Mount joins the two halves onto one root mux, each behind the chain its half requires.
@@ -268,8 +283,8 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 // The probe patterns are literal and method-qualified, so Go's mux precedence gives them
 // priority over the catch-all without either half being able to shadow the other.
 //
-// The delivery intake takes the probe chain -- observability and timeout, no caller authentication --
-// because it verifies its own caller, which no caller route would admit.
+// The delivery intake and the identifier match take the probe chain -- observability and timeout, no
+// caller authentication -- because each verifies its own caller, which no caller route would admit.
 func (s Surface) Mount(probeChain, apiChain func(http.Handler) http.Handler) http.Handler {
 	root := http.NewServeMux()
 	root.Handle("GET /healthz", probeChain(s.Probes))
@@ -277,13 +292,17 @@ func (s Surface) Mount(probeChain, apiChain func(http.Handler) http.Handler) htt
 	if s.Deliveries != nil {
 		root.Handle("POST /v1/deliveries", probeChain(s.Deliveries))
 	}
+	if s.Identifiers != nil {
+		root.Handle("POST /v1/principals/{principal_id}/identifiers:match", probeChain(s.Identifiers))
+	}
 	root.Handle("/", apiChain(reasonHeaders(s.API)))
 	return root
 }
 
 // principalAction dispatches POST /v1/principals/{target} by its action: :relink and :release to the
-// Principal path, replayed here, and :suspend and :restore to the security commands when they are mounted,
-// which key themselves.
+// Principal path, replayed here, :suspend and :restore to the security commands when they are mounted,
+// which key themselves, and :issue-temporary-password to the first-credential path, which keys itself
+// and never lets its answer reach the replay record (TDD-identity-control-005 2.12.0).
 func principalAction(cfg RoutesConfig, k commands) http.HandlerFunc {
 	relink := k.replay(cfg.Principals.PrincipalAction)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -293,6 +312,8 @@ func principalAction(cfg RoutesConfig, k commands) http.HandlerFunc {
 			cfg.Security.Suspend(w, r, subject)
 		case action == "restore" && cfg.Security != nil:
 			cfg.Security.Restore(w, r, subject)
+		case action == "issue-temporary-password" && cfg.TemporaryPasswords != nil:
+			cfg.TemporaryPasswords.Issue(w, r, subject)
 		default:
 			relink(w, r)
 		}

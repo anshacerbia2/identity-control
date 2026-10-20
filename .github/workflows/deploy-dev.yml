@@ -111,8 +111,12 @@ jobs:
             # Proof B scenario 6b proves the Principal sweep disables what it finds, against the live
             # kernel, and that it never touches a service-account user (TDD-identity-control-001 1.13.0).
             echo "IDENTITY_UNMAPPED_USERS=disable"
-            # The development stand-in for the Notification Platform (TDD-identity-control-008).
-            echo "IDENTITY_NOTIFICATION_DELIVERY=standin"
+            # The development mail catcher, as a development server runs it (TDD-identity-control-008
+            # 1.7.0, ADR-IAM-007 §5.3): the notifications proof reads each code from it.
+            echo "IDENTITY_NOTIFICATION_DELIVERY=smtp-catcher"
+            # A lapse sweep every few seconds, so the first-credential proof sees one within the job
+            # (TDD-identity-control-005 2.12.0).
+            echo "IDENTITY_TEMPORARY_PASSWORD_SWEEP_INTERVAL=5s"
           } > .env
 
       - name: register this service's clients in the kernel
@@ -304,12 +308,22 @@ jobs:
           pwsh -NoProfile -File scripts/dev-kernel-events-proof.ps1
 
       # TDD-identity-control-008: the sweep above recorded the bootstrap operator's TOTP enrolment, so
-      # its notifications are requested to the creation address and the stand-in accepts them.
+      # its notifications are requested to the creation address and the mail catcher receives them. Each
+      # proof code is read from the catcher's API (1.7.0), and the identifier match is asked as the
+      # Tenant proof's stand-in for Organization Control's workload.
       - name: account security notifications
         run: |
           set -a; . deploy/dev/.env; set +a
           export IDENTITY_OPERATOR_TOTP_FILE="$RUNNER_TEMP/operator-totp.json"
-          pwsh -NoProfile -File scripts/dev-notifications-proof.ps1
+          pwsh -NoProfile -File scripts/dev-notifications-proof.ps1 -TenantState "$RUNNER_TEMP/tenant-proof/state.json"
+
+      # ADR-IAM-010, TDD-identity-control-005 2.12.0: a provider's temporary password, shown once, changed
+      # at the person's first sign-in, refused as the new password, and lapsed when unused.
+      - name: a first credential
+        run: |
+          set -a; . deploy/dev/.env; set +a
+          export IDENTITY_OPERATOR_TOTP_FILE="$RUNNER_TEMP/operator-totp.json"
+          pwsh -NoProfile -File scripts/dev-first-credential-proof.ps1 -ComposeDir deploy/dev
 
       # ROADMAP §Gates, production gate: session removal's accept-to-enforcement delay, measured
       # against this kernel (TDD-identity-control-005 2.10.0 §Enforcement Delay). It ends the bootstrap

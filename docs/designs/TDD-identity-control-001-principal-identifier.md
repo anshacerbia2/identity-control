@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-001
   title: Canonical Principal Identifier and Creation Path
   owner: Core Platform Team
-  version: 1.20.0
+  version: 1.21.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-10
-  last_reviewed: 2026-10-18
+  last_reviewed: 2026-10-19
   parent_sad: SAD-001
 ---
 
@@ -111,6 +111,14 @@ The identifier and subject classification are fixed before the remote call and c
 inside the creation payload. The Keycloak representation accepts attributes at creation
 time, so the Principal never exists without the complete claim source required by its
 audience profile.
+
+**A human is created owing a password, and holding none (1.21.0).** The kernel user carries the
+required action `UPDATE_PASSWORD`, and this path sets no credential. A required action runs only
+"after the user provides credentials", so the person cannot sign in until a provider gives them a
+first credential: `POST /v1/principals/{principal_id}:issue-temporary-password` (`ADR-IAM-010`,
+`TDD-identity-control-005` 2.12.0 §A First Credential). That command reads the outstanding
+`UPDATE_PASSWORD` as the sign that the person has never set a password of their own. The bootstrap
+ceremony below is unchanged: its operator exists before any provider can issue.
 
 ### Authorized and Prohibited Creation Paths
 
