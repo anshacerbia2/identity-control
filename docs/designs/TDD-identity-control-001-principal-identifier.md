@@ -1236,6 +1236,17 @@ GO-2026-6617. By then Ariga had published Atlas 1.3.4, built with the fixed tool
 The 1.19.0 analysis below stays as the record of why the statements held, and as the method for the
 next advisory in the binary.
 
+**What the build context carries (1.23.0).** Both images are built from this repository's root, so
+`.dockerignore` decides what reaches the builder: "If this file exists, the files and directories that
+match patterns in the files are removed from the build context before it's sent to the builder", and
+it "helps avoid sending unwanted files and directories to the builder" (Docker, _Build context_)
+[R15]. It excludes `.env`, every `keys/` directory and `*.pem`, so no private key is ever sent, and
+the sibling checkouts `deploy-dev` places in the workspace, `.kernel/` and `.experience/`, with the
+image scan's `.image-scan/`. identity-kernel's checkout holds its signing keystore readable by its
+owner alone, and sent, it failed the build with `permission denied`; excluded, it is never read. The
+images need `go.mod`, `go.sum`, the Go sources, `atlas.hcl`, `schema.hcl`, `migrations/` and
+`deploy/dev/migrate.sh`, none of which is excluded.
+
 **What the image runs.** The entrypoint is `identity-dev-migrate`. It runs `psql`, this repository's
 `identity-migrate`, and Atlas once, as `atlas migrate apply --env local`. Both of that environment's
 URLs are `postgres://` with `sslmode=disable`, and `atlas.hcl` has only `file://` sources: it has no
@@ -1558,3 +1569,8 @@ Keycloak release:
   `uuid_extract_timestamp`: "This function extracts a `timestamp with time zone` from UUID version 1.
   For other versions, this function returns null." `uuid_extract_version`: "This function extracts the
   version from a UUID of the variant described by RFC 4122."
+- **[R15]** Docker, _Build context_, §.dockerignore files, accessed 2026-10-21.
+  <https://docs.docker.com/build/concepts/context/>. "You can use a `.dockerignore` file to exclude
+  files or directories from the build context." "If this file exists, the files and directories that
+  match patterns in the files are removed from the build context before it's sent to the builder."
+  "This helps avoid sending unwanted files and directories to the builder".
