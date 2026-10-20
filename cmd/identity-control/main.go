@@ -462,6 +462,25 @@ func run() error {
 	}
 	routesConfig.TenantOperator = tenantSweep
 
+	// The consumer reconciles itself on the interval its registration declares (ADR-ORG-001 §5.7,
+	// TDD-identity-control-002 2.6.0): its report to Organization Control's reconcile route, as this
+	// service's workload. Without Organization Control there is nobody to compare with.
+	var selfReconciler *tenantcontext.SelfReconciler
+	if frontier != nil {
+		if selfReconciler, err = tenantcontext.NewSelfReconciler(desired, pool, frontier,
+			cfg.OrganizationReconcileInterval, logger); err != nil {
+			return fmt.Errorf("the consumer's reconciliation: %w", err)
+		}
+		if exported != nil {
+			if err := selfReconciler.Instrument(exported.MeterProvider.Meter(
+				"github.com/anshacerbia2/identity-control/internal/tenantcontext")); err != nil {
+				return fmt.Errorf("the consumer's reconciliation metrics: %w", err)
+			}
+		}
+	} else {
+		logger.Warn("IDENTITY_ORGANIZATION_BASE_URL is unset; this consumer never reconciles itself with Organization Control")
+	}
+
 	surface, err := httpapi.Routes(routesConfig)
 	if err != nil {
 		return fmt.Errorf("routes: %w", err)
@@ -557,6 +576,9 @@ func run() error {
 	}
 	go converger.Run(ctx)
 	go scheduleTenantSweeps(ctx, tenantSweep, cfg.ProjectionReconcileInterval, logger)
+	if selfReconciler != nil {
+		go scheduleSelfReconcile(ctx, selfReconciler, cfg.OrganizationReconcileInterval, logger)
+	}
 	go scheduleKernelEventSweeps(ctx, kernelEvents, cfg.KernelEventInterval, logger)
 	go scheduleWorkloadSweeps(ctx, workloads, cfg.WorkloadSweepInterval, logger)
 	// The dispatcher hands requested notifications to the delivery adapter. With none configured the
@@ -789,6 +811,45 @@ func scheduleTenantSweeps(ctx context.Context, sweep *tenantcontext.Reconciler, 
 	for {
 		if _, err := sweep.Sweep(ctx); err != nil && ctx.Err() == nil {
 			logger.Error("tenant context sweep failed", slog.String("error", err.Error()))
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// scheduleSelfReconcile sends this consumer's report to Organization Control every interval, the first
+// at once (ADR-ORG-001 §5.7). A run another replica made within half an interval is skipped. A refusal
+// is logged and retried at the next interval: Organization Control answers 403 until it admits a
+// consumer on the route for its own consumer_id, and the projection drift runbook's operator run stays
+// the manual path meanwhile.
+func scheduleSelfReconcile(ctx context.Context, self *tenantcontext.SelfReconciler, interval time.Duration,
+	logger *slog.Logger) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		run, err := self.Run(ctx)
+		switch {
+		case errors.Is(err, tenantcontext.ErrNotDue):
+			logger.Debug("the consumer's reconciliation skipped; another replica sent it within half an interval")
+		case errors.Is(err, organization.ErrRefused):
+			logger.Warn("Organization Control refused this consumer's reconciliation report (403); it is sent again at "+
+				"the next interval, and an operator can reconcile by hand (docs/runbooks/projection-drift-repair.md)",
+				slog.String("run_id", run.RunID.String()), slog.String("error", err.Error()))
+		case err != nil && ctx.Err() == nil:
+			logger.Error("the consumer's reconciliation failed", slog.String("run_id", run.RunID.String()),
+				slog.String("error", err.Error()))
+		case err == nil:
+			attrs := []slog.Attr{slog.String("run_id", run.RunID.String()), slog.String("outcome", run.Outcome),
+				slog.Int64("mark", run.Mark), slog.Int("rows", run.Rows), slog.Int("findings", run.Findings),
+				slog.Int("extra", run.Extra)}
+			level := slog.LevelInfo
+			if run.Findings > 0 {
+				level = slog.LevelWarn
+			}
+			logger.LogAttrs(ctx, level, "the consumer reconciled itself with Organization Control", attrs...)
 		}
 		select {
 		case <-ctx.Done():

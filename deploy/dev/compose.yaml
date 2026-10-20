@@ -187,6 +187,9 @@ services:
       IDENTITY_WORKLOAD_KEY_FILE: /keys/identity-control-workload.pem
       IDENTITY_WORKLOAD_TOKEN_URL: http://keycloak:8080/realms/scnehaux/protocol/openid-connect/token
       IDENTITY_WORKLOAD_AUDIENCE: ${KEYCLOAK_ISSUER:?set KEYCLOAK_ISSUER in .env}
+      # How often this consumer sends its report to Organization Control's reconcile route, the
+      # reconciliation_interval its registration declares (ADR-ORG-001 §5.7).
+      IDENTITY_ORGANIZATION_RECONCILE_INTERVAL: ${IDENTITY_ORGANIZATION_RECONCILE_INTERVAL:-15m}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     depends_on:
       migrate:

@@ -11,7 +11,9 @@ differently (§Reconciliation (2.1.0)):
   finding.
 - **The desired state against the authority.** This service missed or misapplied an event. The
   snapshot adds what was missed. Only Organization Control's reconciliation removes what it no
-  longer grants, after an operator posts this service's report.
+  longer grants. This service sends its own report for it every
+  `IDENTITY_ORGANIZATION_RECONCILE_INTERVAL` (TDD-identity-control-002 2.6.0, ADR-ORG-001 §5.7: "The
+  party that holds the copy runs the comparison"). An operator's run stays the manual path.
 
 This runbook also covers the three cases `TDD-identity-control-002` §Operational Notes requires a
 runbook for: a revocation not converged within budget, an `unresolved` Tenant, and an extra member
@@ -31,6 +33,9 @@ or unknown Organization.
 | `identity.tenant_projection.findings` by `finding_class` (2.5.0) | `converger.go`, `reconcile.go` | `extra_member` or `unknown_organization` is critical |
 | `the Organization snapshot could not be read; the kernel is swept without it`, `WARN` | `reconcile.go` | the authority half did not run |
 | `identity.tenant_projection.sweep_age` above one interval (2.5.0), `tenant context sweep failed`, `ERROR`, or a run recorded `unresolved` | `reconcile.go`, `cmd/identity-control/main.go` | warning at one interval, critical at two |
+| `identity.tenant_projection.organization_reconcile_age` above one `IDENTITY_ORGANIZATION_RECONCILE_INTERVAL` (2.6.0), or a run with `sweep = 'organization_reconcile'` recorded `unresolved` | `selfreconcile.go` | warning at one interval, critical at two (ADR-ORG-001 §5.7); Organization Control alerts on its own `last_reconciled_at` the same way |
+| `the consumer reconciled itself with Organization Control`, `WARN`, with `findings` and `extra` above zero (2.6.0) | `cmd/identity-control/main.go` | an `extra` is critical: someone held access authority does not grant |
+| `Organization Control refused this consumer's reconciliation report (403)`, `WARN`, each interval | `cmd/identity-control/main.go` | none while Organization Control does not admit a consumer on its reconcile route; afterwards, its registration or this service's workload is wrong |
 
 The finding classes are in `identity.projection_finding`: `missing_member`, `extra_member`,
 `organization_state` and `unknown_organization` (§Findings). `GET
@@ -44,8 +49,10 @@ Principal, and without any kernel user identifier (2.5.0, §Operator Routes).
 - The same, with an `X-Administrative-Reason`, for a re-drive,
   `POST /v1/projections/tenant-context/tenants/{tenant_id}:redrive`. Neither command needs an
   `Idempotency-Key`: both are level-driven sweeps (`keyOptional`, STD-GLB-001 1.4.0).
-- A provider of Organization Control for its `POST /v1/projections/reconcile`, which "admits a
-  provider, because it reports across consumers" (§Reconciliation (2.1.0)).
+- The scheduled run (2.6.0) needs no person: this service's workload sends its own report, as the
+  consumer `identity-control`, once Organization Control admits a consumer on the route for its own
+  `consumer_id` (ADR-ORG-001 §5.7).
+- For a run by hand, a provider of Organization Control for its `POST /v1/projections/reconcile`.
 
 ## Steps: a sweep's finding
 
@@ -68,9 +75,13 @@ Principal, and without any kernel user identifier (2.5.0, §Operator Routes).
 
 ## Steps: the desired state against the authority
 
-Use this after an incident, after an outage in delivery, or when a Tenant looks wrong and the sweep
-reports nothing. The sweep cannot see this kind of drift: the kernel matches a desired state that is
-itself wrong.
+The scheduled run does this every `IDENTITY_ORGANIZATION_RECONCILE_INTERVAL` (15 minutes by default),
+and records each run in `identity.reconcile_run` with `sweep = 'organization_reconcile'`: `converged`
+when nothing was found, `drift` when the repair carries findings, `unresolved` when Organization
+Control did not answer or refused. Read its last run first. Run the steps below by hand after an
+incident, after an outage in delivery, when the scheduled run is `unresolved`, or when a Tenant looks
+wrong and the sweep reports nothing. The sweep cannot see this kind of drift: the kernel matches a
+desired state that is itself wrong.
 
 1. **Read this service's report.** `GET /v1/projections/tenant-context/report` answers
    `{"consumer_id": "identity-control", "mark": ..., "rows": [{"membership_id", "membership_version"}]}`:
@@ -171,6 +182,10 @@ against an operational target below 10 seconds.
   `delivery_to_converged` metrics; the Tenant sweep's runs in `identity.reconcile_run`
   (`tenant_context`) with the `sweep_age` gauge. `deploy-dev` reads both listings, re-drives a Tenant
   and sweeps on request (`scripts/dev-tenant-proof.ps1` step 5).
+- **Fixed in `TDD-identity-control-002` 2.6.0:** the consumer reconciles itself on its interval, with
+  its runs recorded and the `organization_reconcile_age` gauge. Organization Control answers `403` to it
+  until it admits a consumer on its reconcile route (ADR-ORG-001 §5.7), so on such a server the
+  operator's run is still the one that reaches it.
 - **No alert rule ships with this service.** The metrics carry the thresholds §Operational Notes
   sets; an alerting platform implements them.
 

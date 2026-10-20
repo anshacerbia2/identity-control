@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-006
   title: Provider Authority from Organization's Records
   owner: Core Platform Team
-  version: 1.3.0
+  version: 1.4.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-10-02
-  last_reviewed: 2026-10-06
+  last_reviewed: 2026-10-20
   parent_sad: SAD-001
 ---
 
@@ -333,6 +333,16 @@ CREATE TABLE identity.provider_emergency_use (
   poison. A caller other than
   Organization Control's workload is refused, and the intake refuses no route but its own.
 - A snapshot replaces the projection by version and marks a grant it omits revoked.
+- A restore's version bump (1.4.0, `ADR-ORG-003 §5.5`): Organization Control raises every
+  `grant_version` by 10^9 before it serves again and publishes each revoked or ended grant at it. This
+  projection applies only a greater version and checks no gap, so nothing changes here, and tests hold
+  it: a withdrawal at the bumped version is applied, the next version after it too, and a pre-restore
+  version delivered late is discarded, by event and by snapshot; `grant_version` is a `bigint`
+  (`TestAGrantVersionBumpedByTheRestoreIsApplied`, `TestASnapshotAtTheBumpedVersionReplacesTheHeldGrant`,
+  `TestEveryProjectedVersionIsABigint`). ADR-ORG-003 §5.5: "No consumer contract changes:
+  identity-control and foundation-reference apply only a higher version and check no gap."
+- The consumer's own reconciliation (1.4.0) is `TDD-identity-control-002` 2.6.0's: the same consumer
+  registration, `identity-control`, and the same workload client send its report.
 - Freshness: fresh within the budget, stale past it, stale while security debt is reported, stale
   before a bootstrap, and stale when the frontier cannot be read.
 - The decision: an emergency grant authorizes while stale, an activation does not, an ended or

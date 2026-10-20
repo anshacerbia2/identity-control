@@ -405,6 +405,16 @@ and the ceremony's grant is the only provider authority (TDD-identity-control-00
 `IDENTITY_DELIVERY_PRINCIPAL_ID` and `IDENTITY_ORGANIZATION_BASE_URL` here and running
 `provider-bootstrap`.
 
+From then on the service reconciles itself with Organization Control every
+`IDENTITY_ORGANIZATION_RECONCILE_INTERVAL` (15 minutes by default): one replica sends this consumer's
+report to `POST /v1/projections/reconcile` as its workload (ADR-ORG-001 §5.7, TDD-identity-control-002
+2.6.0). The consumer registration declares the same `reconciliation_interval` once
+organization-control's registration accepts it; until then the registration names none, as
+organization-control's README shows. Until Organization Control admits a consumer on that route it answers
+403, and the log says `Organization Control refused this consumer's reconciliation report` each
+interval. That is expected on such a server, and the runbook's operator run
+(`docs/runbooks/projection-drift-repair.md`) stays the manual path.
+
 ### Adopting the BFF
 
 `identity-experience-bff` was created by `identity-experience`'s `deploy/dev/create-bff-client.sh`

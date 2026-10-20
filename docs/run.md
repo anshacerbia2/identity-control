@@ -358,6 +358,13 @@ bootstrap-provider`, as Organization Control's README §Driving the service by h
 
   `make api M=POST P=/v1/projections/consumers B=consumer.json KEY=local-consumer-ic`
 
+  The registration does not name `reconciliation_interval` yet: Organization Control refuses a field it
+  does not know, and declares the interval at registration only once it implements ADR-ORG-001 §5.7.
+  Then the registration names the value of `IDENTITY_ORGANIZATION_RECONCILE_INTERVAL`, 15 minutes by
+  default, with which this service sends its own report to `POST /v1/projections/reconcile`
+  (TDD-identity-control-002 2.6.0). Until then the route answers this service's workload `403`, logged
+  each interval.
+
 ### 8.4 Switch Organization Control to the kernel
 
 In its `.env`, then restart it (`make run`); `make issuer` is no longer needed:

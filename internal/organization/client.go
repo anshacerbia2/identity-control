@@ -269,3 +269,19 @@ func (c *Client) Frontier(ctx context.Context) (providerauthority.Observation, e
 		SecurityDebt:  got.SecurityDebt,
 	}, nil
 }
+
+// Reconcile sends this consumer's report to Organization Control's reconcile route, as this
+// consumer's workload, and returns what the comparison found (ADR-ORG-001 §5.7,
+// TDD-identity-control-002 2.6.0). The body is the report as GET /v1/projections/tenant-context/report
+// serves it, the shape the route takes: consumer_id, mark and rows. Until Organization Control admits a
+// consumer on the route for its own consumer_id it answers 403, returned as ErrRefused.
+func (c *Client) Reconcile(ctx context.Context, report tenantcontext.Report) (tenantcontext.ReconcileResult, error) {
+	if report.ConsumerID != c.consumer {
+		return tenantcontext.ReconcileResult{}, fmt.Errorf("organization: a report for %q sent as consumer %q", report.ConsumerID, c.consumer)
+	}
+	var result tenantcontext.ReconcileResult
+	if err := c.call(ctx, http.MethodPost, "/v1/projections/reconcile", report, &result); err != nil {
+		return tenantcontext.ReconcileResult{}, err
+	}
+	return result, nil
+}
