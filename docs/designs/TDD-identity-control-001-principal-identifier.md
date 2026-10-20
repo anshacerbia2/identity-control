@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-001
   title: Canonical Principal Identifier and Creation Path
   owner: Core Platform Team
-  version: 1.21.0
+  version: 1.22.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-10
-  last_reviewed: 2026-10-19
+  last_reviewed: 2026-10-20
   parent_sad: SAD-001
 ---
 
@@ -532,7 +532,9 @@ no administrator sets (§Data Model). `:release` is (1.18.0, §Leaving Quarantin
 
 `:release` takes `X-Administrative-Reason`, an `Idempotency-Key` replayed as `:relink`'s is, and
 `{"username": "<the kernel user the triage decided is the person>"}`. It answers `200` with
-`{"principal_id", "state": "suspended"}`; `404` for no such Principal; `409` for a mapping that is not
+`{"principal_id", "state": "suspended"}`; `403` when the target is the Principal in the caller's own
+token (1.22.0), before the reason or the body is read; `404` for no such Principal; `409` for a
+mapping that is not
 quarantined, for a workload, when the kernel holds no user or more than one carrying the identifier
 (the count is named), or when the one user's username is not the one named; and `503` when the
 kernel did not answer or did not confirm the containment, with nothing recorded.
@@ -751,6 +753,7 @@ mapping go after that, and the Principal, every Membership held under it include
 
 ```text
 release(principal, username, reason, caller):           provider only
+    refuse when principal is the caller's own (1.22.0)               403
     refuse unless the mapping is quarantined                         409
     refuse a workload                                                409
     users := every kernel user carrying principal_id (exact, every page)
@@ -792,6 +795,17 @@ release(principal, username, reason, caller):           provider only
   is, a quarantined mapping whose users were all deleted stays quarantined.
 - **A workload is refused.** Its user is its client's service account, rebuilt with the client
   (`TDD-identity-control-004`); its quarantine is not this route's.
+- **Nobody releases their own Principal (1.22.0).** The release is the triage's verdict about whose
+  identity the duplicate was, and a provider whose own Principal is held is the person the verdict is
+  about. So the route refuses `403` when the target is the `principal_id` in the caller's token,
+  first, before the reason or the body is read. That is the self-action boundary
+  `TDD-identity-control-005` already holds for `:suspend`, `:restore` and revocation (§What Changed in
+  2.0.0, route classes), in its refusal order (§Containment as Built). The
+  provisioning path refuses it again, so no other caller of `Release` bypasses it. NIST SP 800-53
+  AC-5 asks the organization to "Define system access authorizations to support separation of
+  duties", and its discussion says separation "helps to reduce the risk of malevolent activity
+  without collusion" [R13]. Another provider releases it. Identity Experience already hides the
+  action on the operator's own Principal; this makes the service, not the interface, the control.
 
 ### Verifier Invariant
 
@@ -924,6 +938,10 @@ Executed against a Keycloak instance pinned to the release under evaluation:
 
 ### Negative
 
+- `:release` of the caller's own Principal answers `403` before validation and changes nothing
+  (1.22.0): `TestAReleaseOfTheCallersOwnPrincipalIsForbidden`, `TestASelfReleaseIsRefusedBeforeAnyRead`,
+  and against PostgreSQL `TestAnOperatorCannotReleaseTheirOwnPrincipal`, where the mapping stays
+  quarantined, unrecorded, and another operator then releases it.
 - An internal-audience token lacking `principal_id` is rejected by the reference
   verifier.
 - Self-registration and federated first-login are unreachable in the configured realm.
@@ -1377,3 +1395,10 @@ Keycloak release:
   <https://hub.docker.com/r/arigaio/atlas/tags>, accessed 2026-10-18. Its `/atlas` reports `atlas
   version v1.3.4`, and `go version -m` on it reads `go1.26.9`, `golang.org/x/net v0.60.0` and
   `google.golang.org/grpc v1.83.2`.
+- **[R13]** NIST, _Security and Privacy Controls for Information Systems and Organizations_, SP 800-53
+  Rev. 5 (release 5.2.0), AC-5 Separation of Duties, from NIST's OSCAL catalog
+  <https://raw.githubusercontent.com/usnistgov/oscal-content/main/nist.gov/SP800-53/rev5/json/NIST_SP-800-53_rev5_catalog.json>,
+  accessed 2026-10-20. "a. Identify and document [duties of individuals]; and b. Define system access
+  authorizations to support separation of duties." Discussion: "Separation of duties addresses the
+  potential for abuse of authorized privileges and helps to reduce the risk of malevolent activity
+  without collusion."
