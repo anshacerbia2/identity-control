@@ -933,7 +933,7 @@ table "reconcile_run" {
   }
 
   check "reconcile_run_sweep_check" {
-    expr = "sweep IN ('registration', 'tenant_context')"
+    expr = "sweep IN ('registration', 'tenant_context', 'organization_reconcile')"
   }
 
   check "reconcile_run_outcome_check" {

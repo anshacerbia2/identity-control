@@ -35,7 +35,11 @@ envelope, idempotency, and problem-details packages from day one, and reimplemen
 any of them here would produce a second revocation enforcement interval while both
 services reported compliance.
 
-Pinned at `v0.4.0` (`go.mod`). Two earlier pins are kept here for their reasons: `v0.2.0` shipped a
+Pinned at `v0.5.0` (`go.mod`, 2026-10-21): it adds `idempotency.PurgeCompleted` and
+`platform.purge_idempotency_keys`, which the 7-day key retention calls (TDD-003 1.39.0 §Key Retention),
+`Withhold`/`CompleteWithheld`, and the `invitation-not-acceptable` problem type, which this service does
+not answer. The first credential keeps its own path, which already records its issuance without the
+value; moving it to `CompleteWithheld` is not needed. Two earlier pins are kept here for their reasons: `v0.2.0` shipped a
 platform migration set that could only be applied once — see the findings table under Week 2½ — and
 `v0.2.2` added the `request-in-progress` problem type this service needed.
 
@@ -610,7 +614,10 @@ Built in the order TDD-005 §Build Order states, one PR per slice:
     - Each carries an Idempotency-Key and no reason or version. It records and advances the subject's `security_version`, and shares one sequence with administrative commands.
     - Only an `active` Principal may command. `:remove` needs step-up and keeps the last first factor.
     - Each final state is evidenced with the actor equal to the subject.
-- **3b · Consents.** `GET /v1/me/consents` and `:withdraw` wait for a registered client that asks for consent, with a scope shown on the consent screen (TDD-005 2.9.2). identity-kernel's compat proof of the listing and withdrawal is answered (run 37607165522): the Admin API lists them, and a withdrawal ends the refresh tokens issued on it.
+- ✅ **3b · Consents** (TDD-005 2.13.0, STD-IAM-002 1.9.0 §3.6, ADR-IAM-003 §5.11).
+  - Which clients ask is decided: an `external` registration requires consent and no other class does, derived from the class at registration, adoption, recovery and recreation, never a field. The sweep holds it as the `consent` field class, repaired when attributed, and a registration reports `consent_required` (TDD-003 1.39.0).
+  - `GET /v1/me/consents` lists a person's consents, each with its client, its granted scopes and the access token lifetime its registration bounds. `POST /v1/me/consents/{security_ref}:withdraw` is a self security operation, `consent.withdraw`, read back against the kernel's listing. identity-kernel's compat proof of both is run 37607165522.
+  - `deploy-dev`'s smoke lists the bootstrap operator's consents. A consent page needs identity-kernel to mark the scopes an `external` client releases "display on consent screen": that is identity-kernel's change, and until it lands the listing is empty.
 - ✅ **Provider routes at two factors** (ADR-IAM-004; TDD-005 2.4.0 §Step-Up).
   - Every `providerOnly` route requires `acr` `aal2`, reads included, under NIST SP 800-53 IA-2(1). `/v1/me/authenticators/{ref}:remove` requires `aal2` and freshness.
   - A shortfall is answered with RFC 9470's challenge carrying `acr_values="aal2"`, plus `max_age` for a command.
@@ -895,6 +902,16 @@ Two decisions are recorded here:
 
   The scripts and `deploy-dev` send a key on every command.
 
+  Since then (2026-10-20, TDD-001 1.23.0, TDD-005 2.13.0) the tables hold ten service-keyed commands,
+  `POST /v1/me/consents/{consent_action}` the tenth; seventeen replayed routes,
+  `POST /v1/bootstrap-ceremony:review` the seventeenth; and nine routes that need none.
+  `:adopt` is replayed inside `POST /v1/principals/{target}`'s dispatch, as `:relink` is.
+
+- ✅ **One registration per developer device** (STD-GLB-009 1.10.0 rule 15, ADR-IAM-001 §5.12 as amended
+  2026-10-20). `deploy/dev/README.md` §Several developer devices registers a second device's BFF as its
+  own client with its own key, and both `.env.example` files say so. The two-key adoption in
+  `scripts/dev-adopt-bff.ps1` stays, for a client caught in the middle of a rotation.
+
 ## API specification (ADR-GLB-010 §5.1)
 
 ✅ `api/openapi.yaml` is this service's published HTTP contract, an OpenAPI 3.1 document kept by hand
@@ -967,7 +984,9 @@ Where each stands (2026-10-08):
     until the operator applies the restored state and repeats the change; a suspension's record is
     gone while the user stays disabled, and is repeated; a Membership granted after it is removed by
     the first sweep as `extra_member` and put back by Organization Control's repair; a Principal
-    created after it is an `orphan` that no route binds again, recorded as a gap. The record is
+    created after it is an `orphan`, re-adopted through `:adopt` to `suspended` and restored by an
+    operator (TDD-001 1.23.0, ADR-IAM-001 §5.11); and a user the console made after it is an `orphan`
+    whose adoption is refused on `creation_on_record` (STD-GLB-002 3.3.0). The record is
     `older-point-evidence.json` in the `restore-evidence` artifact. First passing run: deploy-dev run
     37918842749, 2026-10-09, all five cases as above, the switches returned and the service ready; the
     same run restored 47 tables and 581 rows in 2.1 s, and recovered to the verified read in 28.9 s.
@@ -1015,9 +1034,19 @@ Where each stands (2026-10-08):
     read (TDD-001 1.22.0, NIST SP 800-53 AC-5), as `:suspend` and `:restore` already do (TDD-005).
     Proven by `TestAReleaseOfTheCallersOwnPrincipalIsForbidden` and, against PostgreSQL,
     `TestAnOperatorCannotReleaseTheirOwnPrincipal`.
-  - Still not built, recorded in the runbooks: a human `:retire`; a route binding an orphan's
-    identifier again after a restore; a route ending a quarantined Principal's sessions before its
-    release; a route reading the ceremony record.
+  - ✅ Two of the four the runbooks named are built (TDD-001 1.23.0): `POST /v1/principals/{id}:adopt`
+    binds an orphan's identifier again after a restore, after the four checks of ADR-IAM-001 §5.11, to
+    `suspended`, recorded insert-only in `identity.principal_adoption`; and `GET /v1/bootstrap-ceremony`
+    reads the ceremony record. Still not built: a human `:retire`; a route ending a quarantined
+    Principal's sessions before its release.
+  - ✅ **Audit records are kept 7 years** (STD-GLB-007 1.1.0, TDD-001 1.23.0 §Audit Retention). Checked
+    2026-10-20: no audit table is purged at any age; the runtime holds no `DELETE` or `TRUNCATE` on any,
+    and no migration or production source deletes from one. `TestNoAuditRecordIsPurgedBeforeSevenYears`
+    and `TestNoSourceDeletesAnAuditRecord` assert it on every build. A purge past 7 years is not needed
+    before 2033 and is not built.
+  - ✅ **Idempotency-Keys are kept 7 days** (STD-GLB-001 1.7.0, TDD-003 1.39.0 §Key Retention): the
+    scheduled sweep purges completed keys past the published window through foundation-platform
+    v0.5.0's `PurgeCompleted`; an uncompleted key is never purged.
   - ✅ One gap they found is fixed: recovery now completes the creating request's
     `Idempotency-Key` (TDD-001 1.14.0, migration `20261008065047_principal_creation_claim`). Before,
     a Principal recovered after a failed create answered its caller's retry with `409`
@@ -1040,6 +1069,11 @@ out-of-band `INSERT` that `ADR-ORG-001` prohibits. What remains for the producti
 operational rather than architectural: the ceremony needs a runbook naming who is authorized to
 perform it and where the record is reviewed, since the evidence is worthless if nobody reads it.
 ✅ `docs/runbooks/bootstrap-ceremony.md` is written from the code: preconditions, the command, resume,
-every refusal, verification. **Owner decision pending:** who may perform it, and where, by whom and when
-the record is reviewed, are explicit placeholders in its §Who performs it, and remain open until the
-owner decides (NIST SP 800-53 AU-6's assignments).
+every refusal, verification. ✅ **Two people and an independent review** (STD-IAM-001 2.9.0 §3.10,
+ADR-IAM-001 §5.11 requirement 3, TDD-001 1.23.0): the ceremony records a witness who is never the
+operator, `GET /v1/bootstrap-ceremony` serves the record, and `POST /v1/bootstrap-ceremony:review`
+records an insert-only review that the route and the database refuse from the operator, the witness or
+the first Principal. **Owner decision pending:** the names of the ceremony role and of the reviewer, and
+the review deadline, are explicit placeholders in the runbook's §Who performs it, and remain open until
+the owner decides (NIST SP 800-53 AU-6's assignments). The runbook also asks the owner to confirm that
+the reviewer's own Principal is the one the realm serves before the review.

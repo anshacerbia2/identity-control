@@ -176,6 +176,20 @@ func TestAnAdoptionRefusesUnlessEveryCheckHolds(t *testing.T) {
 	p.kernel.Seed(portabilityRealm, "carried.twice", twice, keycloak.SubjectHuman)
 	refused(twice, provisioning.CheckOneKernelUser)
 
+	// The newest identifier the registry holds counts as much as its newest creation time: a mapping
+	// whose UUIDv7 is later than the orphan's means the orphan could have been in the backup.
+	later := uuidV7At(t, time.Now().Add(3*time.Hour))
+	if err := p.pool.InTx(context.Background(), func(ctx context.Context, tx db.Tx) error {
+		_, err := tx.Exec(ctx, `INSERT INTO identity.principal_mapping (principal_id, realm, username, subject_type, state)
+		    VALUES ($1, $2, 'a.later.identifier', 'human', 'pending')`, later.String(), string(portabilityRealm))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	between := uuidV7At(t, time.Now().Add(2*time.Hour))
+	p.orphan("between.the.two", between, events, true)
+	refused(between, provisioning.CheckNewerThanBackup)
+
 	// A provider never adopts the Principal in its own token, and every adoption names a reason.
 	if _, err := p.provisioner.Adopt(context.Background(), provisioning.AdoptRequest{PrincipalID: p.operator,
 		AdoptedBy: p.operator, Reason: "mine"}); !errors.Is(err, provisioning.ErrSelfAdopt) {

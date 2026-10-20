@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-003
   title: Protocol Client and Protected-Resource Registration
   owner: Core Platform Team
-  version: 1.38.0
+  version: 1.39.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-11
-  last_reviewed: 2026-10-09
+  last_reviewed: 2026-10-20
   parent_sad: SAD-001
 ---
 
@@ -689,6 +689,41 @@ The calls this service makes to Organization Control are keyOptional there: the 
 | R5 | IETF HTTPAPI Working Group, J. Jena and S. Dalal, *The Idempotency-Key HTTP Header Field*, draft-ietf-httpapi-idempotency-key-header-07 (expired 18 April 2026; work in progress, as `STD-GLB-001` 1.4.0 cites it), <https://datatracker.ietf.org/doc/html/draft-ietf-httpapi-idempotency-key-header-07>, accessed 2026-10-08: "Repeating the request multiple times can result in duplication or incorrect updates"; §2.7, a missing key on an operation requiring it: "the resource SHOULD reply with an HTTP `400` status code"; "Resources MUST publish a idempotency related specification." |
 | R6 | `STD-GLB-001` 1.4.0, *API Design*, §Commands Require an `Idempotency-Key` (scnehaux-architecture), as quoted above. |
 
+### Key Retention (1.39.0)
+
+**A completed command's `Idempotency-Key`, and the answer recorded with it, is kept 7 days, then
+purged.** This is the window this service publishes, as `STD-GLB-001` 1.7.0 requires of each service;
+the owner approved 7 days on 2026-10-21. It covers every key in `platform.idempotency_key`, the ones a
+service claims in the transaction of its effect and the ones `commands.go` replays, every scope.
+
+- **The rule it follows.** "The resource MAY require time based idempotency keys to be able to purge
+  or delete a key upon its expiry. The resource SHOULD define such expiration policy and publish it in
+  the documentation" (draft-ietf-httpapi-idempotency-key-header-07 §2.3) [R1].
+- **Why 7 days.** Adyen: "Idempotency keys are valid for a period of 7 to 14 days after first
+  submission" [R2]. Stripe sets the floor: "you can remove keys from the system automatically after
+  they’re at least 24 hours old. We generate a new request if a key is reused after the original is
+  pruned" [R3]. Seven days outlasts every retry this estate's clients make, the BFFs' and the dev
+  scripts', which retry within a request's minutes.
+- **How.** `httpapi.PurgeKeys` calls foundation-platform v0.5.0's `idempotency.PurgeCompleted` with
+  `httpapi.KeyRetention` from the scheduled sweep, every `IDENTITY_REGISTRATION_RECONCILE_INTERVAL`.
+  The SQL function it calls, `platform.purge_idempotency_keys(interval)`, refuses a window under 24
+  hours, computes the boundary on the database clock that wrote `completed_at`, and never deletes an
+  uncompleted key: its effect may have committed without its answer. The runtime role executes that
+  function and no other platform function (`grants.sql`); on the table it holds what the ledger already
+  uses, `SELECT` to replay and `DELETE` to release a refused claim.
+- **What a retry after the window gets.** A new command, as Stripe's does. A command whose own state
+  refuses a repeat, such as a relink of an active mapping or a second ceremony, still refuses it; a
+  creation retried after 7 days creates again. A bootstrap ceremony that completed its Principal and
+  not its resource is resumed within the window (`docs/runbooks/bootstrap-ceremony.md`).
+- **Tested.** `TestCompletedKeysArePurgedAfterTheirWindow`: a key completed 8 days ago is purged, one
+  completed 6 days ago and one never completed are kept, and the runtime executes the purge alone.
+
+| Ref | Source |
+| :-- | :-- |
+| [R1] | IETF, draft-ietf-httpapi-idempotency-key-header-07, §2.3 Idempotency Key Validity and Expiry, accessed 2026-10-21. <https://www.ietf.org/archive/id/draft-ietf-httpapi-idempotency-key-header-07.html>. "The resource MAY require time based idempotency keys to be able to purge or delete a key upon its expiry." "The resource SHOULD define such expiration policy and publish it in the documentation." |
+| [R2] | Adyen, _API idempotency_, accessed 2026-10-21. <https://docs.adyen.com/development-resources/api-idempotency>. "Idempotency keys are valid for a period of 7 to 14 days after first submission." |
+| [R3] | Stripe, _Idempotent requests_, API reference, accessed 2026-10-21. <https://docs.stripe.com/api/idempotent_requests>. "For API v1, you can remove keys from the system automatically after they’re at least 24 hours old. We generate a new request if a key is reused after the original is pruned." |
+
 ### Profiles
 
 | Profile | Client authentication | Redirect URIs | PKCE | Refresh tokens |
@@ -719,6 +754,22 @@ channel for a client with front-channel logout on, and its back-channel URL "is 
 Front channel logout option is OFF" (`ADR-IAM-009` [R3], [R4]). An empty value removes the
 attribute, which Keycloak does for an empty attribute, so a client without a URI holds none. A
 resource is issued no token and holds no session, so it is written none of these.
+
+**Consent follows the audience class (1.39.0, STD-IAM-002 1.9.0 §3.6, `ADR-IAM-003 §5.11`).** An
+`external` client a person signs in to, `public` or `confidential`, is written with `consentRequired:
+true`; every other client, a resource and a workload included, with `consentRequired: false`, always
+explicitly, because the sweep compares it. It is derived from the audience class at registration,
+adoption, recovery and recreation, and is never a field of the request: Auth0's "Third-party
+applications always require consent and cannot skip the consent dialog" (`ADR-IAM-003` [R20]) leaves
+nothing for a registrant to choose, and an `internal`, `privileged` or `workload` registration is
+itself the administrative consent OpenID Connect allows, "via previous administrative consent"
+(`STD-IAM-002` [R27]). The kernel's setting is "Consent required — If enabled, users have to consent
+to client access" (`STD-IAM-002` [R32]). A registration reports the derived value as
+`consent_required`, so a console says whether a client asks consent without deriving it again. The
+consent screen lists a scope only when "Display On Consent Screen is enabled, and the scope is added
+to a client that requires consent" (`STD-IAM-002` [R32]): marking the scopes an `external` client
+releases is the realm's, identity-kernel's. `ClientSpec.Validate` refuses consent on a client nobody
+signs in to.
 
 **Every client but a resource is registered as an RFC 9068 issuer's client, and holds a closed set
 of scopes** (STD-IAM-002 §3.2, §3.2.1):
@@ -843,6 +894,7 @@ adopt(request):
         audience_scope   repairable   exactly the default and optional scopes of §Profiles
         token_format     repairable   the at+jwt attribute and the client_id mapper
         logout           repairable   front channel off and the declared URI, the session named with one (1.37.0)
+        consent          repairable   consentRequired as the declared class derives it (1.39.0)
         enabled          repairable   the client is enabled
         audience_profile blocking     its audience profile scope is the declaration's (1.30.0)
         redirect_uris    blocking
@@ -1048,6 +1100,7 @@ Each field class has one policy, and the first two are what the drift proof exer
 | `token_format` | `access.token.header.type.rfc9068`, the `client_id` mapper | repair |
 | `audience` (1.33.0) | the client's `oidc-audience-mapper` protocol mappers | repair |
 | `logout` (1.37.0) | `frontchannelLogout`, `backchannel.logout.url`, `backchannel.logout.session.required` | repair |
+| `consent` (1.39.0) | `consentRequired`, against the value the audience class derives | repair |
 | `signing_algorithm` | `access.token.signed.response.alg` | repair |
 | `profile` | `publicClient`, `serviceAccountsEnabled`, `standardFlowEnabled` | repair |
 | `client_keys` | `clientAuthenticatorType`, `use.jwks.string`, `jwks.string` | block |
@@ -1861,6 +1914,11 @@ two creates nothing.
 
 ### Drift
 
+- An `external` registration's client requires consent and no other class's does, and a registration
+  reports `consent_required` (1.39.0, STD-IAM-002 1.9.0 §5):
+  `TestAnExternalRegistrationRequiresConsentAndNoOtherDoes`. Consent turned on in the console for an
+  internal client is repaired when attributed and left `unattributed` otherwise:
+  `TestTheConsentSettingIsHeldToTheAudienceClass`.
 - A client deleted directly in Keycloak is recorded `missing` and left absent by every
   sweep. An operator's reconcile naming the finding recreates it, and the finding closes
   as `recreated`.

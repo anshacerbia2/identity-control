@@ -251,13 +251,7 @@ paths:
                   description: Plan only.
       responses:
         "200":
-          description: The plan, for a dry run.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/PrincipalAdoption"
-        "201":
-          description: The identifier was adopted; its mapping is suspended.
+          description: The plan for a dry run, or, with `adopted` true, the adoption; its mapping is suspended.
           content:
             application/json:
               schema:
@@ -3257,7 +3251,7 @@ components:
           enum: [pending, active, suspended, quarantined, retired]
     PrincipalAdoption:
       type: object
-      required: [principal_id, adoptable, checks]
+      required: [principal_id, adoptable, checks, adopted]
       properties:
         principal_id:
           $ref: "#/components/schemas/UUID"
@@ -3269,14 +3263,17 @@ components:
           type: array
           items:
             type: object
-            required: [check, holds]
+            required: [check, holds, detail]
             properties:
               check:
                 type: string
+                enum: [orphan_finding, one_kernel_user, newer_than_backup, creation_on_record]
               holds:
                 type: boolean
               detail:
                 type: string
+        adopted:
+          type: boolean
         state:
           type: string
           const: suspended
@@ -3747,12 +3744,15 @@ components:
           type: boolean
     BootstrapCeremony:
       type: object
-      required: [operator, witness, reason, principal_id, requested_at, reviews]
+      required: [operator, witness, reason, principal_id, requested_at, reviewed, reviews]
       properties:
         operator:
           type: string
         witness:
-          type: [string, "null"]
+          type: string
+          description: Never the operator. A ceremony recorded before the witness existed reads "not recorded".
+        reviewed:
+          type: boolean
         reason:
           type: string
         principal_id:
@@ -3835,7 +3835,7 @@ components:
     Registration:
       type: object
       required: [registration_id, realm, client_key, profile, audience_class, application_authority, application_ref,
-        registered_by, signing_algorithm, audience, redirect_uris, state, version, created_at]
+        registered_by, signing_algorithm, audience, redirect_uris, state, version, created_at, consent_required]
       properties:
         registration_id:
           $ref: "#/components/schemas/UUID"
@@ -3843,6 +3843,9 @@ components:
           type: string
         client_key:
           type: string
+        consent_required:
+          type: boolean
+          description: Whether the client asks a person's consent at sign-in, derived from its audience class and never set (STD-IAM-002 1.9.0 §3.6).
         profile:
           type: string
           enum: [public, confidential, workload, resource]

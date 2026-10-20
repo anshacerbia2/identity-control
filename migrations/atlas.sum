@@ -1,4 +1,4 @@
-h1:NxjrrRZ2weLuROb5NatdzxWl9jRd0AfATE2/oYQ1VW8=
+h1:BrvJOigrnE0iOZ3oVXY5PFsYox0A44d76gdFKO72shU=
 20260817151332_baseline_identity_schema.sql h1:GysIRGAJncY8eQTmFIhc3g8FTeFq8dGu9wmdY4kefVQ=
 20260817201931_add_creation_payload.sql h1:ejgDHTQ30FK0/adjz26CYPnLsAJyodOxBHvTI/GOd8M=
 20260820185807_add_bootstrap_ceremony.sql h1:0tiQsqClxrSDiz1Jl+vd6VDStnO/nObLoeKIHBWsX3M=
@@ -40,4 +40,4 @@ h1:NxjrrRZ2weLuROb5NatdzxWl9jRd0AfATE2/oYQ1VW8=
 20261009110000_drop_redundant_principal_index.sql h1:8a42psxDobFpuLR01W0zTtz1emVSbulOXKXRtuZ5jfo=
 20261009120000_operator_tooling_and_projection_metrics.sql h1:ZDM3OMv3xwWh5Suwl4e5GdS5HsMe8rE/0zWLu7TIjMI=
 20261019142657_first_credential.sql h1:2RrvKTZd0S8q6+Tmjvw/Zwbsa+NRzUuSImLtOhZTbQM=
-20261020163355_ceremony_witness_adoption_consent.sql h1:ElS+s997ofeNuaY9t4KnyU6f427cQTDDzBgQM7e0sfQ=
+20261020163355_ceremony_witness_adoption_consent.sql h1:m/5K+iNEv+h5hwMek1U9+Ic63aBrod55Q8BM6E37vUc=

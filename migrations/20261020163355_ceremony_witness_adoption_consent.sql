@@ -1,3 +1,5 @@
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '60s';
 -- Modify "bootstrap_ceremony" table
 --
 -- The witness (STD-IAM-001 2.9.0 §3.10). Added nullable, written on a row claimed before it existed,
@@ -6,16 +8,31 @@
 ALTER TABLE "bootstrap_ceremony" ADD COLUMN "witness" text NULL;
 UPDATE "bootstrap_ceremony" SET "witness" = 'not recorded: the ceremony ran before a witness was recorded'
  WHERE "witness" IS NULL;
+-- Reviewed 2026-10-20: the table holds at most one row (bootstrap_ceremony_single_row).
+-- squawk-ignore adding-not-nullable-field
 ALTER TABLE "bootstrap_ceremony" ALTER COLUMN "witness" SET NOT NULL;
+-- Reviewed 2026-10-20: the table holds at most one row, written above.
+-- squawk-ignore constraint-missing-not-valid
 ALTER TABLE "bootstrap_ceremony" ADD CONSTRAINT "bootstrap_ceremony_witness_check" CHECK ((btrim(witness) <> ''::text) AND (lower(btrim(witness)) <> lower(btrim(operator))));
 -- Create index "bootstrap_ceremony_review_key" to table: "bootstrap_ceremony"
+-- Reviewed 2026-10-20: the table holds at most one row, and Atlas runs each file in one transaction,
+-- where CREATE INDEX CONCURRENTLY cannot run.
+-- squawk-ignore require-concurrent-index-creation
 CREATE UNIQUE INDEX "bootstrap_ceremony_review_key" ON "bootstrap_ceremony" ("id", "operator", "witness", "principal_id");
 -- Set comment to column: "witness" on table: "bootstrap_ceremony"
 COMMENT ON COLUMN "bootstrap_ceremony"."witness" IS 'The second named person who witnessed the ceremony. Never the operator. STD-IAM-001 §3.10.';
 -- Modify "registration_finding" table
-ALTER TABLE "registration_finding" DROP CONSTRAINT "registration_finding_field_check", ADD CONSTRAINT "registration_finding_field_check" CHECK ((field_class IS NULL) OR (field_class = ANY (ARRAY['redirect_uris'::text, 'token_lifespan'::text, 'audience_scope'::text, 'signing_algorithm'::text, 'profile'::text, 'client_keys'::text, 'suspension'::text, 'token_format'::text, 'audience'::text, 'logout'::text, 'consent'::text]))); -- atlas:destructive-approved: widening a CHECK, reviewed 2026-10-20
+-- Reviewed 2026-10-20: the CHECK is widened, never narrowed: the constraint is dropped and added again in one
+-- statement with every value it held and one more. The scan the new constraint takes is over a control
+-- table of at most thousands of rows, inside the lock_timeout above.
+-- squawk-ignore ban-drop-constraint, constraint-missing-not-valid
+ALTER TABLE "registration_finding" DROP CONSTRAINT "registration_finding_field_check", ADD CONSTRAINT "registration_finding_field_check" CHECK ((field_class IS NULL) OR (field_class = ANY (ARRAY['redirect_uris'::text, 'token_lifespan'::text, 'audience_scope'::text, 'signing_algorithm'::text, 'profile'::text, 'client_keys'::text, 'suspension'::text, 'token_format'::text, 'audience'::text, 'logout'::text, 'consent'::text])));
 -- Modify "security_operation" table
-ALTER TABLE "security_operation" DROP CONSTRAINT "security_operation_type_check", ADD CONSTRAINT "security_operation_type_check" CHECK (operation_type = ANY (ARRAY['suspend'::text, 'restore'::text, 'sessions.terminate-all'::text, 'authenticator.revoke'::text, 'session.terminate'::text, 'authenticator.remove'::text, 'consent.withdraw'::text])); -- atlas:destructive-approved: widening a CHECK, reviewed 2026-10-20
+-- Reviewed 2026-10-20: the CHECK is widened, never narrowed: the constraint is dropped and added again in one
+-- statement with every value it held and one more. The scan the new constraint takes is over a control
+-- table of at most thousands of rows, inside the lock_timeout above.
+-- squawk-ignore ban-drop-constraint, constraint-missing-not-valid
+ALTER TABLE "security_operation" DROP CONSTRAINT "security_operation_type_check", ADD CONSTRAINT "security_operation_type_check" CHECK (operation_type = ANY (ARRAY['suspend'::text, 'restore'::text, 'sessions.terminate-all'::text, 'authenticator.revoke'::text, 'session.terminate'::text, 'authenticator.remove'::text, 'consent.withdraw'::text]));
 -- Create "bootstrap_ceremony_review" table
 CREATE TABLE "bootstrap_ceremony_review" (
   "review_id" uuid NOT NULL,
@@ -42,7 +59,11 @@ COMMENT ON COLUMN "bootstrap_ceremony_review"."reviewer" IS 'The reviewer''s nam
 -- Set comment to column: "reviewer_principal_id" on table: "bootstrap_ceremony_review"
 COMMENT ON COLUMN "bootstrap_ceremony_review"."reviewer_principal_id" IS 'The Principal whose token recorded the review.';
 -- Modify "principal_finding" table
-ALTER TABLE "principal_finding" DROP CONSTRAINT "principal_finding_resolution_check", ADD CONSTRAINT "principal_finding_resolution_check" CHECK (((resolved_at IS NULL) = (resolution IS NULL)) AND ((resolution IS NULL) OR (resolution = ANY (ARRAY['relinked'::text, 'user_present'::text, 'user_absent'::text, 'adopted'::text])))); -- atlas:destructive-approved: widening a CHECK, reviewed 2026-10-20
+-- Reviewed 2026-10-20: the CHECK is widened, never narrowed: the constraint is dropped and added again in one
+-- statement with every value it held and one more. The scan the new constraint takes is over a control
+-- table of at most thousands of rows, inside the lock_timeout above.
+-- squawk-ignore ban-drop-constraint, constraint-missing-not-valid
+ALTER TABLE "principal_finding" DROP CONSTRAINT "principal_finding_resolution_check", ADD CONSTRAINT "principal_finding_resolution_check" CHECK (((resolved_at IS NULL) = (resolution IS NULL)) AND ((resolution IS NULL) OR (resolution = ANY (ARRAY['relinked'::text, 'user_present'::text, 'user_absent'::text, 'adopted'::text]))));
 -- Create "principal_adoption" table
 CREATE TABLE "principal_adoption" (
   "adoption_id" uuid NOT NULL,
@@ -70,3 +91,9 @@ CREATE UNIQUE INDEX "principal_adoption_finding_key" ON "principal_adoption" ("f
 COMMENT ON TABLE "principal_adoption" IS 'Each re-adoption of an orphan''s identifier after a restore to an older point. Insert-only. ADR-IAM-001 §5.11, TDD-identity-control-001 1.23.0.';
 -- Set comment to column: "finding_id" on table: "principal_adoption"
 COMMENT ON COLUMN "principal_adoption"."finding_id" IS 'The open orphan finding that named the identifier.';
+-- Modify "reconcile_run" table
+-- Reviewed 2026-10-20: the CHECK is widened, never narrowed: the constraint is dropped and added again in one
+-- statement with every value it held and one more. The scan the new constraint takes is over a control
+-- table of at most thousands of rows, inside the lock_timeout above.
+-- squawk-ignore ban-drop-constraint, constraint-missing-not-valid
+ALTER TABLE "reconcile_run" DROP CONSTRAINT "reconcile_run_sweep_check", ADD CONSTRAINT "reconcile_run_sweep_check" CHECK (sweep = ANY (ARRAY['registration'::text, 'tenant_context'::text, 'organization_reconcile'::text]));

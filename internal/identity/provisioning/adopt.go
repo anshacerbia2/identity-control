@@ -109,11 +109,13 @@ ORDER BY detected_at LIMIT 1`
 
 const adoptMappedStatement = `SELECT EXISTS (SELECT 1 FROM identity.principal_mapping WHERE principal_id = $1)`
 
-// newestMappingStatement is the newest instant the restored registry records: its newest mapping's
-// creation, or the newest UUIDv7 time among the identifiers it holds, whichever is later.
-// uuid_extract_timestamp reads a version 7 UUID's time (PostgreSQL 17, §9.14 UUID Functions).
-const newestMappingStatement = `SELECT greatest(max(created_at),
-       max(uuid_extract_timestamp(principal_id)) FILTER (WHERE uuid_extract_version(principal_id) = 7))
+// newestMappingStatement reads the newest instant the restored registry records: its newest mapping's
+// creation, and its greatest UUIDv7 identifier, whose time the caller decodes. The canonical text form
+// orders as the bytes do, and a UUIDv7's first 48 bits are its time, so the greatest is the newest.
+// PostgreSQL 17's uuid_extract_timestamp "extracts a timestamp with time zone from UUID version 1. For
+// other versions, this function returns null", so the time is decoded here rather than there.
+const newestMappingStatement = `SELECT max(created_at),
+       coalesce(max(principal_id::text) FILTER (WHERE uuid_extract_version(principal_id) = 7), '')
 FROM identity.principal_mapping`
 
 const lockFindingStatement = `SELECT keycloak_user_id FROM identity.principal_finding
@@ -269,7 +271,21 @@ func (p *Provisioner) planAdoption(ctx context.Context, principal id.UUID) (Adop
 		if err != nil {
 			return err
 		}
-		return tx.QueryRow(ctx, newestMappingStatement).Scan(&newest)
+		var newestID string
+		if err := tx.QueryRow(ctx, newestMappingStatement).Scan(&newest, &newestID); err != nil {
+			return fmt.Errorf("provisioning: read the newest mapping: %w", err)
+		}
+		if newestID == "" {
+			return nil
+		}
+		parsed, err := id.Parse(newestID)
+		if err != nil {
+			return err
+		}
+		if at, ok := uuidV7Time(parsed); ok && (newest == nil || at.After(*newest)) {
+			newest = &at
+		}
+		return nil
 	}); err != nil {
 		return plan, err
 	}

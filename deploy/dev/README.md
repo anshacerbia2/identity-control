@@ -454,6 +454,34 @@ the client once `IDENTITY_CLIENT_KEY_ROTATION_OVERLAP` ends (168 hours by defaul
 and the device that signs with it stops working. So list first the key that must keep working. A
 registered client holds one active key, and a second only while a rotation overlaps: moving the BFF
 to the other device's key afterwards is a rotation, `POST /v1/registrations/{registration_id}/keys`.
+The two-key adoption exists for a client caught mid-rotation; a second device is its own registration
+(§Several developer devices).
+
+### Several developer devices
+
+**One registration per device** (STD-GLB-009 1.10.0 rule 15, `ADR-IAM-001 §5.12` as amended
+2026-10-20). A laptop-run BFF that two devices use has one registration per device, each with its own
+single active key, for example `identity-experience-bff-<device>` beside `identity-experience-bff`.
+OAuth treats each deployed instance as its own client: `client_id` "SHOULD vary between instances"
+(RFC 7591 §2, STD-GLB-009 [R64]). With one registration per device, each device has its own sessions
+and events in the kernel, and a lost laptop is suspended without touching the other.
+
+1. **On the second device:** `node scripts/new-client-key.mjs` in the BFF's repository. The private
+   key stays there; only the public JWK leaves.
+2. **On the server, as a provider:** register the device's client through `POST /v1/registrations`
+   with the same declaration as the first device's, its own `client_key` and its own `public_key`:
+   for identity-experience, `confidential`, `privileged` in the `provider-scope` form, audience
+   `identity-control-api`, redirect `http://127.0.0.1:8090/auth/callback`; for organization-experience,
+   its `scripts/dev-register-bff.ps1` with the device's client name.
+3. **On the second device:** set the BFF's client id in its `.env` to that client
+   (`IDENTITY_EXPERIENCE_CLIENT_ID`, `ORGANIZATION_EXPERIENCE_CLIENT_ID`) and its key file to the new key.
+4. **Record the device's client** on the server's environment page (the architecture repository's
+   `deploy/dev/<server>.md`).
+
+Never give `set-client-key.sh` two devices' keys for one client, and never adopt one client with two
+devices' keys to serve both: a second key on a registration is only a rotation's overlap, and it is
+removed when the overlap ends. A device's client is suspended (`POST /v1/registrations/{id}:suspend`)
+when the device is lost, and retired when it is replaced.
 
 The declaration it sends, with a provider-scope token (`scripts/dev-token.ps1`):
 

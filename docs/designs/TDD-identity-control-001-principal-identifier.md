@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-001
   title: Canonical Principal Identifier and Creation Path
   owner: Core Platform Team
-  version: 1.22.0
+  version: 1.23.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -156,10 +156,14 @@ currently closes it.
 CREATE TABLE identity.bootstrap_ceremony (
     id              INTEGER     PRIMARY KEY,
     operator        TEXT        NOT NULL,
+    witness         TEXT        NOT NULL,                     -- 1.23.0
     reason          TEXT        NOT NULL,
     idempotency_key TEXT        NOT NULL,
+    principal_id    UUID,
     requested_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT bootstrap_ceremony_single_row CHECK (id = 1)
+    CONSTRAINT bootstrap_ceremony_single_row CHECK (id = 1),
+    CONSTRAINT bootstrap_ceremony_witness_check
+        CHECK (btrim(witness) <> '' AND lower(btrim(witness)) <> lower(btrim(operator)))
 );
 ```
 
@@ -169,11 +173,42 @@ CREATE TABLE identity.bootstrap_ceremony (
 2. The claiming transaction asserts `identity.principal_mapping` is empty. Together with (1)
    this means the ceremony can only ever run on a virgin registry.
 3. The row is **insert-only**. `grants.sql` revokes `UPDATE` and `DELETE` from the runtime role
-   on this table specifically, so the operator and reason on record cannot be rewritten — by the
-   application, by a retry, or by whoever runs the ceremony a second time.
+   on this table specifically, so the operator, the witness and the reason on record cannot be
+   rewritten — by the application, by a retry, or by whoever runs the ceremony a second time.
 4. `idempotency_key` is claimed in the same row rather than generated per invocation. A ceremony
    that crashes after the kernel call resumes against the same key, so the recovery path that
    already exists for the API applies unchanged and a retry cannot mint a second Principal.
+
+**Two people run it, and a third reviews it (1.23.0).** `STD-IAM-001` 2.9.0 §3.10 and `ADR-IAM-001`
+§5.11 requirement 3, as amended 2026-10-20, take the ceremony from one operator to two named people,
+an operator and a witness, and an independent review of the record:
+
+- **The witness.** `identity-bootstrap -witness <name>` is required beside `-operator`, and the
+  ceremony refuses a witness equal to the operator, compared trimmed and case folded, before anything
+  is written. The database refuses it too (`bootstrap_ceremony_witness_check`). A resume reuses the
+  recorded witness, as it reuses the operator and the reason. NIST: "Dual authorization, also known as
+  two-person control, reduces risk related to insider threats" (SP 800-53 AC-3(2), `ADR-IAM-001`
+  [R63]). The migration that added the column writes "not recorded: the ceremony ran before a witness
+  was recorded" on a row claimed before it, rather than naming someone.
+- **The record, read through the API.** `GET /v1/bootstrap-ceremony`, a provider's route, answers
+  the operator, the witness, the reason, the `principal_id`, `requested_at`, `reviewed` and every
+  review, oldest first. The idempotency key is not served. Before 1.23.0 only a database role could
+  read the record.
+- **The review.** `POST /v1/bootstrap-ceremony:review`, a provider's route with an `Idempotency-Key`
+  (replayed) and the finding as `X-Administrative-Reason`, takes `{"reviewer": "<name>", "outcome":
+  "satisfactory" | "findings"}` and answers `201` with the review. It is recorded insert-only in
+  `identity.bootstrap_ceremony_review`: reviewer, the Principal whose token recorded it, outcome,
+  statement, correlation and time. It answers `409` when the reviewer is the operator or the witness,
+  or the caller is the first Principal, and `404` when no ceremony is on record.
+- **The database refuses a review that is not independent.** The review row carries the ceremony's
+  operator, witness and Principal, held to the ceremony's own by a composite foreign key onto the
+  unique key `bootstrap_ceremony_review_key (id, operator, witness, principal_id)`, and a check
+  compares the reviewer with each. A review written past the code, naming the witness, or naming
+  another ceremony's people, is refused by PostgreSQL. AC-5 asks "that security personnel who
+  administer access control functions do not also administer audit functions" (`STD-IAM-001` [R41]).
+- **Who and when are the owner's.** The reviewer's role and the review deadline are `OWNER DECISION
+  REQUIRED` in `STD-IAM-001` §3.10; `docs/runbooks/bootstrap-ceremony.md` §Who performs it holds the
+  placeholders. The route records any review; it does not enforce a deadline.
 
 **The ceremony holds no credential.** The kernel user is created with a required
 credential-setting action, so the first human interaction establishes the credential. A ceremony
@@ -504,13 +539,25 @@ GET    /v1/principals/{principal_id}
 POST   /v1/principals/{principal_id}:quarantine
 POST   /v1/principals/{principal_id}:relink
 POST   /v1/principals/{principal_id}:release        (1.18.0)
+POST   /v1/principals/{principal_id}:adopt          (1.23.0)
 POST   /v1/principals/{principal_id}:retire
 GET    /v1/principals:unmapped
 GET    /v1/principals:dangling
 GET    /v1/principals:pending                       (1.18.0)
 GET    /v1/principals:quarantined                   (1.18.0)
 POST   /v1/principals:reconcile
+GET    /v1/bootstrap-ceremony                       (1.23.0)
+POST   /v1/bootstrap-ceremony:review                (1.23.0)
 ```
+
+`:adopt` (1.23.0, §Re-Adopting an Orphan) takes `X-Administrative-Reason`, an `Idempotency-Key`
+replayed as `:relink`'s is, and `{"dry_run": true | false}`. It answers `200` with the plan,
+`{"principal_id", "adoptable", "refusal", "checks": [{"check", "holds", "detail"}], "adopted",
+"state"}`, the checks in the order of §Re-Adopting an Orphan; an adoption answers the same with
+`adopted` true and `state` `suspended`. It answers `403` when the target is the Principal in the
+caller's own token, before the reason is read; `409` when a check refuses, the refusal naming the
+check, or when a mapping already holds the identifier; and `503` when the kernel or its event store
+did not answer, with nothing recorded.
 
 `GET /v1/principals:pending` (1.18.0) lists the mappings in `pending`, oldest first, at most 500:
 `{"pending": [{"principal_id", "subject_type", "username", "created_at", "overdue"}]}`. `overdue` is
@@ -807,6 +854,66 @@ release(principal, username, reason, caller):           provider only
   without collusion" [R13]. Another provider releases it. Identity Experience already hides the
   action on the operator's own Principal; this makes the service, not the interface, the control.
 
+### Re-Adopting an Orphan
+
+1.23.0, `ADR-IAM-001 §5.11` as amended 2026-10-20, `STD-GLB-002` 3.3.0 §A restore to an older point.
+A Principal created after the backup still exists in the kernel after a restore to an older point,
+and the restored Control Database holds no mapping for it, so the sweep records its user an
+`orphan`. Until 1.23.0 nothing bound it again, and replacing the person with a new `principal_id`
+would break every reference made to the old one, Organization Control's Memberships first: `sub` is
+"A locally unique and never reassigned identifier within the Issuer for the End-User"
+(`ADR-IAM-001` [R10]).
+
+```text
+adopt(principal, reason, dry_run, caller):               provider only
+    refuse when principal is the caller's own                       403
+    refuse a mapping that already holds it                          409
+    plan the four checks:
+      orphan_finding      an open orphan finding claims the identifier, in this realm
+      one_kernel_user     exactly one kernel user carries it, the finding's user, a person
+      newer_than_backup   it is a UUIDv7 whose time is later than the newest mapping:
+                          max(created_at), and the time of the greatest UUIDv7 identifier held
+      creation_on_record  a kernel admin event CREATE on users/<that user>, made by this
+                          service's Principal credential's service account, carries the identifier
+    dry_run, or any check failing: answer the plan                  200, or 409 with the refusal
+    in one transaction, the finding still open under its row lock:
+        insert the mapping: that user, suspended, activated now
+        insert principal_adoption, with each check's evidence
+        resolve the finding 'adopted'
+        disable the user and end its sessions; a kernel failure rolls back   503
+```
+
+- **The four checks are the ADR's, and each is read, not assumed.** The kernel is searched by the
+  attribute, as `:release` does. The newest mapping is read from the restored database itself, so an
+  identifier minted before the backup, which the restore should have held, is refused.
+  `uuid_extract_timestamp` is not used: PostgreSQL 17's "extracts a `timestamp with time zone` from
+  UUID version 1. For other versions, this function returns null" [R14], so the greatest UUIDv7 is
+  read as text, which orders as its bytes do, and its time is decoded here from its first 48 bits
+  (RFC 9562 §5.7, `ADR-IAM-001` [R67]).
+- **The provenance is the kernel's journal.** The admin events are read through the Admin API with
+  the registration credential, which holds `view-events` (`TDD-identity-control-007`), filtered by
+  `operationTypes=CREATE`, `resourceTypes=USER` and `resourcePath=users/<id>`, and filtered again
+  here. The creator is the `sub` of the Principal credential's own token, the service account every
+  `CreateUser` acts as. The identifier is read from the event's representation, which the realm
+  records: "The Include Representation switch includes JSON documents sent through the admin REST
+  API" (`ADR-IAM-001` [R68]). An event past the kernel's 7-day retention is not there, and until Audit
+  & Evidence keeps them the command refuses, and triage decides (`ADR-IAM-001` §6). The kernel event
+  record in the Control Database is not read: it was restored to the same older point.
+- **An unknown answer is not a refusal.** A kernel or event store that does not answer is `503`, as
+  `:relink` treats an unknown answer.
+- **It lands in `suspended`, as `:release` does.** The user is disabled and its sessions are ended
+  before the commit, and only `:restore`, a separate recorded command, returns it to service: two
+  recorded steps. The mapping is written `activated_at` now, so the dangling sweep watches it once it
+  is active again.
+- **A workload is refused.** Its user is its client's service account, rebuilt with the client
+  (`TDD-identity-control-004`).
+- **The creation address is written again** from the kernel user's email, as creation writes it
+  (`TDD-identity-control-008`), so the person's notifications have an address after the restore.
+- **Recorded insert-only.** `identity.principal_adoption` holds the finding, the user, the
+  identifier's time, the newest mapping's time, the creation event's identifier and time, who adopted
+  it and why; the runtime holds no `UPDATE` or `DELETE` on it, its `finding_id` is unique, and checks
+  hold the identifier's time later than the newest mapping and the adopter apart from the identifier.
+
 ### Verifier Invariant
 
 A protected resource accepting an internal Scnehaux token rejects the token when
@@ -938,6 +1045,13 @@ Executed against a Keycloak instance pinned to the release under evaluation:
 
 ### Negative
 
+- `:adopt` refuses on each of its four checks, the caller's own Principal, a mapped identifier, a
+  missing reason, and a journal that does not answer, and an adoption lands `suspended` with its
+  record (1.23.0): `TestAnAdoptionRefusesUnlessEveryCheckHolds`,
+  `TestAnOrphanCreatedAfterTheBackupIsAdoptedToSuspended`, `TestAnAdoptionNeedsTheJournal`.
+- A ceremony review by the operator, the witness or the first Principal is refused by the code and
+  by PostgreSQL, and the witness is never the operator (1.23.0):
+  `TestTheCeremonyRecordsTheWitnessAndAnIndependentReview`, `TestTheWitnessIsNeverTheOperator`.
 - `:release` of the caller's own Principal answers `403` before validation and changes nothing
   (1.22.0): `TestAReleaseOfTheCallersOwnPrincipalIsForbidden`, `TestASelfReleaseIsRefusedBeforeAnyRead`,
   and against PostgreSQL `TestAnOperatorCannotReleaseTheirOwnPrincipal`, where the mapping stays
@@ -1000,6 +1114,28 @@ Control Database restore (`docs/runbooks/control-database-restore.md`).
 Telemetry excludes credential fields and unrestricted personal data. `principal_id`
 appears in structured logs; `keycloak_user_id` does not.
 
+### Audit Retention
+
+1.23.0, `STD-GLB-007` 1.1.0 §Data Retention: audit logs are "Retained in immutable storage for
+`7 years`", every audit record counts, privileged access included, and "A record younger than 7 years
+is never purged". This service's audit records are the tables that record a decision, an access or an
+outcome with who made it and why: `privileged_access`, `provider_emergency_use`, `kernel_event`,
+`bootstrap_ceremony` and its reviews, `ceremony_grant_retirement`, `principal_relink`,
+`principal_release`, `principal_adoption`, `registration_adoption`, `registration_state_change`,
+`registration_change`, `registration_request`, `registration_owner`, `application_developer`,
+`drift_exception`, `workload_owner_change`, `workload_review`, `security_operation` and its attempts,
+`temporary_password_issuance` and `temporary_password_outcome`, and `security_notification`.
+
+Checked on 2026-10-20: this service purges none of them, at any age. The runtime role holds no
+`DELETE` and no `TRUNCATE` on any (`grants.sql`), no migration and no production source deletes from
+one, and the schema holds no rule or trigger that could. It holds no Tenant's data, so the Tenant
+decommissioning purge has nothing to delete here. Compliance item 4 is asserted on every build:
+`TestNoAuditRecordIsPurgedBeforeSevenYears` reads the catalog, and `TestNoSourceDeletesAnAuditRecord`
+reads every migration and production file. The earliest record dates from 2026-08, so a purge past 7
+years, through a policy that admits only that delete, is not needed before 2033 and is not built.
+Kernel events are kept until Audit & Evidence has them (`STD-IAM-001` §3.8); a purge of those
+follows that platform.
+
 ### Restore Evidence
 
 1.16.0. The Control Database is the only record that binds a `principal_id` to its kernel user, so
@@ -1054,10 +1190,21 @@ at `report`, as the runbook's step 7 says, and the drill requires, case by case:
 | A redirect URI change | a `redirect_uris` difference; the client blocked and disabled | the operator's reconcile applies the restored state, then the change is repeated through the API | the client enabled with the change, nothing open |
 | A suspension | the record gone: the Principal reads `active` while its user stays disabled | the suspension repeated | `suspended`, recorded again |
 | A Membership granted | the sweep removes the member, recorded `extra_member`: it fails closed | Organization Control's repair delivers the authoritative state | the member back, the report holding it |
-| A Principal created | an `orphan`, left enabled | none is built | recorded as a gap: no route binds an orphan's identifier to a mapping again |
+| A Principal created | an `orphan`, left enabled | `:adopt` after its four checks (1.23.0), then `:restore` | the same `principal_id` active on the same user, no open finding |
+| A user made in the console | an `orphan` whose creation event names the console administrator | `:adopt` | refused on `creation_on_record`, nothing mapped (1.23.0) |
 
 The switches return to what they were afterwards, and the service must come back ready. The record is
-`older-point-evidence.json`, inside the `restore-evidence` artifact.
+`older-point-evidence.json`, inside the `restore-evidence` artifact. Signing in as the adopted person,
+and the Memberships under the identifier resolving, are not proven here: this job runs no
+Organization Control, and organization-control's `wiring` job is where a Membership is followed
+across both services.
+
+**The backup's retention (1.23.0).** The same drill proves the backup's retention (`STD-GLB-009`
+rule 9 and compliance check 7, 1.10.0). It seeds a directory with 16 older complete sets, a lone roles
+file and a `.partial`, and requires `deploy/dev/backup.sh` to keep exactly the newest 14 complete sets,
+the one it just wrote among them, to delete only the three oldest, and to leave the lone file and the
+`.partial` alone. A backup run after the volume is deleted, with no database to read, must fail and
+delete nothing. The results are `retention` in `restore-evidence.json`.
 
 **What it does not prove.**
 
@@ -1402,3 +1549,8 @@ Keycloak release:
   authorizations to support separation of duties." Discussion: "Separation of duties addresses the
   potential for abuse of authorized privileges and helps to reduce the risk of malevolent activity
   without collusion."
+- **[R14]** The PostgreSQL Global Development Group, _PostgreSQL 17 Documentation_, §9.14 UUID
+  Functions, accessed 2026-10-20. <https://www.postgresql.org/docs/17/functions-uuid.html>.
+  `uuid_extract_timestamp`: "This function extracts a `timestamp with time zone` from UUID version 1.
+  For other versions, this function returns null." `uuid_extract_version`: "This function extracts the
+  version from a UUID of the variant described by RFC 4122."

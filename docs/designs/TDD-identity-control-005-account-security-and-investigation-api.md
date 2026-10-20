@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-005
   title: Account Security and Investigation API Mediation
   owner: Core Platform Team
-  version: 2.12.0
+  version: 2.13.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-14
-  last_reviewed: 2026-10-19
+  last_reviewed: 2026-10-20
   parent_sad: SAD-001
 ---
 
@@ -105,7 +105,7 @@ cannot suspend, restore, or revoke an authenticator of, the Principal in its own
 ## Self-Service as Built (2.3.0)
 
 Slice 3 is built in two parts. **3a**, built here, is a person's own sessions and authenticators.
-**3b** is consents. It waited for two things, and one remains (2.9.2):
+**3b** is consents. It waited for two things, and both are answered (2.9.2, 2.13.0):
 - **The kernel's proof: answered.** identity-kernel's `compat/consent_test.go` proved on 26.7.5
   (compat run 37607165522):
   - `GET /admin/realms/{realm}/users/{id}/consents` lists a person's consents.
@@ -114,11 +114,40 @@ Slice 3 is built in two parts. **3a**, built here, is a person's own sessions an
   - A withdrawal needs `manage-users` and is recorded as an admin `ACTION` on
     `users/{id}/consents/{client}`, which this service's notifications do not take for a credential
     removal.
-- **A client that asks for consent: open.** The kernel shows the consent page only for client
-  scopes marked "display on consent screen", and every scope the realm declares is not. No
-  registered client here can therefore produce a consent. Which clients ask a person's consent is a
-  decision about third-party access, not a build step. Until it is made, `GET /v1/me/consents` is
-  not served.
+- **A client that asks for consent: decided, and built (2.13.0).** STD-IAM-002 1.9.0 §3.6 and
+  `ADR-IAM-003 §5.11` decided it on 2026-10-20: an `external` registration requires consent and no
+  other class does, derived from the class and never chosen (`TDD-identity-control-003` 1.39.0
+  §Profiles). The scopes an `external` client releases are marked "display on consent screen" in
+  identity-kernel's realm, which is that repository's change; until it lands, the kernel shows no
+  consent page for them and records no consent, and the listing below answers an empty list.
+
+**3b as built (2.13.0).**
+
+```text
+GET   /v1/me/consents
+POST  /v1/me/consents/{security_ref}:withdraw
+```
+
+- **The listing.** `{"consents": [{"security_ref", "client", "scopes", "granted_at", "updated_at",
+  "access_token_lifetime_seconds"}]}`, one per client the person consented to, read from the kernel's
+  "Get consents granted by the user". `client` is the client's `client_key`, `scopes` the client scopes
+  granted. `access_token_lifetime_seconds` is the lifetime the client's registration bounds its access
+  tokens to, the one `LifespanSQL` derives, or `null` for a client no registration describes: it is
+  how long a token issued before a withdrawal may still be presented (§Session and Consent Semantics).
+  Each reference is sealed for kind `consent` and the purpose `self.consent.withdraw`, and opens on
+  no other route.
+- **The withdrawal.** A self command, as `:terminate` is: an `Idempotency-Key`, no reason, no version,
+  no step-up, since it only narrows what a client may do. It is the operation type `consent.withdraw`,
+  executed by the lease like every other: the kernel's "Revoke consent and offline tokens for
+  particular client from user", then the listing read back until the client is gone. A consent already
+  gone counts as withdrawn once the listing agrees, as the compat proof's second withdrawal answering
+  `404` allows. It answers `200` with the final operation inside the budget and `202` with `Location`
+  otherwise, and is evidenced with the person as actor and subject. The refresh tokens issued on the
+  consent stop refreshing (identity-kernel compat run 37607165522).
+- **Tested** against PostgreSQL with the fake kernel: `TestAPersonWithdrawsAConsent`; the routes:
+  `TestAPersonListsAndWithdrawsTheirConsents`; the Admin API calls: 
+  `TestConsentsAreListedAndWithdrawnThroughTheUserSubresource`. `deploy-dev` proves the listing against
+  the live kernel; a withdrawal there waits for a consent, and so for identity-kernel's consent scopes.
 
 **Route class `self`.**
 - The subject is the `principal_id` in the token, and no path segment names it.

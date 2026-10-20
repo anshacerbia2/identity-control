@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-007
   title: The Kernel Event Record and Its Completeness
   owner: Core Platform Team
-  version: 1.1.0
+  version: 1.2.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-10-05
-  last_reviewed: 2026-10-07
+  last_reviewed: 2026-10-20
   parent_sad: SAD-001
 ---
 
@@ -184,6 +184,18 @@ interval × 24  ≤  the kernel's event retention (7 days)
 
 `TDD-identity-kernel-003` §Retention Constraint binds the two, so that an event is read at least
 twice before it expires. Startup refuses an interval longer than 7 hours.
+
+### A User's Creation, for an Adoption (1.2.0)
+
+`POST /v1/principals/{principal_id}:adopt` (`TDD-identity-control-001` 1.23.0 §Re-Adopting an
+Orphan, `ADR-IAM-001 §5.11` check 4) asks one question of the kernel's journal: did this service
+create the user carrying the identifier. It is answered from the kernel's native store, not from this
+record: after a restore to an older point the record was restored to the same point, and the event
+it needs came after it. The read is the Admin API's admin events with the registration credential,
+which already holds `view-events`, filtered by `operationTypes=CREATE`, `resourceTypes=USER` and
+`resourcePath=users/<id>` and filtered again here, the identifier taken from the representation the
+realm records (`keycloak.UserCreations`). An event past the kernel's 7-day retention is absent, and
+the adoption refuses; once Audit & Evidence holds the events, it is read from there.
 
 ## Configuration
 
