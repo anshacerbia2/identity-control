@@ -19,6 +19,7 @@ import (
 
 	"github.com/anshacerbia2/identity-control/internal/organization"
 	"github.com/anshacerbia2/identity-control/internal/providerauthority"
+	"github.com/anshacerbia2/identity-control/internal/tenantcontext"
 )
 
 type tokens struct {
@@ -280,5 +281,45 @@ func TestARefusalIsTold(t *testing.T) {
 	})
 	if _, _, err := c.OrganizationSnapshot(context.Background()); !errors.Is(err, organization.ErrRefused) {
 		t.Errorf("a 403: %v, want ErrRefused", err)
+	}
+}
+
+// The consumer's own reconciliation posts its report, as itself, to the reconcile route, and reads
+// back the findings (ADR-ORG-001 §5.7). A 403, Organization Control not yet admitting a consumer on
+// that route, is ErrRefused; a report naming another consumer is never sent.
+func TestReconcileSendsTheReportAsThisConsumer(t *testing.T) {
+	membership := mustID(t)
+	c, s, _ := client(t, func(w http.ResponseWriter, r request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"consumer_id":"identity-control","mark":42,"run_at":"2026-10-20T10:00:00Z",` +
+			`"findings":[{"classification":"extra","membership_id":"` + membership.String() + `","state":null}]}`))
+	})
+	report := tenantcontext.Report{ConsumerID: providerauthority.Consumer, Mark: 42,
+		Rows: []tenantcontext.ReportedRow{{MembershipID: membership, MembershipVersion: 3}}}
+	result, err := c.Reconcile(context.Background(), report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Mark != 42 || len(result.Findings) != 1 || result.Findings[0].Classification != "extra" ||
+		result.Findings[0].MembershipID != membership {
+		t.Errorf("result %+v", result)
+	}
+	got := s.received[0]
+	if got.method != http.MethodPost || got.path != "/v1/projections/reconcile" || got.authorization != "Bearer workload-token" {
+		t.Errorf("sent %s %s with %q", got.method, got.path, got.authorization)
+	}
+	rows, _ := got.body["rows"].([]any)
+	if got.body["consumer_id"] != providerauthority.Consumer || got.body["mark"] != float64(42) || len(rows) != 1 {
+		t.Errorf("body %v", got.body)
+	}
+
+	refused, _, _ := client(t, func(w http.ResponseWriter, r request) { w.WriteHeader(http.StatusForbidden) })
+	if _, err := refused.Reconcile(context.Background(), report); !errors.Is(err, organization.ErrRefused) {
+		t.Errorf("a 403 answered %v; want ErrRefused", err)
+	}
+	other := report
+	other.ConsumerID = "foundation-reference"
+	if _, err := c.Reconcile(context.Background(), other); err == nil || len(s.received) != 1 {
+		t.Errorf("a report for another consumer: %v, %d requests sent", err, len(s.received))
 	}
 }

@@ -190,6 +190,10 @@ type Config struct {
 	// ProjectionReconcileInterval is the reconciliation sweep's cadence (TDD-identity-control-002
 	// 2.1.0 §Reconciliation).
 	ProjectionReconcileInterval time.Duration
+	// OrganizationReconcileInterval is how often this consumer sends its report to Organization
+	// Control's reconcile route, the reconciliation_interval its consumer registration declares
+	// (ADR-ORG-001 §5.7; TDD-identity-control-002 2.6.0 §The Consumer Reconciles Itself).
+	OrganizationReconcileInterval time.Duration
 
 	// AdminSearchMinLength and AdminSearchPageSize bound a provider's Principal search: a query
 	// shorter than the floor is refused, and a page holds at most the size (TDD-identity-control-005
@@ -398,6 +402,10 @@ func Load() (Config, error) {
 	if cfg.ProjectionReconcileInterval <= 0 {
 		problems = append(problems, errors.New("IDENTITY_PROJECTION_RECONCILE_INTERVAL must be positive"))
 	}
+	// No value turns it off: the consumer is the one party that can run the comparison, and
+	// Organization Control alerts when it stops (ADR-ORG-001 §5.7). It runs whenever Organization
+	// Control is configured.
+	cfg.OrganizationReconcileInterval = durationOr("IDENTITY_ORGANIZATION_RECONCILE_INTERVAL", 15*time.Minute, &problems)
 	if cfg.ProjectionInterval <= 0 || cfg.ProjectionAttemptTimeout <= 0 || cfg.ProjectionMaxAttempts <= 0 {
 		problems = append(problems, errors.New("the IDENTITY_PROJECTION_* settings must be positive"))
 	} else if cfg.ProjectionLease <= 8*cfg.ProjectionAttemptTimeout {

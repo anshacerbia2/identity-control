@@ -160,6 +160,14 @@ SET principal_id       = excluded.principal_id,
     accepted_at        = excluded.accepted_at
 WHERE identity.membership_desired.membership_version < excluded.membership_version`
 
+// A Tenant row is ordered by the pair (tenant_security_version, tenant_version), compared in that order
+// (TDD-identity-control-002 2.6.0). In ordinary operation every transition raises tenant_version and a
+// security transition also raises tenant_security_version, so a newer event is greater by the pair
+// exactly when it is greater by tenant_version, and nothing changes. A restore to an older point is the
+// case that differs: Organization Control raises every tenant_security_version by 10^9 and republishes
+// each withdrawn Tenant (ADR-ORG-003 §5.5), while tenant_version restarts from the backup and may be
+// at or below the one held here. Ordered by tenant_version alone, that withdrawal would be discarded as
+// already applied; ordered by the pair, it is applied, and so is every event after it.
 const upsertTenantStatement = `INSERT INTO identity.tenant_desired
     (tenant_id, tenant_status, tenant_version, tenant_security_version, source_event_id, accepted_at)
 VALUES ($1, $2, $3, $4, $5, now())
@@ -169,7 +177,8 @@ SET tenant_status           = excluded.tenant_status,
     tenant_security_version = excluded.tenant_security_version,
     source_event_id         = excluded.source_event_id,
     accepted_at             = excluded.accepted_at
-WHERE identity.tenant_desired.tenant_version < excluded.tenant_version`
+WHERE (identity.tenant_desired.tenant_security_version, identity.tenant_desired.tenant_version)
+    < (excluded.tenant_security_version, excluded.tenant_version)`
 
 // markStatement marks a Tenant to converge. A priority mark is due now and stays priority until the
 // Tenant converges. A standard mark is due now unless the Tenant is already pending and backing off,

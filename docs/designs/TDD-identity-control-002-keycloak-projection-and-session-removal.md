@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-002
   title: Tenant Context Projection into the Kernel, and Its Reconciliation
   owner: Core Platform Team
-  version: 2.5.0
+  version: 2.6.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-11
-  last_reviewed: 2026-10-09
+  last_reviewed: 2026-10-20
   parent_sad: SAD-001
 ---
 
@@ -34,6 +34,12 @@ Organization Control posts each event to this service, rather than this service 
 2.4.0 drops `identity.projection_cursor`, the broker consumer's watermark that 2.0.0 left behind
 (§Data Model), and measures the revocation's accept-to-enforcement delay on every `deploy-dev` run
 (§Testing Strategy).
+
+2.6.0 follows two decisions of 2026-10-20. The consumer reconciles itself: it sends its own report to
+Organization Control's reconcile route on the interval its registration declares (`ADR-ORG-001 §5.7`,
+§The Consumer Reconciles Itself). And a restore of Organization Control raises every Tenant security
+version by 10^9 (`ADR-ORG-003 §5.5`), so a Tenant is ordered by its security version first
+(§A Restore's Version Bump).
 
 ## Scope
 
@@ -162,10 +168,12 @@ CREATE TABLE identity.membership_desired (
 CREATE INDEX membership_desired_tenant ON identity.membership_desired (tenant_id);
 ```
 
-- **Each row is the newest state accepted.** A Tenant row is replaced only by a greater
-  `tenant_version`, and a Membership row only by a greater `membership_version`. Organization's
-  Tenant payload says why both Tenant versions are carried: "`TenantVersion` orders two events about
-  this row; `TenantSecurityVersion` decides whether a held token is stale".
+- **Each row is the newest state accepted.** A Membership row is replaced only by a greater
+  `membership_version`. A Tenant row is replaced only by a greater pair
+  (`tenant_security_version`, `tenant_version`), compared in that order (2.6.0; until then
+  `tenant_version` alone, §A Restore's Version Bump). Organization's Tenant payload says why both
+  Tenant versions are carried: "`TenantVersion` orders two events about this row;
+  `TenantSecurityVersion` decides whether a held token is stale".
 - **`source_event_id` is null for a row a snapshot wrote.**
 - **What it holds.** Only identifiers, states and versions. There is no name, and no personal data.
 
@@ -384,6 +392,76 @@ it begins, finished with its outcome and the count of unknown Organizations as `
 `identity.tenant_projection.sweep_age` reads the newest finished run, which is how §Operational
 Notes' "Sweep age" is alerted rather than inferred from a missing log line.
 
+### The Consumer Reconciles Itself (2.6.0)
+
+`ADR-ORG-001 §5.7`, amended 2026-10-20: "The party that holds the copy runs the comparison. Each
+consumer declares a `reconciliation_interval` when it is registered, and calls
+`POST /v1/projections/reconcile` for its own `consumer_id` only, at that interval" [R6].
+
+```text
+every IDENTITY_ORGANIZATION_RECONCILE_INTERVAL (15m), the first at start:
+    claim: advisory lock; skip when a run of this kind started in the last half interval
+    record a run: identity.reconcile_run, sweep = 'organization_reconcile'
+    report := GET /v1/projections/tenant-context/report's body, read in one transaction
+    POST /v1/projections/reconcile on Organization Control, as this service's workload
+        → {"consumer_id", "mark", "run_at", "findings": [...]}
+    finish the run: converged (no finding), drift (findings), unresolved (no answer, or refused)
+```
+
+- **The same report, the same route, the same credential.** The body is the operator's report
+  (§The Report an Operator Posts), the shape the route already takes. The caller is this service's
+  workload, `identity-control-workload`, through the client that reads the snapshot, the frontier and
+  progress (`TDD-identity-control-006`). No new secret.
+- **The repair arrives as before.** Organization Control publishes `projection.repair.reconciled`
+  for this consumer, and the delivery intake applies it (§Applying a Repair). The answer's findings
+  are only counted and logged: a run with findings logs at `WARN` with the count of `extra`.
+- **One replica per interval.** Every replica schedules it. The claim takes
+  `pg_advisory_xact_lock` and runs only when no run of this kind started within half an interval, so
+  replicas ticking at different phases send one report per interval, two at most, and never leave an
+  interval without one.
+- **The interval is the registration's.** `IDENTITY_ORGANIZATION_RECONCILE_INTERVAL` is the
+  `reconciliation_interval` this consumer's registration declares, because Organization Control alerts
+  on the age of `last_reconciled_at` at one and two of them [R6]. 15 minutes is this service's
+  Tenant context sweep interval, so the two halves of reconciliation (§Reconciliation (2.1.0)) run at
+  one cadence. It cannot be turned off: only the consumer can produce its report. It runs whenever
+  Organization Control is configured (`IDENTITY_ORGANIZATION_BASE_URL`).
+- **A refusal is retried, never fatal.** Until Organization Control admits a consumer on the route
+  for its own `consumer_id`, it answers this workload `403`. The run is recorded `unresolved`, the log
+  says so at `WARN`, and the next interval sends again.
+- **Its age.** `identity.tenant_projection.organization_reconcile_age` is the time since the newest run
+  Organization Control answered. An `unresolved` run does not count: "The key metric of a batch job
+  is the last time it succeeded" [R6].
+
+### A Restore's Version Bump (2.6.0)
+
+`ADR-ORG-003 §5.5`, amended 2026-10-20: before a restored Organization Control serves, "Every
+`tenant_security_version` and `grant_version` gains M = 10^9", each withdrawn Tenant and grant is
+published at its new version, and every consumer reconciles. "No consumer contract changes:
+identity-control and foundation-reference apply only a higher version and check no gap" [R7].
+
+- **Provider grants need nothing.** A grant is replaced by a greater `grant_version`, with no gap
+  check (`TDD-identity-control-006`), so a version 10^9 above the held one is applied, and a
+  pre-restore version delivered late is discarded.
+- **A Tenant is ordered by its security version first.** Until 2.6.0 a Tenant was ordered by
+  `tenant_version` alone, and the bump raises only `tenant_security_version`. After a restore
+  `tenant_version` restarts from the backup, so the republished withdrawal can carry a
+  `tenant_version` at or below the one held here, and would have been discarded as already applied:
+  the lost withdrawal the bump exists to repair would be lost again. So the pair
+  (`tenant_security_version`, `tenant_version`) orders a Tenant, compared in that order.
+- **Ordinary operation is unchanged.** In Organization Control every Tenant transition raises
+  `tenant_version`, and a security transition raises `tenant_security_version` as well
+  (`organization-control/internal/tenant/service.go`). So a newer event is greater by the pair exactly
+  when it is greater by `tenant_version`.
+- **After the bump the pair keeps ordering.** Each later transition has the bumped security version or
+  more, and a higher `tenant_version` than the restored row. A pre-restore event delivered late has a
+  security version below the bump, and is discarded. etcd names the property this keeps: "In order to
+  ensure the revisions are never decreasing after a restore, you can supply the --bump-revision
+  option" [R7].
+- **The snapshot orders by the same pair**, so a snapshot read after the restore carries the
+  withdrawal too.
+- **Every version is a `bigint`.** `ADR-ORG-003 §5.5`: "The versions are `bigint`, and no row changes
+  10^9 times within a backup window". A test reads the column types.
+
 ### Applying a Repair (2.2.0)
 
 `projection.repair.reconciled` carries `consumer_id`, `mark`, and findings. Each finding carries a
@@ -481,11 +559,11 @@ publishes `projection.repair.reconciled`, each finding carrying the authoritativ
 version, including a suspended or revoked one [R3].
 - **Applying it.** This service applies that state by the rule it applies every event: a higher
   version replaces a lower one.
-- **Who sends the report.** Organization's reconcile route admits a provider, because it reports
-  across consumers. So an operator posts this service's report, as foundation-reference's system
-  proof does.
+- **Who sends the report.** This service, on its own interval (2.6.0, §The Consumer Reconciles
+  Itself). Until 2.6.0 the route admitted a provider only, so an operator posted this service's report,
+  as foundation-reference's system proof does. That run stays the manual path.
 - **Where the report comes from.** `GET /v1/projections/tenant-context/report`, a provider route,
-  serves it.
+  serves it, and the scheduled run reads the same report.
 
 **Ordering a Tenant from a snapshot.** A snapshot row carries its Tenant's `tenant_version` since
 `TDD-organization-control-002` 1.8.0. A row therefore orders against a Tenant event exactly as two
@@ -513,6 +591,7 @@ events order. Without it, a snapshot could not safely say whether a Tenant was s
 | `IDENTITY_PROJECTION_LEASE` | `30s` | How long a claim holds a Tenant |
 | `IDENTITY_PROJECTION_MAX_ATTEMPTS` | `8` | Attempts before a Tenant is `unresolved` |
 | `IDENTITY_PROJECTION_RECONCILE_INTERVAL` | `15m` | Sweep cadence |
+| `IDENTITY_ORGANIZATION_RECONCILE_INTERVAL` | `15m` | How often this consumer sends its report to Organization Control's reconcile route; the `reconciliation_interval` its registration declares (2.6.0) |
 
 ## Testing Strategy
 
@@ -541,6 +620,25 @@ events order. Without it, a snapshot could not safely say whether a Tenant was s
   - an Organization the authority never created is disabled and emptied;
   - a repair names a revoked Membership, and its member is removed;
   - a repair for another consumer is acknowledged and applies nothing.
+- **The consumer reconciles itself (2.6.0),** against PostgreSQL and a stand-in route
+  (`TestTheConsumerReconcilesItselfOncePerInterval`):
+  - a run sends this consumer's report with its active Memberships and records `converged`;
+  - a second run within half an interval sends nothing;
+  - a run with findings records `drift` with their count, and counts the `extra` ones;
+  - a refused run records `unresolved`, returns the error for the log, and does not move the age;
+  - the client posts the report to `/v1/projections/reconcile` as the workload, reads the answer,
+    returns a `403` as `ErrRefused`, and never sends another consumer's report
+    (`TestReconcileSendsTheReportAsThisConsumer`).
+- **A restore's version bump (2.6.0),** against PostgreSQL:
+  - a withdrawal republished at the bumped security version with a lower `tenant_version` is applied,
+    the transitions after it too, and a pre-restore event delivered late is not
+    (`TestATenantSecurityVersionBumpedByTheRestoreIsApplied`);
+  - a snapshot row at the bumped security version is applied
+    (`TestASnapshotRowAtTheBumpedSecurityVersionIsApplied`);
+  - a grant version 10^9 above the held one is applied, then the next, and a pre-restore one is
+    discarded, by event and by snapshot (`internal/providerauthority`,
+    `TestAGrantVersionBumpedByTheRestoreIsApplied`, `TestASnapshotAtTheBumpedVersionReplacesTheHeldGrant`);
+  - every projected version column is a `bigint` (`TestEveryProjectedVersionIsABigint`).
 - **Against the real kernel.** The `deploy-dev` stack:
   - grants a Membership, and a token for its Tenant carries `tenant_id`;
   - revokes it, and the refresh is refused with `invalid_grant`;
@@ -590,6 +688,7 @@ events order. Without it, a snapshot could not safely say whether a Tenant was s
 | `unresolved` Tenant | any | a priority mark unresolved |
 | `extra_member` or `unknown_organization` finding | — | any |
 | Sweep age | one interval | two intervals |
+| The consumer's reconciliation age (2.6.0) | one `IDENTITY_ORGANIZATION_RECONCILE_INTERVAL` | two |
 
 Metrics, over OTLP as elsewhere in this service (2.5.0 builds the ones 2.0.0 named and had not):
 
@@ -603,6 +702,7 @@ Metrics, over OTLP as elsewhere in this service (2.5.0 builds the ones 2.0.0 nam
 | `identity.tenant_projection.unresolved` | gauge | `priority` | Tenants parked as `unresolved`; a priority one is critical |
 | `identity.tenant_projection.findings` | counter | `finding_class` | a finding recorded, by a sweep's convergence or by the sweep itself |
 | `identity.tenant_projection.sweep_age` | gauge, s | — | since the newest finished sweep run; absent before the first |
+| `identity.tenant_projection.organization_reconcile_age` | gauge, s | — | since the newest run of this consumer's reconciliation that Organization Control answered; absent before the first (2.6.0) |
 
 - **The delay is the service's share, as `deploy-dev` measures it.** `delivered_at` is the delivery's
   transaction, the one that answers `202`, so the histogram covers what this service owns of the
@@ -628,6 +728,8 @@ Runbooks required before production:
 | Governed by | ADR-IAM-006 — Tenant context in tokens, selected per sign-in |
 | Governed by | ADR-ORG-001 — Organization never writes to Keycloak; the projection is mediated here |
 | Governed by | ADR-IAM-001 §5.3 — Organizations as a bounded, non-authoritative projection |
+| Governed by | ADR-ORG-001 §5.7 — a consumer reconciles itself on an interval it declares (2.6.0) |
+| Governed by | ADR-ORG-003 §5.5 — a restore bumps Tenant security and grant versions by 10^9 (2.6.0) |
 | Conforms to | STD-IAM-002 1.6.0 §3.2, §3.5 step 8 |
 | Depends on | `TDD-identity-control-006` — delivery intake, inbox guard, snapshot access |
 | Depends on | `TDD-organization-control-002` — authority, events and the snapshot contract |
@@ -682,3 +784,20 @@ Runbooks required before production:
 - **[R5]** `SAD-001` §7.7, Revocation Classes and Enforcement: "The propagation budget is 60 seconds
   as the planning figure, against an operational target below 10 seconds", and "the production gate
   MUST include measured acceptance-to-enforcement evidence for every class in the table above."
+- **[R6]** `ADR-ORG-001` §5.7, amended 2026-10-20 (scnehaux-architecture #102): "The party that holds
+  the copy runs the comparison. Each consumer declares a `reconciliation_interval` when it is
+  registered, and calls `POST /v1/projections/reconcile` for its own `consumer_id` only, at that
+  interval"; "Organization Control alerts on the age of a consumer's `last_reconciled_at`: a warning
+  past one interval, critical past two"; "An operator's run stays the manual path." Its sources,
+  string-matched there on 2026-10-20: Kubernetes, _Controllers_, "Controllers that interact with
+  external state find their desired state from the API server, then communicate directly with an
+  external system to bring the current state closer in line"; Prometheus, _Instrumentation_, "The key
+  metric of a batch job is the last time it succeeded"; Prometheus, _Alerting_, "at least enough time
+  for 2 full runs of the batch job". The first Prometheus quote accessed again 2026-10-20.
+- **[R7]** `ADR-ORG-003` §5.5, amended 2026-10-20 (scnehaux-architecture #102): "Every
+  `tenant_security_version` and `grant_version` gains M = 10^9"; "The versions are `bigint`, and no
+  row changes 10^9 times within a backup window"; "No consumer contract changes: identity-control and
+  foundation-reference apply only a higher version and check no gap." Its source, string-matched there
+  on 2026-10-20: etcd, _Disaster recovery_ (v3.6), <https://etcd.io/docs/v3.6/op-guide/recovery/>,
+  "In order to ensure the revisions are never decreasing after a restore, you can supply the
+  --bump-revision option", accessed again 2026-10-20.

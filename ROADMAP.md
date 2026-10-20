@@ -780,6 +780,23 @@ slice:
      (identity-kernel #70); against a kernel without it the step warns, and `deploy-dev` is run by hand
      with `kernel_ref` naming that branch.
 
+13. ✅ **The consumer reconciles itself, and a restore's version bump is applied** (`TDD-identity-control-002`
+   2.6.0, `TDD-identity-control-006` 1.4.0; ADR-ORG-001 §5.7 and ADR-ORG-003 §5.5, amended 2026-10-20).
+   - Every `IDENTITY_ORGANIZATION_RECONCILE_INTERVAL` (15m) one replica sends this consumer's report to
+     Organization Control's `POST /v1/projections/reconcile` as its workload, and records the run in
+     `identity.reconcile_run` (`organization_reconcile`: `converged`, `drift`, `unresolved`), with the
+     gauge `identity.tenant_projection.organization_reconcile_age`. The repair arrives as before, as
+     `projection.repair.reconciled` (`internal/tenantcontext/selfreconcile.go`).
+   - **Waits on organization-control:** its reconcile route admits a provider only, so it answers this
+     workload `403`, logged at `WARN` each interval and retried; and its consumer registration does not
+     accept `reconciliation_interval` yet. Until both land, the runbook's operator run is the one that
+     reaches it.
+   - A Tenant is ordered by (`tenant_security_version`, `tenant_version`): the restore bumps only the
+     security version, and `tenant_version` restarts from the backup, so ordering by `tenant_version`
+     alone would discard the republished withdrawal. Ordinary operation orders exactly as before.
+     Grants already apply any greater version. Integration tests prove a 10^9 jump applied, the next
+     version after it, a late pre-restore one discarded, and every version column a `bigint`.
+
 ## Waiting on the Keycloak proof-of-concept
 
 Each item names the question that unblocks it. All of them are adapters, which is why
