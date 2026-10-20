@@ -83,6 +83,7 @@ existing SAD document. Root artifacts never link downward into this repository.
 | `internal/controldb/` | Roles, grants, and the privilege assertions |
 | `internal/config/` | Environment configuration, read once at startup |
 | `docs/designs/` | Technical Design Documents |
+| `api/` | `openapi.yaml`, the published HTTP contract (ADR-GLB-010 §5.1), and its lint configuration |
 
 Not built yet, and designed: the rest of the registration drift classes and the unmanaged-client
 branch (TDD-003), the Membership projection and session removal (TDD-002), and the rest of the
