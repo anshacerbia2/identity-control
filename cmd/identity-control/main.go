@@ -614,7 +614,7 @@ func run() error {
 		go scheduleNotificationDispatch(ctx, dispatcher, logger)
 	}
 	go scheduleTemporaryPasswordSweeps(ctx, firstCredentials, cfg.TemporaryPasswordSweepInterval, logger)
-	go scheduleSweeps(ctx, provisioner, registrar, workloads, reconciler, providers, cfg.RegistrationReconcileInterval, logger)
+	go scheduleSweeps(ctx, provisioner, registrar, workloads, reconciler, providers, pool, cfg.RegistrationReconcileInterval, logger)
 	if freshness != nil {
 		go freshness.Poll(ctx, projection, frontier, providerauthority.PollInterval, logger)
 	}
@@ -645,7 +645,8 @@ func run() error {
 // meant to look, and it stops blocking the next one after two intervals.
 func scheduleSweeps(ctx context.Context, provisioner *provisioning.Provisioner, registrar *registration.Service,
 	workloads *workload.Service,
-	reconciler *reconcile.Reconciler, providers *providerauthority.Decider, interval time.Duration, logger *slog.Logger) {
+	reconciler *reconcile.Reconciler, providers *providerauthority.Decider, keys httpapi.KeyStore, interval time.Duration,
+	logger *slog.Logger) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -698,6 +699,14 @@ func scheduleSweeps(ctx context.Context, provisioner *provisioning.Provisioner, 
 				}
 				logger.LogAttrs(ctx, level, message, attrs...)
 			}
+		}
+		// Completed Idempotency-Keys past the published window are purged (TDD-identity-control-003
+		// 1.39.0 §Key Retention, STD-GLB-001 1.7.0): 7 days, the owner's window.
+		if purged, err := httpapi.PurgeKeys(ctx, keys); err != nil {
+			logger.Error("expired idempotency keys could not be purged", slog.String("error", err.Error()))
+		} else if purged > 0 {
+			logger.Info("expired idempotency keys purged", slog.Int64("keys", purged),
+				slog.Duration("retention", httpapi.KeyRetention))
 		}
 		// Changes waiting for a provider's approval (TDD-identity-control-003 §Operational Notes):
 		// a warning past three days, an error past seven, so an approval backlog alerts.

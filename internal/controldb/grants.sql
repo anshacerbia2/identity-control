@@ -254,6 +254,14 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA platform TO identity_runtime;
 -- runtime. EXECUTE is granted to nobody else.
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA platform FROM PUBLIC;
 
+-- The one platform function the runtime runs: the purge of completed Idempotency-Keys past the
+-- window TDD-identity-control-003 §Key Retention publishes (foundation-platform v0.5.0,
+-- STD-GLB-001 1.7.0). It is SECURITY INVOKER, so it deletes with the runtime's own privileges, which
+-- on platform.idempotency_key are what the key ledger already uses: SELECT to replay, DELETE to
+-- release a refused claim. The function refuses a window under 24 hours and never deletes an
+-- uncompleted key.
+GRANT EXECUTE ON FUNCTION platform.purge_idempotency_keys(interval) TO identity_runtime;
+
 -- A table added by a future migration inherits these privileges. Without this, the next
 -- schema change ships a table the runtime cannot read, and the failure appears at
 -- request time rather than at deploy time.

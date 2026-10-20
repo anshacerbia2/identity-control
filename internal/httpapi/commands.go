@@ -26,6 +26,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/anshacerbia2/foundation-platform/db"
 	"github.com/anshacerbia2/foundation-platform/httpapi"
@@ -105,6 +106,27 @@ var keyOptional = map[string]string{
 		"the inbox guard, so a repeat is acknowledged and applied once (TDD-identity-control-006)",
 	"POST /v1/principals/{principal_id}/identifiers:match": "a read carried in a body: it answers whether " +
 		"the Principal holds the address, proven, and changes nothing (TDD-identity-control-008 1.7.0)",
+}
+
+// KeyRetention is how long a completed command's Idempotency-Key, and the answer recorded with it,
+// is kept: 7 days, the window the owner approved on 2026-10-21 and TDD-identity-control-003 §Key
+// Retention publishes, as STD-GLB-001 1.7.0 requires. The IETF draft: "The resource MAY require time
+// based idempotency keys to be able to purge or delete a key upon its expiry. The resource SHOULD
+// define such expiration policy and publish it in the documentation" (§2.3). Adyen: "Idempotency keys
+// are valid for a period of 7 to 14 days after first submission". A retry after it is a new command,
+// as Stripe says of its own pruning. An uncompleted key is never purged.
+const KeyRetention = 7 * 24 * time.Hour
+
+// PurgeKeys deletes the completed keys older than KeyRetention, every scope's, and reports how many.
+// The scheduled sweep calls it (cmd/identity-control).
+func PurgeKeys(ctx context.Context, store KeyStore) (int64, error) {
+	var purged int64
+	err := store.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		var err error
+		purged, err = idempotency.PurgeCompleted(ctx, tx, KeyRetention)
+		return err
+	})
+	return purged, err
 }
 
 // KeyStore opens the transaction a claim is made and completed in. The pool satisfies it.

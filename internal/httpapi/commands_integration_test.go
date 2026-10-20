@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/anshacerbia2/foundation-platform/db"
 	"github.com/anshacerbia2/foundation-platform/id"
@@ -66,5 +68,89 @@ func TestThePoolLedgerClaimsReleasesAndReplays(t *testing.T) {
 	}
 	if stored, err := ledger.take(ctx, empty); err != nil || stored == nil || stored.status != 204 {
 		t.Errorf("a retry of a 204 = %+v, %v", stored, err)
+	}
+}
+
+// The published window (TDD-identity-control-003 1.39.0 §Key Retention): a completed key older than 7
+// days is purged, a younger one and an uncompleted one of any age are kept, and the runtime role the
+// service runs as may do it.
+func TestCompletedKeysArePurgedAfterTheirWindow(t *testing.T) {
+	dsn := os.Getenv("TEST_DATABASE_URL")
+	if dsn == "" {
+		if os.Getenv("REQUIRE_INTEGRATION") != "" {
+			t.Fatal("REQUIRE_INTEGRATION is set and TEST_DATABASE_URL is empty")
+		}
+		t.Skip("TEST_DATABASE_URL is unset")
+	}
+	ctx := context.Background()
+	pool, err := db.Open(ctx, db.Config{Name: "key-purge-test", DSN: dsn, MaxConns: 2})
+	if err != nil {
+		t.Fatalf("open pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	scope := "route:purge-test"
+	if err := pool.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		if _, err := tx.Exec(ctx, `DELETE FROM platform.idempotency_key WHERE scope = $1`, scope); err != nil {
+			return err
+		}
+		for _, row := range []struct {
+			key, age  string
+			completed bool
+		}{{"old", "8 days", true}, {"young", "6 days", true}, {"old-uncompleted", "30 days", false}} {
+			completed := "NULL"
+			if row.completed {
+				completed = "now() - interval '" + row.age + "'"
+			}
+			if _, err := tx.Exec(ctx, `INSERT INTO platform.idempotency_key
+			    (scope, key, request_digest, claimed_at, completed_at, response_status, response_body)
+			    VALUES ($1, $2, 'd', now() - interval '`+row.age+`', `+completed+`, 200, 'null')`, scope, row.key); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := PurgeKeys(ctx, pool); err != nil {
+		t.Fatalf("PurgeKeys: %v", err)
+	}
+	var left []string
+	if err := pool.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT key FROM platform.idempotency_key WHERE scope = $1 ORDER BY key`, scope)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var key string
+			if err := rows.Scan(&key); err != nil {
+				return err
+			}
+			left = append(left, key)
+		}
+		return rows.Err()
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(left, ",") != "old-uncompleted,young" {
+		t.Errorf("keys left %v; want the young and the uncompleted kept", left)
+	}
+	if KeyRetention != 7*24*time.Hour {
+		t.Errorf("the published window is 7 days, not %s", KeyRetention)
+	}
+	var executes, otherFunctions bool
+	if err := pool.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		if err := tx.QueryRow(ctx, `SELECT has_function_privilege('identity_runtime',
+		    'platform.purge_idempotency_keys(interval)', 'EXECUTE')`).Scan(&executes); err != nil {
+			return err
+		}
+		return tx.QueryRow(ctx, `SELECT bool_or(has_function_privilege('identity_runtime', p.oid, 'EXECUTE'))
+		    FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+		    WHERE n.nspname = 'platform' AND p.proname <> 'purge_idempotency_keys'`).Scan(&otherFunctions)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !executes || otherFunctions {
+		t.Errorf("the runtime executes the purge %v and another platform function %v; want only the purge", executes, otherFunctions)
 	}
 }
