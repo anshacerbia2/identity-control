@@ -34,6 +34,10 @@ const (
 	// ClassLogout is the client's front-channel logout setting and back-channel logout URL
 	// (ADR-IAM-009 §5.1, §5.2). It repairs: a difference is a notification that would not arrive.
 	ClassLogout = "logout"
+	// ClassConsent is the client's "consent required" setting, which the declared audience class
+	// derives (STD-IAM-002 1.9.0 §3.6, ADR-IAM-003 §5.11). It repairs: the class decides it, so a
+	// difference is a setting no one chose.
+	ClassConsent = "consent"
 	// ClassAudienceProfile is the audience profile scope among the client's default scopes: its claim
 	// surface (STD-IAM-002 §3.2.1). It blocks (ADR-IAM-001 §5.12 rule 3, TDD-identity-control-003
 	// 1.30.0): a difference means the declaration names the wrong class or form, and converging it
@@ -66,7 +70,8 @@ func heldProfiles(scopes ScopeSets) []string {
 }
 
 // convergeable are the repairable classes an adoption may converge when the request names them.
-var convergeable = []string{ClassTokenLifespan, ClassAudienceScope, ClassEnabled, ClassTokenFormat, ClassLogout}
+var convergeable = []string{ClassTokenLifespan, ClassAudienceScope, ClassEnabled, ClassTokenFormat, ClassLogout,
+	ClassConsent}
 
 var (
 	// ErrNotAdoptable is an adoption the plan refuses: a blocking class differs, or a repairable one
@@ -140,7 +145,7 @@ func (s *Service) Adopt(ctx context.Context, req AdoptRequest) (AdoptResult, err
 	}
 	for _, class := range req.Converge {
 		if !slices.Contains(convergeable, class) {
-			return AdoptResult{}, invalid("converge names only token_lifespan, audience_scope, enabled, token_format or logout")
+			return AdoptResult{}, invalid("converge names only token_lifespan, audience_scope, enabled, token_format, logout or consent")
 		}
 	}
 	req.Request = req.Request.normalized()
@@ -355,6 +360,10 @@ func planAdoption(req AdoptRequest, client keycloak.Client, scopes ScopeSets, li
 				Differs:  !client.RFC9068 || client.ClientIDClaim != req.ClientKey},
 			{FieldClass: ClassLogout, Policy: PolicyRepair, Desired: keycloak.DesiredLogout(req.BackChannelLogoutURI),
 				Observed: client.Logout, Differs: !client.Logout.Matches(req.BackChannelLogoutURI)},
+			{FieldClass: ClassConsent, Policy: PolicyRepair,
+				Desired:  map[string]bool{"consent_required": ConsentRequired(req.Profile, req.AudienceClass)},
+				Observed: map[string]bool{"consent_required": client.ConsentRequired},
+				Differs:  client.ConsentRequired != ConsentRequired(req.Profile, req.AudienceClass)},
 			{FieldClass: ClassEnabled, Policy: PolicyRepair, Desired: true, Observed: client.Enabled, Differs: !client.Enabled},
 			{FieldClass: ClassAudienceProfile, Policy: PolicyBlock, Desired: desiredProfile, Observed: observedProfile,
 				Differs: !slices.Equal(desiredProfile, observedProfile)},
@@ -416,6 +425,11 @@ func (s *Service) converge(ctx context.Context, plan Plan, client keycloak.Clien
 			target := plan.backChannelLogoutURI
 			_, err = call(ctx, s.cfg.CallTimeout, func(ctx context.Context) (struct{}, error) {
 				return struct{}{}, s.kernel.PatchClient(ctx, s.cfg.Realm, client.ID, keycloak.ClientPatch{BackChannelLogoutURL: &target})
+			})
+		case ClassConsent:
+			wanted := ConsentRequired(plan.profile, plan.audienceClass)
+			_, err = call(ctx, s.cfg.CallTimeout, func(ctx context.Context) (struct{}, error) {
+				return struct{}{}, s.kernel.PatchClient(ctx, s.cfg.Realm, client.ID, keycloak.ClientPatch{ConsentRequired: &wanted})
 			})
 		case ClassEnabled:
 			enabled := true

@@ -61,6 +61,11 @@ const (
 	// "session required", as its registration declares them (ADR-IAM-009, TDD-identity-control-003
 	// 1.37.0).
 	Logout FieldClass = "logout"
+
+	// Consent is a client's "consent required" setting, which its audience class derives: on for an
+	// external client a person signs in to, off for every other (STD-IAM-002 1.9.0 §3.6, ADR-IAM-003
+	// §5.11, TDD-identity-control-003 1.39.0).
+	Consent FieldClass = "consent"
 )
 
 // FindingClass is what the sweep did about a divergence.
@@ -233,6 +238,11 @@ func (r registration) comparesRedirects() bool {
 	return r.profile == "confidential" || r.profile == "public"
 }
 
+// consentRequired is whether the registration's client asks a person's consent at sign-in.
+func (r registration) consentRequired() bool {
+	return registrations.ConsentRequired(r.profile, r.audienceClass)
+}
+
 // comparesLifespan reports whether the profile is issued tokens. A resource is only an audience.
 func (r registration) comparesLifespan() bool { return r.profile != "resource" }
 
@@ -377,7 +387,8 @@ func (r *Reconciler) Sweep(ctx context.Context) (Run, error) {
 			diverged = diverged || differs
 			continue
 		}
-		for _, field := range []FieldClass{TokenLifespan, RedirectURIs, ClientKeys, AudienceScope, TokenFormat, Audience, Logout} {
+		for _, field := range []FieldClass{TokenLifespan, RedirectURIs, ClientKeys, AudienceScope, TokenFormat, Audience, Logout,
+			Consent} {
 			wrote, differs, err := r.reconcileField(ctx, run.ID, reg, client, scopes[reg.client], field, open, exceptions,
 				latest, attribution)
 			if err != nil {
@@ -521,6 +532,16 @@ func (r *Reconciler) reconcileField(
 		desired, observed = keycloak.DesiredLogout(reg.backChannelLogoutURI), client.Logout
 		target := reg.backChannelLogoutURI
 		repair.BackChannelLogoutURL = &target
+	case Consent:
+		// Consent turned off on an external client lets it skip the consent the class requires, and
+		// turned on for the platform's own clients adds a prompt nothing decided. Neither is a
+		// takeover's shape, so it is repaired under the attribution rule, as a lifespan is. The class
+		// never changes after registration, so no change in flight can be mistaken for drift.
+		applies = true
+		wanted := reg.consentRequired()
+		differs = client.ConsentRequired != wanted
+		desired, observed = map[string]bool{"consent_required": wanted}, map[string]bool{"consent_required": client.ConsentRequired}
+		repair.ConsentRequired = &wanted
 	}
 	if !applies {
 		return false, false, nil
@@ -686,6 +707,8 @@ func (r *Reconciler) apply(ctx context.Context, reg registration, field FieldCla
 		return sameList(after.Audience, reg.audience), nil
 	case Logout:
 		return after.Logout.Matches(reg.backChannelLogoutURI), nil
+	case Consent:
+		return after.ConsentRequired == reg.consentRequired(), nil
 	}
 	return false, nil
 }

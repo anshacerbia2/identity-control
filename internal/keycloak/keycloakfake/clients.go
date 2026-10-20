@@ -239,6 +239,9 @@ func (r *Registry) PatchClient(ctx context.Context, _ keycloak.Realm, client key
 	if patch.TokenFormat != nil {
 		stored.RFC9068, stored.ClientIDClaim = true, *patch.TokenFormat
 	}
+	if patch.ConsentRequired != nil {
+		stored.ConsentRequired = *patch.ConsentRequired
+	}
 	if patch.Audience != nil {
 		spec := r.specs[client]
 		spec.Audience = append([]string{}, *patch.Audience...)
@@ -353,7 +356,8 @@ func (r *Registry) createClient(ctx context.Context, _ keycloak.Realm, spec keyc
 	}
 	client := keycloak.ClientUUID(minted.String())
 	created := keycloak.Client{ID: client, ClientID: spec.ClientID, Enabled: true,
-		RedirectURIs: append([]string(nil), spec.RedirectURIs...), AccessTokenLifespan: spec.AccessTokenLifespan}
+		RedirectURIs: append([]string(nil), spec.RedirectURIs...), AccessTokenLifespan: spec.AccessTokenLifespan,
+		ConsentRequired: spec.ConsentRequired}
 	if spec.Confidential || spec.Workload {
 		created.Credential = keycloak.ClientCredential{Authenticator: "client-jwt", HeldJWKS: true,
 			Keys: append([]keycloak.JWK(nil), spec.Keys...)}

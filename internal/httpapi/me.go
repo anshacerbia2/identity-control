@@ -39,6 +39,45 @@ type Me struct {
 	assurance AssurancePolicy
 	// addresses serves the person's own notification addresses; nil, their routes are not mounted.
 	addresses AddressService
+	// consents serves the person's own consents (TDD-identity-control-005 2.13.0, slice 3b); nil, their
+	// routes are not mounted.
+	consents ConsentService
+}
+
+// ConsentService lists the person's own consents. *securitystate.Service satisfies it; a withdrawal is
+// a security command, submitted as the other self commands are.
+type ConsentService interface {
+	MyConsents(ctx context.Context, principal id.UUID) ([]securitystate.MyConsent, error)
+}
+
+// UseConsents mounts GET /v1/me/consents and POST /v1/me/consents/{security_ref}:withdraw.
+func (h *Me) UseConsents(consents ConsentService) { h.consents = consents }
+
+// Consents handles GET /v1/me/consents: each client the person consented to, with the scopes granted
+// and the access token lifetime its registration bounds, which a withdrawal does not cut short
+// (TDD-identity-control-005 §Session and Consent Semantics).
+func (h *Me) Consents(w http.ResponseWriter, r *http.Request) {
+	principal, ok := h.caller(w, r)
+	if !ok {
+		return
+	}
+	consents, err := h.consents.MyConsents(r.Context(), principal)
+	if err != nil {
+		writeMeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"consents": consents})
+}
+
+// ConsentAction handles POST /v1/me/consents/{security_ref}:withdraw. Withdrawing a consent narrows
+// what a client may do, so it asks for no step-up, as ending a session does not.
+func (h *Me) ConsentAction(w http.ResponseWriter, r *http.Request) {
+	ref, action, _ := strings.Cut(r.PathValue("consent_action"), ":")
+	if action != "withdraw" || ref == "" {
+		httpapi.Problem(w, r, httpapi.NotFound, "No such consent action")
+		return
+	}
+	h.command(w, r, securitystate.TypeConsentWithdraw, ref, false)
 }
 
 // NewMe constructs the handler. stepUpMaxAge is IDENTITY_STEP_UP_MAX_AGE.

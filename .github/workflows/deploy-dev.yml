@@ -209,12 +209,12 @@ jobs:
 
       - name: perform the bootstrap ceremony
         working-directory: deploy/dev
-        run: bash ./bootstrap.sh "ci@scnehaux.local" "deploy-dev workflow"
+        run: bash ./bootstrap.sh "ci@scnehaux.local" "ci-witness@scnehaux.local" "deploy-dev workflow"
 
       - name: the ceremony succeeds only once
         working-directory: deploy/dev
         run: |
-          if docker compose run --rm bootstrap -operator "ci@scnehaux.local" -reason "again" \
+          if docker compose run --rm bootstrap -operator "ci@scnehaux.local" -witness "ci-witness@scnehaux.local" -reason "again" \
                -username second-operator -email second@scnehaux.local; then
             echo "::error::a second bootstrap ceremony succeeded; it must be refused"
             exit 1

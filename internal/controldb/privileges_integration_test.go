@@ -657,3 +657,81 @@ func TestTemporaryPasswordRecordsAreInsertOnly(t *testing.T) {
 		}
 	}
 }
+
+// The bootstrap ceremony's reviews and an orphan's adoption are insert-only (STD-IAM-001 2.9.0 §3.10,
+// ADR-IAM-001 §5.11 as amended 2026-10-20): the runtime records and reads them, and rewrites or
+// removes neither.
+func TestTheCeremonyReviewAndTheAdoptionAreInsertOnly(t *testing.T) {
+	pool, ctx := openPool(t)
+	for _, table := range []string{"identity.bootstrap_ceremony_review", "identity.principal_adoption"} {
+		for _, privilege := range []string{"SELECT", "INSERT"} {
+			if !queryBool(t, pool, ctx, `SELECT has_table_privilege($1, $2, $3)`, runtimeRole, table, privilege) {
+				t.Errorf("%s lacks %s on %s", runtimeRole, privilege, table)
+			}
+		}
+		for _, privilege := range []string{"UPDATE", "DELETE", "TRUNCATE"} {
+			if queryBool(t, pool, ctx, `SELECT has_table_privilege($1, $2, $3)`, runtimeRole, table, privilege) {
+				t.Errorf("%s holds %s on %s; the record could be rewritten or removed", runtimeRole, privilege, table)
+			}
+		}
+	}
+}
+
+// auditTables are this service's audit records in the sense of STD-GLB-007 1.1.0 §Data Retention:
+// "Every audit record, privileged access included: a service's record of privileged access, its
+// reviews and its emergency uses". Each is a decision, an access or an outcome recorded with who
+// made it and why (TDD-identity-control-001 §Audit Retention).
+var auditTables = []string{
+	"identity.privileged_access",
+	"identity.provider_emergency_use",
+	"identity.kernel_event",
+	"identity.bootstrap_ceremony",
+	"identity.bootstrap_ceremony_review",
+	"identity.ceremony_grant_retirement",
+	"identity.principal_relink",
+	"identity.principal_release",
+	"identity.principal_adoption",
+	"identity.registration_adoption",
+	"identity.registration_state_change",
+	"identity.registration_change",
+	"identity.registration_request",
+	"identity.registration_owner",
+	"identity.application_developer",
+	"identity.drift_exception",
+	"identity.workload_owner_change",
+	"identity.workload_review",
+	"identity.security_operation",
+	"identity.security_operation_attempt",
+	"identity.temporary_password_issuance",
+	"identity.temporary_password_outcome",
+	"identity.security_notification",
+}
+
+// TestNoAuditRecordIsPurgedBeforeSevenYears is STD-GLB-007 1.1.0 §Compliance item 4 for this service:
+// audit logs are "Retained in immutable storage for `7 years`", and a record younger than 7 years is
+// never purged. This service purges none at all, so the runtime it serves with holds no DELETE and no
+// TRUNCATE on any audit table, asserted against the catalog. No migration and no production source
+// deletes from one either: TestNoSourceDeletesAnAuditRecord reads them. It holds no Tenant's data
+// either, so the Tenant decommissioning purge has nothing here to delete.
+func TestNoAuditRecordIsPurgedBeforeSevenYears(t *testing.T) {
+	pool, ctx := openPool(t)
+	for _, table := range auditTables {
+		if !queryBool(t, pool, ctx, `SELECT to_regclass($1) IS NOT NULL`, table) {
+			t.Errorf("%s does not exist; the audit table list is stale", table)
+			continue
+		}
+		for _, privilege := range []string{"DELETE", "TRUNCATE"} {
+			if queryBool(t, pool, ctx, `SELECT has_table_privilege($1, $2, $3)`, runtimeRole, table, privilege) {
+				t.Errorf("%s holds %s on %s; an audit record could be purged before its 7 years", runtimeRole, privilege, table)
+			}
+		}
+	}
+	// A rule or trigger could delete on the runtime's behalf.
+	if n := queryInt(t, pool, ctx, `SELECT count(*) FROM pg_rules WHERE schemaname = 'identity'`); n != 0 {
+		t.Errorf("the identity schema holds %d rewrite rules; none is expected", n)
+	}
+	if n := queryInt(t, pool, ctx, `SELECT count(*) FROM pg_trigger tg JOIN pg_class c ON c.oid = tg.tgrelid
+		JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'identity' AND NOT tg.tgisinternal`); n != 0 {
+		t.Errorf("the identity schema holds %d triggers; none is expected", n)
+	}
+}

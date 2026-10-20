@@ -833,3 +833,59 @@ func TestTheAppliedHookNamesTheRemovedCredential(t *testing.T) {
 		t.Errorf("the hook saw %+v; want %+v", seen, want)
 	}
 }
+
+type lifetimes map[string]int
+
+func (l lifetimes) AccessTokenLifetime(_ context.Context, clientKey string) (int, bool, error) {
+	seconds, ok := l[clientKey]
+	return seconds, ok, nil
+}
+
+// A person lists their consents, each with the lifetime its client's registration bounds, and
+// withdraws one (TDD-identity-control-005 2.13.0, slice 3b): the kernel no longer lists it, the other
+// is kept, a repeat is answered from its key, and the command is evidenced as the person's own.
+func TestAPersonWithdrawsAConsent(t *testing.T) {
+	h := newHarness(t)
+	h.service.UseLifetimes(lifetimes{"partner-app": 900})
+	person, user := h.principal("human", "active")
+	h.kernel.SetConsents(user, []keycloak.Consent{
+		{ClientID: "partner-app", Scopes: []string{"scnehaux-external"}, Granted: time.Now().UTC()},
+		{ClientID: "unregistered-app", Scopes: []string{"openid"}, Granted: time.Now().UTC()},
+	})
+	ctx := context.Background()
+
+	consents, err := h.service.MyConsents(ctx, person)
+	if err != nil || len(consents) != 2 {
+		t.Fatalf("MyConsents: %+v, %v", consents, err)
+	}
+	if consents[0].Client != "partner-app" || consents[0].AccessTokenLifetime == nil || *consents[0].AccessTokenLifetime != 900 ||
+		consents[1].AccessTokenLifetime != nil {
+		t.Errorf("consents %+v", consents)
+	}
+	command := h.selfCommand(TypeConsentWithdraw, person, consents[0].SecurityRef)
+	op, err := h.service.Submit(ctx, command)
+	if err != nil || op.State != StateApplied {
+		t.Fatalf("withdrawing: %+v, %v", op, err)
+	}
+	left, _ := h.kernel.UserConsents(ctx, testRealm, user)
+	if len(left) != 1 || left[0].ClientID != "unregistered-app" {
+		t.Errorf("consents left %+v", left)
+	}
+	again, err := h.service.Submit(ctx, command)
+	if err != nil || again.OperationID != op.OperationID || h.kernel.Calls.RevokeConsent != 1 {
+		t.Errorf("a repeat: %+v, %v, %d withdrawals", again, err, h.kernel.Calls.RevokeConsent)
+	}
+	if records := h.selfEvidence(person); len(records) != 1 ||
+		records[0] != (record{TypeConsentWithdraw, "applied", "<null>", "POST /v1/me/consents/{security_ref}:withdraw"}) {
+		t.Errorf("evidence %+v", records)
+	}
+	// A consent's handle is the person's and the withdrawal's only: it opens for no session command.
+	if _, err := h.service.Submit(ctx, h.selfCommand(TypeSessionTerminate, person, consents[1].SecurityRef)); !errors.Is(err, ErrNotFound) {
+		t.Errorf("a consent handle on a session command: %v, want ErrNotFound", err)
+	}
+	// A consent already gone counts as withdrawn once the kernel's listing agrees.
+	gone, err := h.service.Submit(ctx, h.selfCommand(TypeConsentWithdraw, person, consents[0].SecurityRef))
+	if err != nil || gone.State != StateApplied {
+		t.Errorf("withdrawing a consent already gone: %+v, %v", gone, err)
+	}
+}

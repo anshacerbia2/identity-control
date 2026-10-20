@@ -266,6 +266,9 @@ func (r *Reconciler) Resolve(ctx context.Context, resolution Resolution) error {
 		case Logout:
 			target := t.reg.backChannelLogoutURI
 			patch.BackChannelLogoutURL = &target
+		case Consent:
+			wanted := t.reg.consentRequired()
+			patch.ConsentRequired = &wanted
 		}
 		converged, err := r.apply(ctx, t.reg, t.field, patch)
 		if err != nil {

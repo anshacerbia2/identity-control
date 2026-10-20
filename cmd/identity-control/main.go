@@ -185,6 +185,10 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("registration service: %w", err)
 	}
+	// :adopt's provenance check reads the kernel's admin events with the registration credential, which
+	// holds view-events, and names this service's Principal credential as the creator it requires
+	// (ADR-IAM-001 §5.11 check 4, TDD-identity-control-001 1.23.0).
+	provisioner.UseCreationJournal(registry, kernel.ServiceAccountUserID)
 
 	// The service's own Admin API clients are exempt from the unmanaged rule beside the kernel's
 	// built-in ones: a controller's credentials are bootstrapped outside what it controls
@@ -294,6 +298,10 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("self-service handler: %w", err)
 	}
+	// A person's own consents (TDD-identity-control-005 2.13.0, slice 3b), each with the access token
+	// lifetime its client's registration bounds.
+	securityCommands.UseLifetimes(registrar)
+	meHandler.UseConsents(securityCommands)
 	// A person's own notification addresses, each proven with a code sealed under the same key ring
 	// as every other handle, for its lifetime (TDD-identity-control-008 1.2.0).
 	addresses, err := securitynotify.NewAddresses(pool, refs, cfg.SecurityRefTTL)
@@ -366,6 +374,7 @@ func run() error {
 		Investigation: investigationHandler,
 		Security:      securityHandler,
 		Me:            meHandler,
+		Ceremony:      provisioner,
 
 		TemporaryPasswords: temporaryPasswords,
 		Assurance:          httpapi.AssurancePolicy{Report: cfg.ReportAssurance, Logger: logger},

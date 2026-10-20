@@ -288,6 +288,112 @@ table "principal_release" {
   }
 }
 
+table "principal_adoption" {
+  schema  = schema.identity
+  comment = "Each re-adoption of an orphan's identifier after a restore to an older point. Insert-only. ADR-IAM-001 §5.11, TDD-identity-control-001 1.23.0."
+
+  column "adoption_id" {
+    null = false
+    type = uuid
+  }
+
+  column "principal_id" {
+    null = false
+    type = uuid
+  }
+
+  column "finding_id" {
+    null    = false
+    type    = uuid
+    comment = "The open orphan finding that named the identifier."
+  }
+
+  column "realm" {
+    null = false
+    type = text
+  }
+
+  column "keycloak_user_id" {
+    null = false
+    type = text
+  }
+
+  // Check 3: the identifier's UUIDv7 time, and the newest mapping the restored database held, so
+  // the record shows why the identifier cannot have been in the backup.
+  column "identifier_time" {
+    null = false
+    type = timestamptz
+  }
+
+  column "newest_mapping_at" {
+    null = true
+    type = timestamptz
+  }
+
+  // Check 4: the kernel admin event that recorded the user's creation by this service's own Admin
+  // API client.
+  column "creation_event_id" {
+    null = false
+    type = text
+  }
+
+  column "creation_event_at" {
+    null = false
+    type = timestamptz
+  }
+
+  column "adopted_by" {
+    null = false
+    type = uuid
+  }
+
+  column "reason" {
+    null = false
+    type = text
+  }
+
+  column "adopted_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+
+  primary_key {
+    columns = [column.adoption_id]
+  }
+
+  foreign_key "principal_adoption_principal_id_fkey" {
+    columns     = [column.principal_id]
+    ref_columns = [table.principal_mapping.column.principal_id]
+    on_update   = NO_ACTION
+    on_delete   = NO_ACTION
+  }
+
+  foreign_key "principal_adoption_finding_id_fkey" {
+    columns     = [column.finding_id]
+    ref_columns = [table.principal_finding.column.finding_id]
+    on_update   = NO_ACTION
+    on_delete   = NO_ACTION
+  }
+
+  index "principal_adoption_finding_key" {
+    unique  = true
+    columns = [column.finding_id]
+  }
+
+  check "principal_adoption_reason_named" {
+    expr = "btrim(reason) <> '' AND btrim(creation_event_id) <> ''"
+  }
+
+  check "principal_adoption_newer_check" {
+    expr = "newest_mapping_at IS NULL OR identifier_time > newest_mapping_at"
+  }
+
+  check "principal_adoption_not_self" {
+    expr = "adopted_by <> principal_id"
+  }
+}
+
 // A Principal whose Keycloak user no longer exists. The sweep records it and never relinks it: a
 // user deleted on purpose must not come back by itself.
 table "principal_finding" {
@@ -385,7 +491,7 @@ table "principal_finding" {
   }
 
   check "principal_finding_resolution_check" {
-    expr = "(resolved_at IS NULL) = (resolution IS NULL) AND (resolution IS NULL OR resolution IN ('relinked', 'user_present', 'user_absent'))"
+    expr = "(resolved_at IS NULL) = (resolution IS NULL) AND (resolution IS NULL OR resolution IN ('relinked', 'user_present', 'user_absent', 'adopted'))"
   }
 
   check "principal_finding_subject_check" {
@@ -448,8 +554,26 @@ table "bootstrap_ceremony" {
     comment = "The ceremony's Principal: its local emergency grant until ceremony_grant_retirement. TDD-identity-control-006."
   }
 
+  // The second person (STD-IAM-001 2.9.0 §3.10, ADR-IAM-001 §5.11 requirement 3 as amended
+  // 2026-10-20): an operator and a witness run the ceremony, never the same person, and both are on
+  // the insert-only record. A row claimed before the column existed reads "not recorded", written by
+  // the migration that added it, so the column holds a value on every row and the check holds on
+  // every row a ceremony writes.
+  column "witness" {
+    null    = false
+    type    = text
+    comment = "The second named person who witnessed the ceremony. Never the operator. STD-IAM-001 §3.10."
+  }
+
   primary_key {
     columns = [column.id]
+  }
+
+  // The key a review names, so the database itself refuses a review by the operator or the witness:
+  // the review row carries both, and this key holds them to the ceremony's.
+  index "bootstrap_ceremony_review_key" {
+    unique  = true
+    columns = [column.id, column.operator, column.witness, column.principal_id]
   }
 
   check "bootstrap_ceremony_single_row" {
@@ -458,6 +582,98 @@ table "bootstrap_ceremony" {
 
   check "bootstrap_ceremony_operator_named" {
     expr = "btrim(operator) <> '' AND btrim(reason) <> ''"
+  }
+
+  check "bootstrap_ceremony_witness_check" {
+    expr = "btrim(witness) <> '' AND lower(btrim(witness)) <> lower(btrim(operator))"
+  }
+}
+
+table "bootstrap_ceremony_review" {
+  schema  = schema.identity
+  comment = "Each independent review of the bootstrap ceremony's record. Insert-only. STD-IAM-001 §3.10, ADR-IAM-001 §5.11."
+
+  column "review_id" {
+    null = false
+    type = uuid
+  }
+
+  column "ceremony_id" {
+    null = false
+    type = integer
+  }
+
+  // The ceremony's operator, witness and Principal, copied from its row and held to it by the
+  // foreign key below, so the checks refuse a reviewer who is one of them.
+  column "operator" {
+    null = false
+    type = text
+  }
+
+  column "witness" {
+    null = false
+    type = text
+  }
+
+  column "ceremony_principal_id" {
+    null = false
+    type = uuid
+  }
+
+  column "reviewer" {
+    null    = false
+    type    = text
+    comment = "The reviewer's name, a member of Security or of the Architecture Authority."
+  }
+
+  column "reviewer_principal_id" {
+    null    = false
+    type    = uuid
+    comment = "The Principal whose token recorded the review."
+  }
+
+  column "outcome" {
+    null = false
+    type = text
+  }
+
+  column "statement" {
+    null = false
+    type = text
+  }
+
+  column "correlation_id" {
+    null = false
+    type = text
+  }
+
+  column "reviewed_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+
+  primary_key {
+    columns = [column.review_id]
+  }
+
+  foreign_key "bootstrap_ceremony_review_ceremony_fkey" {
+    columns     = [column.ceremony_id, column.operator, column.witness, column.ceremony_principal_id]
+    ref_columns = [table.bootstrap_ceremony.column.id, table.bootstrap_ceremony.column.operator, table.bootstrap_ceremony.column.witness, table.bootstrap_ceremony.column.principal_id]
+    on_update   = NO_ACTION
+    on_delete   = NO_ACTION
+  }
+
+  check "bootstrap_ceremony_review_independent" {
+    expr = "lower(btrim(reviewer)) <> lower(btrim(operator)) AND lower(btrim(reviewer)) <> lower(btrim(witness)) AND reviewer_principal_id <> ceremony_principal_id"
+  }
+
+  check "bootstrap_ceremony_review_named" {
+    expr = "btrim(reviewer) <> '' AND btrim(statement) <> '' AND btrim(correlation_id) <> ''"
+  }
+
+  check "bootstrap_ceremony_review_outcome_check" {
+    expr = "outcome IN ('satisfactory', 'findings')"
   }
 }
 
@@ -839,7 +1055,7 @@ table "registration_finding" {
   }
 
   check "registration_finding_field_check" {
-    expr = "field_class IS NULL OR field_class IN ('redirect_uris', 'token_lifespan', 'audience_scope', 'signing_algorithm', 'profile', 'client_keys', 'suspension', 'token_format', 'audience', 'logout')"
+    expr = "field_class IS NULL OR field_class IN ('redirect_uris', 'token_lifespan', 'audience_scope', 'signing_algorithm', 'profile', 'client_keys', 'suspension', 'token_format', 'audience', 'logout', 'consent')"
   }
 
   check "registration_finding_class_check" {
@@ -2409,7 +2625,7 @@ table "security_operation" {
     expr = "state IN ('pending', 'retrying', 'applied', 'refused', 'unresolved')"
   }
   check "security_operation_type_check" {
-    expr = "operation_type IN ('suspend', 'restore', 'sessions.terminate-all', 'authenticator.revoke', 'session.terminate', 'authenticator.remove')"
+    expr = "operation_type IN ('suspend', 'restore', 'sessions.terminate-all', 'authenticator.revoke', 'session.terminate', 'authenticator.remove', 'consent.withdraw')"
   }
 }
 

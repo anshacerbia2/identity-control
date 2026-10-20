@@ -110,6 +110,7 @@ func TestTheDecisionReadsGrantsAndFreshness(t *testing.T) {
 // single-row and shared with whatever else ran against this database.
 func keepCeremonyRows(t *testing.T, p *db.Pool) {
 	t.Helper()
+	ceremonyLock(t, p)
 	ctx := context.Background()
 	var (
 		ceremony   []any
@@ -117,20 +118,20 @@ func keepCeremonyRows(t *testing.T, p *db.Pool) {
 		found      [2]bool
 	)
 	if err := p.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT operator, reason, idempotency_key, requested_at, principal_id::text
+		rows, err := tx.Query(ctx, `SELECT operator, reason, idempotency_key, requested_at, principal_id::text, witness
 			FROM identity.bootstrap_ceremony WHERE id = 1`)
 		if err != nil {
 			return err
 		}
 		if rows.Next() {
-			var operator, reason, key string
+			var operator, reason, key, witness string
 			var requested time.Time
 			var principal *string
-			if err := rows.Scan(&operator, &reason, &key, &requested, &principal); err != nil {
+			if err := rows.Scan(&operator, &reason, &key, &requested, &principal, &witness); err != nil {
 				rows.Close()
 				return err
 			}
-			ceremony, found[0] = []any{operator, reason, key, requested, principal}, true
+			ceremony, found[0] = []any{operator, reason, key, requested, principal, witness}, true
 		}
 		rows.Close()
 		rows, err = tx.Query(ctx, `SELECT retired_at, by_grant_id::text FROM identity.ceremony_grant_retirement WHERE id = 1`)
@@ -154,6 +155,7 @@ func keepCeremonyRows(t *testing.T, p *db.Pool) {
 		return p.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
 			for _, statement := range []string{
 				`DELETE FROM identity.ceremony_grant_retirement`,
+				`DELETE FROM identity.bootstrap_ceremony_review`,
 				`DELETE FROM identity.bootstrap_ceremony`,
 			} {
 				if _, err := tx.Exec(ctx, statement); err != nil {
@@ -171,8 +173,8 @@ func keepCeremonyRows(t *testing.T, p *db.Pool) {
 		_ = p.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
 			if found[0] {
 				if _, err := tx.Exec(ctx, `INSERT INTO identity.bootstrap_ceremony
-					(id, operator, reason, idempotency_key, requested_at, principal_id)
-					VALUES (1, $1, $2, $3, $4, $5::uuid)`, ceremony...); err != nil {
+					(id, operator, reason, idempotency_key, requested_at, principal_id, witness)
+					VALUES (1, $1, $2, $3, $4, $5::uuid, $6)`, ceremony...); err != nil {
 					return err
 				}
 			}
@@ -190,8 +192,8 @@ func keepCeremonyRows(t *testing.T, p *db.Pool) {
 func recordCeremony(t *testing.T, p *db.Pool, principal id.UUID) {
 	t.Helper()
 	if err := p.InTx(context.Background(), func(ctx context.Context, tx db.Tx) error {
-		_, err := tx.Exec(ctx, `INSERT INTO identity.bootstrap_ceremony (id, operator, reason, idempotency_key, principal_id)
-			VALUES (1, 'suite', 'suite', 'bootstrap:suite', $1)`, principal.String())
+		_, err := tx.Exec(ctx, `INSERT INTO identity.bootstrap_ceremony (id, operator, reason, idempotency_key, principal_id, witness)
+			VALUES (1, 'suite', 'suite', 'bootstrap:suite', $1, 'suite witness')`, principal.String())
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -301,4 +303,29 @@ func TestASnapshotWithAnEmergencyGrantRetiresTheCeremonyGrant(t *testing.T) {
 	if got := decide(t, decider(t, p, nil, time.Now()), first); got.Provider {
 		t.Errorf("the ceremony's Principal decided %+v after the snapshot", got)
 	}
+}
+
+// ceremonyLock serializes the suites that write the single-row ceremony table: this one and
+// internal/identity/provisioning's ceremony review suite, which run as separate packages and in
+// parallel against one database. A transaction-scoped advisory lock is held, on one of the pool's
+// connections, until the test ends.
+func ceremonyLock(t *testing.T, p *db.Pool) {
+	t.Helper()
+	locked, release, done := make(chan error, 1), make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = p.InTx(context.Background(), func(ctx context.Context, tx db.Tx) error {
+			_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(4242001)`)
+			locked <- err
+			if err != nil {
+				return err
+			}
+			<-release
+			return nil
+		})
+	}()
+	if err := <-locked; err != nil {
+		t.Fatalf("take the ceremony lock: %v", err)
+	}
+	t.Cleanup(func() { close(release); <-done })
 }

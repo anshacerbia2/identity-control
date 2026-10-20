@@ -64,3 +64,19 @@ func (e *Events) KernelEvents(_ context.Context, _ keycloak.Realm, kind string, 
 }
 
 var _ keycloak.EventStore = (*Events)(nil)
+
+// UserCreations serves the CREATE admin events recorded for the user, as the kernel's filtered query
+// does.
+func (e *Events) UserCreations(_ context.Context, _ keycloak.Realm, user keycloak.UserID) ([]keycloak.UserCreation, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.Reads[keycloak.KindAdminEvent]++
+	if e.Fail != nil {
+		return nil, e.Fail
+	}
+	held := append([]keycloak.KernelEvent{}, e.events[keycloak.KindAdminEvent]...)
+	sort.SliceStable(held, func(i, j int) bool { return held[i].Time.After(held[j].Time) })
+	return keycloak.UserCreationsOf(held, user), nil
+}
+
+var _ keycloak.CreationJournal = (*Events)(nil)

@@ -861,3 +861,58 @@ func TestALogoutConfigurationMatchesWhatTheRegistrationRequires(t *testing.T) {
 		}
 	}
 }
+
+// Every client is written with its consent setting explicitly, a resource included, read back, and
+// patched (STD-IAM-002 1.9.0 §3.6): the consent field class compares it.
+func TestTheConsentSettingIsWrittenReadAndPatched(t *testing.T) {
+	for name, c := range map[string]struct {
+		spec keycloak.ClientSpec
+		want bool
+	}{
+		"an external public client": {keycloak.ClientSpec{ClientID: "partner", Public: true, RedirectURIs: []string{"https://a/cb"},
+			AccessTokenLifespan: 900, ConsentRequired: true}, true},
+		"an internal public client": {keycloak.ClientSpec{ClientID: "staff", Public: true, RedirectURIs: []string{"https://a/cb"},
+			AccessTokenLifespan: 240}, false},
+		"a resource": {keycloak.ClientSpec{ClientID: "api", Resource: true}, false},
+	} {
+		k := &kernel{adminStatus: http.StatusCreated, adminLocation: "http://kc/admin/realms/scnehaux/clients/new"}
+		admin, _ := newAdmin(t, k)
+		if _, err := admin.CreateClient(context.Background(), testRealm, c.spec); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		var sent map[string]any
+		_ = json.Unmarshal(k.lastBody, &sent)
+		if written, ok := sent["consentRequired"].(bool); !ok || written != c.want {
+			t.Errorf("%s: sent consentRequired %v", name, sent["consentRequired"])
+		}
+	}
+	for _, spec := range []keycloak.ClientSpec{
+		{ClientID: "api", Resource: true, ConsentRequired: true},
+		{ClientID: "job", Workload: true, AccessTokenLifespan: 540, Keys: []keycloak.JWK{{KID: "k", N: "n", E: "AQAB"}}, ConsentRequired: true},
+	} {
+		if err := spec.Validate(); err == nil {
+			t.Errorf("%s: a client nobody signs in to was allowed to ask consent", spec.ClientID)
+		}
+	}
+	reader, _ := newAdmin(t, &kernel{adminBody: `{"id":"c","clientId":"partner","consentRequired":true,"attributes":{}}`})
+	if client, err := reader.GetClient(context.Background(), testRealm, "c"); err != nil || !client.ConsentRequired {
+		t.Errorf("read %+v, %v", client, err)
+	}
+	k := &kernel{}
+	k.route = func(method, path string) (int, string) {
+		if method == http.MethodGet {
+			return http.StatusOK, clientRepresentation
+		}
+		return http.StatusNoContent, ""
+	}
+	admin, _ := newAdmin(t, k)
+	off := false
+	if err := admin.PatchClient(context.Background(), testRealm, "0b1c2d3e", keycloak.ClientPatch{ConsentRequired: &off}); err != nil {
+		t.Fatal(err)
+	}
+	var written map[string]any
+	_ = json.Unmarshal(k.lastPutBody, &written)
+	if written["consentRequired"] != false {
+		t.Errorf("wrote %v", written)
+	}
+}

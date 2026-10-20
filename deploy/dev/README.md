@@ -80,8 +80,11 @@ On the server, from `identity-control/deploy/dev`:
 5. **Start the stack:** `docker compose up -d --build`.
 6. **Wait until it is ready:** `curl -fsS http://127.0.0.1:8082/readyz` answers once the migration
    job has succeeded.
-7. **Perform the bootstrap ceremony:**
-   `./bootstrap.sh "you@example.com" "first stand-up of the development server"`.
+7. **Perform the bootstrap ceremony,** two named people, an operator and a witness, never the same
+   person (STD-IAM-001 2.9.0 §3.10):
+   `./bootstrap.sh "you@example.com" "<witness>" "first stand-up of the development server"`.
+   An independent reviewer, neither of the two, then records a review of the record
+   (`docs/runbooks/bootstrap-ceremony.md` §Review).
 
 The same, as one block:
 
@@ -101,7 +104,7 @@ cp .env.example .env
 docker compose up -d --build
 curl -fsS http://127.0.0.1:8082/readyz       # ready once the migration job has succeeded
 
-./bootstrap.sh "you@example.com" "first stand-up of the development server"
+./bootstrap.sh "you@example.com" "<witness>" "first stand-up of the development server"
 ```
 
 The ceremony can succeed once per Control Database, and a second run is refused. That is the
@@ -213,7 +216,7 @@ Each is a service behind a profile that runs the migrate image, and never starts
 
 | Task | Run | When |
 | :-- | :-- | :-- |
-| `bootstrap` | `./bootstrap.sh "<operator>" "<reason>"` the first time; to resume, `docker compose run --rm bootstrap -operator … -resume …` | once per Control Database (ADR-IAM-001 §5.11) |
+| `bootstrap` | `./bootstrap.sh "<operator>" "<witness>" "<reason>"` the first time; to resume, `docker compose run --rm bootstrap -operator … -witness … -resume …` | once per Control Database (ADR-IAM-001 §5.11) |
 | `provider-bootstrap` | `docker compose run --rm provider-bootstrap` | once Organization Control serves this consumer, and again after its registration changes; organization-control's `deploy/dev/README.md` says when. It bootstraps provider authority and the Tenant context, and records the lower mark |
 
 ### Reading a code in the mail catcher
