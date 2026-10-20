@@ -398,6 +398,7 @@ $forgedOrphan = @((Api "GET" "/v1/principals:unmapped" $null $null).json.unmappe
 Expect "recorded as an orphan" (Get-Prop ($forgedOrphan | Select-Object -First 1) "finding_class") "orphan"
 $plan = Api "POST" "/v1/principals/$($s.forged):adopt" '{"dry_run":true}' (Reason "a user the console made")
 $refusal = "$(Get-Prop $plan.json 'refusal')"
+Write-Host "        refusal: $refusal"
 Expect "its plan is refused on its creation" "$($plan.code) $(Get-Prop $plan.json 'adoptable') $($refusal.StartsWith('creation_on_record'))" "200 False True"
 $r = Api "POST" "/v1/principals/$($s.forged):adopt" '{"dry_run":false}' (Reason "a user the console made")
 Expect "and the adoption refused" $r.code 409

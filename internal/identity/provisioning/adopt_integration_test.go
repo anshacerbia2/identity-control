@@ -127,6 +127,13 @@ func TestAnOrphanCreatedAfterTheBackupIsAdoptedToSuspended(t *testing.T) {
 		!identifierTime.After(time.Now()) {
 		t.Errorf("finding %q, adoption event %q by %s at %s", resolution, eventID, by, identifierTime)
 	}
+	// The adopted mapping is dated at its identifier's time, so a second orphan the same restore left,
+	// created before the first, is still newer than the registry and adoptable.
+	second := uuidV7At(t, time.Now().Add(30*time.Minute))
+	p.orphan("created.after.backup.too", second, events, true)
+	if plan, err := p.adopt(second, true); err != nil || !plan.Adoptable {
+		t.Errorf("a second orphan after an adoption: %+v, %v", plan, err)
+	}
 	// A second adoption finds a mapping: nothing to adopt.
 	if _, err := p.adopt(identifier, false); !errors.Is(err, provisioning.ErrMapped) {
 		t.Errorf("a second adoption answered %v, want ErrMapped", err)

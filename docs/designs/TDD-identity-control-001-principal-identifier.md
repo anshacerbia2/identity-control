@@ -904,7 +904,11 @@ adopt(principal, reason, dry_run, caller):               provider only
 - **It lands in `suspended`, as `:release` does.** The user is disabled and its sessions are ended
   before the commit, and only `:restore`, a separate recorded command, returns it to service: two
   recorded steps. The mapping is written `activated_at` now, so the dangling sweep watches it once it
-  is active again.
+  is active again, and `created_at` at its identifier's time, when the Principal was created. Check 3
+  leaves out every mapping an adoption wrote, which the backup never held: counted, each adoption would
+  raise the bar, and an orphan older than one adopted first would be refused (the drill found this).
+  A Principal created through the API after the restore does count, so the orphans are adopted before
+  any new Principal is created.
 - **A workload is refused.** Its user is its client's service account, rebuilt with the client
   (`TDD-identity-control-004`).
 - **The creation address is written again** from the kernel user's email, as creation writes it

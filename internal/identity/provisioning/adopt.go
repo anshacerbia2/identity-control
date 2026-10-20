@@ -114,16 +114,22 @@ const adoptMappedStatement = `SELECT EXISTS (SELECT 1 FROM identity.principal_ma
 // orders as the bytes do, and a UUIDv7's first 48 bits are its time, so the greatest is the newest.
 // PostgreSQL 17's uuid_extract_timestamp "extracts a timestamp with time zone from UUID version 1. For
 // other versions, this function returns null", so the time is decoded here rather than there.
-const newestMappingStatement = `SELECT max(created_at),
-       coalesce(max(principal_id::text) FILTER (WHERE uuid_extract_version(principal_id) = 7), '')
-FROM identity.principal_mapping`
+//
+// A mapping an adoption wrote is not part of what the backup held, so it is left out: otherwise each
+// adoption would raise the bar, and an orphan created before one adopted earlier would be refused.
+const newestMappingStatement = `SELECT max(m.created_at),
+       coalesce(max(m.principal_id::text) FILTER (WHERE uuid_extract_version(m.principal_id) = 7), '')
+FROM identity.principal_mapping m
+WHERE NOT EXISTS (SELECT 1 FROM identity.principal_adoption a WHERE a.principal_id = m.principal_id)`
 
 const lockFindingStatement = `SELECT keycloak_user_id FROM identity.principal_finding
 WHERE finding_id = $1 AND resolved_at IS NULL FOR UPDATE`
 
+// insertAdoptedStatement dates the mapping at its identifier's time, when the Principal was created,
+// not at the adoption.
 const insertAdoptedStatement = `INSERT INTO identity.principal_mapping
-    (principal_id, keycloak_user_id, realm, username, email, subject_type, state, activated_at)
-VALUES ($1, $2, $3, $4, $5, 'human', 'suspended', now())
+    (principal_id, keycloak_user_id, realm, username, email, subject_type, state, created_at, activated_at)
+VALUES ($1, $2, $3, $4, $5, 'human', 'suspended', $6, now())
 ON CONFLICT (principal_id) DO NOTHING`
 
 const adoptionRecordStatement = `INSERT INTO identity.principal_adoption
@@ -197,7 +203,7 @@ func (p *Provisioner) Adopt(ctx context.Context, req AdoptRequest) (AdoptPlan, e
 			email = ev.user.Email
 		}
 		tag, err := tx.Exec(ctx, insertAdoptedStatement, req.PrincipalID.String(), string(ev.user.ID), string(realm),
-			ev.user.Username, email)
+			ev.user.Username, email, ev.identifierTime)
 		if err != nil {
 			return fmt.Errorf("provisioning: record the adopted mapping: %w", err)
 		}
