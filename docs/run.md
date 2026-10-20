@@ -219,6 +219,10 @@ go run ./cmd/identity-control
 The service connects as `identity_app`, which inherits `identity_runtime`: DML and no DDL. A
 migration attempted through this pool fails at the database rather than succeeding quietly.
 
+Once a day its scheduled pass purges audit records older than 7 years. For that transaction alone it
+becomes `identity_audit_purger`, which `identity_runtime` may become and does not inherit; every audit
+table refuses a younger record's delete to every role (TDD-identity-control-001 §Audit Retention).
+
 `IDENTITY_JWKS_URL` is configuration and is never read from a token. A token that could name its
 own key source would choose the key that validates it.
 

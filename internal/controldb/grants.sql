@@ -245,6 +245,45 @@ GRANT UPDATE (state, attempts, next_attempt_at, result_code, last_error_class, a
 REVOKE UPDATE, DELETE, TRUNCATE ON identity.security_operation_attempt FROM identity_runtime;
 GRANT UPDATE (finished_at, outcome, error_class) ON identity.security_operation_attempt TO identity_runtime;
 
+-- The audit purge role (STD-GLB-007 1.2.1 §Data Retention, TDD-identity-control-001 1.24.0 §Audit
+-- Retention). DELETE on each audit table the scheduled pass purges, SELECT on the columns its
+-- statements read (internal/controldb/retention.go), and nothing else: no INSERT, no UPDATE, no
+-- TRUNCATE, no other table. Revoked first, so a privilege a restored dump or a hand-run GRANT left is
+-- gone. The tables' retention triggers refuse it every row younger than 7 years, as they refuse every
+-- role, so the one delete it can make is the purge's. The kernel event record, the ceremony, its
+-- reviews and the ceremony grant's retirement are not purged, and it holds nothing on them.
+REVOKE ALL ON ALL TABLES IN SCHEMA identity FROM identity_audit_purger;
+REVOKE ALL ON ALL TABLES IN SCHEMA platform FROM identity_audit_purger;
+REVOKE ALL ON SCHEMA platform FROM identity_audit_purger;
+GRANT USAGE ON SCHEMA identity TO identity_audit_purger;
+GRANT SELECT (recorded_at), DELETE ON identity.privileged_access TO identity_audit_purger;
+GRANT SELECT (first_used_at, last_used_at), DELETE ON identity.provider_emergency_use TO identity_audit_purger;
+GRANT SELECT (relinked_at), DELETE ON identity.principal_relink TO identity_audit_purger;
+GRANT SELECT (released_at), DELETE ON identity.principal_release TO identity_audit_purger;
+GRANT SELECT (identifier_time, newest_mapping_at, creation_event_at, adopted_at), DELETE ON identity.principal_adoption TO identity_audit_purger;
+GRANT SELECT (adopted_at), DELETE ON identity.registration_adoption TO identity_audit_purger;
+GRANT SELECT (changed_at), DELETE ON identity.registration_state_change TO identity_audit_purger;
+GRANT SELECT (state, proposed_at, decided_at), DELETE ON identity.registration_change TO identity_audit_purger;
+GRANT SELECT (state, proposed_at, decided_at), DELETE ON identity.registration_request TO identity_audit_purger;
+GRANT SELECT (granted_at, revoked_at), DELETE ON identity.registration_owner TO identity_audit_purger;
+GRANT SELECT (granted_at, revoked_at), DELETE ON identity.application_developer TO identity_audit_purger;
+GRANT SELECT (granted_at, expires_at), DELETE ON identity.drift_exception TO identity_audit_purger;
+GRANT SELECT (changed_at), DELETE ON identity.workload_owner_change TO identity_audit_purger;
+GRANT SELECT (reviewed_at), DELETE ON identity.workload_review TO identity_audit_purger;
+GRANT SELECT (operation_id, state, next_attempt_at, created_at, applied_at), DELETE ON identity.security_operation TO identity_audit_purger;
+GRANT SELECT (operation_id, claimed_at, lease_until, finished_at), DELETE ON identity.security_operation_attempt TO identity_audit_purger;
+GRANT SELECT (issuance_id, issued_at, lapses_at), DELETE ON identity.temporary_password_issuance TO identity_audit_purger;
+GRANT SELECT (issuance_id, recorded_at), DELETE ON identity.temporary_password_outcome TO identity_audit_purger;
+GRANT SELECT (state, occurred_at, next_attempt_at, requested_at, submitted_at), DELETE ON identity.security_notification TO identity_audit_purger;
+
+-- The retention trigger function (migration 20261020200000_audit_retention). EXECUTE is asked of the
+-- trigger's creator: "To create or replace a trigger on a table, the user must have the TRIGGER
+-- privilege on the table. The user must also have EXECUTE privilege on the trigger function"
+-- (PostgreSQL 17, CREATE TRIGGER). The migration runs as the owner, and nothing else needs it, so it
+-- is revoked from PUBLIC. TestTheAuditPurgeDeletesOnlyExpiredRecords runs the purge, and so the
+-- triggers, as identity_audit_purger, which holds no EXECUTE.
+REVOKE ALL ON FUNCTION identity.refuse_young_audit_delete() FROM PUBLIC;
+
 -- platform.outbox_sequence is read by every append. Without USAGE the outbox write fails
 -- inside the caller's domain transaction, so a membership mutation would roll back.
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA identity TO identity_runtime;

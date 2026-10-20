@@ -24,6 +24,9 @@ func ceremonyHeld(t *testing.T, p *portability) {
 	clear := func() error {
 		return p.pool.InTx(context.Background(), func(ctx context.Context, tx db.Tx) error {
 			for _, statement := range []string{
+				// The audit tables refuse a young record's delete to every role (STD-GLB-007 1.2.1);
+				// the test's rows go with the triggers off, for this transaction alone.
+				`SET LOCAL session_replication_role = replica`,
 				`DELETE FROM identity.ceremony_grant_retirement`,
 				`DELETE FROM identity.bootstrap_ceremony_review`,
 				`DELETE FROM identity.bootstrap_ceremony`,

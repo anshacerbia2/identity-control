@@ -62,6 +62,11 @@ func newHarness(t *testing.T) *harness {
 	}
 	t.Cleanup(pool.Close)
 	if err := pool.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		// The audit tables refuse a young record's delete to every role; a test's own rows are
+		// removed with the triggers off, a superuser's setting for this transaction alone.
+		if _, err := tx.Exec(ctx, `SET LOCAL session_replication_role = replica`); err != nil {
+			return err
+		}
 		// This realm's rows only: the registration package's tests use the same tables beside
 		// these in CI, in a realm of their own. Runs carry no realm and are this package's alone.
 		for _, statement := range []string{

@@ -14,8 +14,9 @@ API, and a second ceremony is refused by the database.
 ## Who performs it, and where the record is reviewed
 
 Two named people run the ceremony, an **operator** and a **witness**, never the same person, and a
-third, the **reviewer**, independent of both and of the first Principal's holder, reviews its record
-before the realm serves anyone else (`STD-IAM-001` 2.9.0 §3.10, `ADR-IAM-001 §5.11` requirement 3).
+third, the **reviewer**, independent of both and of the first Principal's holder, reviews its record.
+Until the review is recorded, the realm serves the first Principal and the reviewer, and no one else
+(`STD-IAM-001` 2.10.0 §3.10, `ADR-IAM-001 §5.11` requirement 3, amended 2026-10-20).
 The rules are decided; the names and the deadline are the owner's, and STD-IAM-001 keeps them here,
 not in the public architecture repository.
 
@@ -27,8 +28,8 @@ not in the public architecture repository.
 >   signing-key ceremony]_.
 > - **Reviewer:** _[a named member of Security or of the Architecture Authority; not the operator, the
 >   witness, or the holder of the first Principal]_.
-> - **Review deadline:** _[proposed in STD-IAM-001 §3.10: before the realm serves anyone but the first
->   Principal, and at most two working days after the ceremony]_.
+> - **Review deadline:** _[proposed: at most two working days after the ceremony. Until the review is
+>   recorded, the realm serves the first Principal and the reviewer alone (STD-IAM-001 2.10.0 §3.10)]_.
 > - **Where the printed output is kept:** with the change ticket the ceremony's reason names, and in
 >   Audit & Evidence once it is chartered. Never in chat (STD-IAM-001 §3.10).
 >
@@ -45,7 +46,8 @@ What the code enforces, whoever the people are:
   Principal records it, by the route and by the database (`bootstrap_ceremony_review_independent`);
 - every review is insert-only.
 
-The deadline is not enforced by the code; the reviewer and the owner hold it.
+The deadline is not enforced by the code, and neither is who the realm serves before the review: the
+steps below hold it, and the reviewer and the owner hold the deadline.
 
 In development (`deploy/dev`), the operator and the witness are whoever stands the server up, and the
 record is the job log or the server's shell history; that is not evidence for production.
@@ -122,9 +124,10 @@ transaction (`TDD-identity-control-006` §The Ceremony's Grant).
    a TOTP at the first provider sign-in (ADR-IAM-004).
 5. **Give the reviewer, and only the reviewer, a way in.** The first Principal creates the reviewer's
    Principal through `POST /v1/principals`, and Organization Control grants it
-   `provider:identity-control` (`ADR-ORG-002`), so the reviewer can read the record. The reviewer is the one person the realm serves before the review, because
-   reading the record needs a provider's sign-in; the owner confirms this exception with the deadline
-   (§Who performs it).
+   `provider:identity-control` (`ADR-ORG-002`), so the reviewer can read the record. The reviewer is
+   the one person the realm serves before the review, beside the first Principal, because reading the
+   record needs a provider's sign-in (`STD-IAM-001` 2.10.0 §3.10, decided 2026-10-20). Create no other
+   Principal, registration or grant until step 6 is recorded.
 6. **The reviewer reviews the record** (§Review).
 7. **Stand up the rest**: further Principals through `POST /v1/principals`, registrations through
    `POST /v1/registrations` or adoption (`deploy/dev/README.md` §First start), and the first emergency

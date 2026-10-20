@@ -73,5 +73,9 @@ check "runtime can insert principal_mapping" "SELECT has_table_privilege('identi
 check "runtime cannot create in identity" "SELECT has_schema_privilege('identity_app','identity','CREATE')" f
 check "runtime cannot reach the atlas schema" "SELECT has_schema_privilege('identity_app','atlas','USAGE')" f
 check "runtime owns no table" "SELECT count(*) = 0 FROM pg_tables WHERE tableowner IN ('identity_app','identity_runtime')" t
+# The audit purge (STD-GLB-007 1.2.1, TDD-identity-control-001 §Audit Retention): the runtime holds no
+# DELETE on an audit record, and becomes identity_audit_purger for the purge's transaction alone.
+check "runtime cannot delete an audit record" "SELECT has_table_privilege('identity_app','identity.privileged_access','DELETE')" f
+check "runtime can become the purge role" "SELECT pg_has_role('identity_app','identity_audit_purger','SET')" t
 
 echo "control database ready"

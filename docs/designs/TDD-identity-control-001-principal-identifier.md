@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-001
   title: Canonical Principal Identifier and Creation Path
   owner: Core Platform Team
-  version: 1.23.0
+  version: 1.24.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -127,6 +127,7 @@ Authorized
     Identity Control Service → Keycloak Admin API
         via POST /v1/principals              ordinary path, authenticated caller
         via the bootstrap ceremony           single use per Control Database
+        via an enrolment (planned, 1.24.0)   anonymous, an invitee who proved the invited address
 
 Prohibited in this phase
     Self-registration
@@ -139,6 +140,35 @@ Prohibited in this phase
 Prohibited paths are closed by realm configuration rather than by policy alone. The
 reconciler treats any Principal that appears without a mapping as evidence that a
 prohibited path is open, and quarantines it.
+
+#### Enrolment From an Invitation (planned)
+
+1.24.0, `ADR-IAM-011` (accepted 2026-10-20) §5.1 to §5.6. **Planned, not built** (`ROADMAP.md` item
+17). A person invited to a Tenant who holds no account creates one from the invitation, after proving
+the invited address. It is a third authorized creation path, beside the ceremony and
+`POST /v1/principals`, and it creates the Principal through the ordinary path's code, so the mapping,
+recovery and the sweep are the same.
+
+- **`POST /v1/enrolments`**, anonymous and rate-limited per invitation and per client address, takes
+  the invitation token in the body. This service asks Organization Control, as its workload, for the
+  invitation the token names (`POST /v1/invitations/resolve`, which admits this service's workload
+  alone and answers the invitation's identifier and target address only for one `pending` and
+  unexpired, naming no Tenant). It always answers `202` with one body, whatever the outcome: an
+  unknown, expired, revoked or accepted token, and an address a Principal already holds proven, are
+  not told apart (ADR-IAM-011 §5.1, OWASP WSTG-IDNT-04). One open enrolment per invitation.
+- **The code.** 8 digits from the operating system's random source, sent to the invited address
+  alone as `TDD-identity-control-008` sends an address proof, its SHA-256 kept sealed, good for 10
+  minutes and five attempts, invalidated on use (§5.2, NIST SP 800-63A-4).
+- **`POST /v1/enrolments/{enrolment_id}:verify`** with the code creates the Principal: username the
+  invited address, lower-cased; the creation address that address with `verified_at` set; a temporary
+  password issued as `ADR-IAM-010 §5.1` and §5.2 issue it, shown once with `no-store`, never stored or
+  logged. A wrong, expired or exhausted code creates nothing (§5.3).
+- **The enrolment record**: the invitation, the address's hash, the Principal created and when. The
+  first password binding is notified (`ADR-IAM-007 §5.1`). Nothing else is granted: the person accepts
+  the invitation afterwards, signed in, as `ADR-ORG-007 §5.1` decides (§5.4).
+- **Waits on**: organization-control's resolve route, identity-experience's enrolment page, and in
+  production the Notification Platform (§5.5, §5.6). The route classes, the table and the problem
+  types are designed when it is built.
 
 #### The Bootstrap Ceremony
 
@@ -206,9 +236,15 @@ an operator and a witness, and an independent review of the record:
   compares the reviewer with each. A review written past the code, naming the witness, or naming
   another ceremony's people, is refused by PostgreSQL. AC-5 asks "that security personnel who
   administer access control functions do not also administer audit functions" (`STD-IAM-001` [R41]).
-- **Who and when are the owner's.** The reviewer's role and the review deadline are `OWNER DECISION
-  REQUIRED` in `STD-IAM-001` §3.10; `docs/runbooks/bootstrap-ceremony.md` §Who performs it holds the
-  placeholders. The route records any review; it does not enforce a deadline.
+- **Who is served before the review (1.24.0).** `STD-IAM-001` 2.10.0 §3.10 and `ADR-IAM-001` §5.11
+  requirement 3, amended 2026-10-20: "Until the bootstrap review is recorded, the realm serves the
+  first Principal and the reviewer, and no one else". The reviewer reads the record through a
+  provider's sign-in, so the first Principal creates the reviewer's Principal and Organization grants
+  it, and nothing else is created until the review is recorded. The runbook's step order holds it; the
+  code enforces no gate on it, as it enforces no deadline.
+- **Who and when are the owner's.** The names of the ceremony role and the reviewer, and the review
+  deadline, are the owner's in `STD-IAM-001` §3.10; `docs/runbooks/bootstrap-ceremony.md` §Who
+  performs it holds the placeholders. The route records any review; it does not enforce a deadline.
 
 **The ceremony holds no credential.** The kernel user is created with a required
 credential-setting action, so the first human interaction establishes the credential. A ceremony
@@ -417,6 +453,55 @@ CREATE TABLE identity.principal_release (
     released_at               TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ```
+
+#### Migration Gates (1.24.0)
+
+`ADR-GLB-004` §5.1 asks the pipeline to "block a destructive schema change from reaching production
+without a reviewed multi-phase plan", and says "A pipeline that implements items 1 and 2 meets this
+gate. It is not a waiver". `ci.yml` runs items 1 to 3 on every change, in this order:
+
+1. **Integrity.** `atlas migrate validate --env ci`: `atlas.sum` fails when a committed migration was
+   edited after it was hashed.
+2. **The destructive-statement gate, split at one cutover**, the last migration applied before squawk,
+   `20261019142657_first_credential`:
+   - Up to and including the cutover, a text match for `DROP TABLE`, `DROP SCHEMA`, `DROP COLUMN`,
+     `DROP CONSTRAINT`, `DROP INDEX`, `RENAME TO`, `RENAME COLUMN` and `TRUNCATE`, each approved by an
+     `atlas:destructive-approved` comment on its line. Those migrations were reviewed against it, and
+     their lines cannot change: editing an applied migration fails step 1.
+   - After the cutover, squawk v2.70.0, "Linter for Postgres migrations & SQL", the gate's preferred
+     form (§5.1 item 2, amended 2026-10-20). It parses each statement, so a word in a comment is not
+     flagged, and an approval is a `-- squawk-ignore <rule>` comment on the line before, naming the one
+     rule it waives. It is downloaded by version and checked against the release asset's sha256, as
+     `STD-GLB-009` §Container Images rule 6 asks of a scanner.
+   - squawk 2.70.0 bans `TRUNCATE` only with `CASCADE`, so the text match keeps `TRUNCATE` over the
+     migrations after the cutover too, approved the same way. A trigger that refuses it names it:
+     `20261020200000_audit_retention` carries the approval on each `BEFORE TRUNCATE` line.
+3. **Synchronisation.** `atlas migrate diff --env ci drift_check`, then a clean working tree:
+   `schema.hcl` and `migrations/` agree.
+
+`atlas migrate lint` (item 4) needs an Atlas Pro login and is not run; `atlas.hcl` keeps its
+configuration for the day one exists.
+
+**`.squawk.toml`**:
+
+- `pg_version = "17.0"`, the server every environment runs.
+- `assume_in_transaction = true`: "By default, Atlas creates one transaction per migration file"
+  [R19], so the rules that ask for guards a partly applied file would need do not apply.
+- **The timeouts.** squawk's `require-timeout-settings`: "You must configure a `lock_timeout` to safely
+  apply migrations", and "a statement_timeout also helps prevent long migrations that consume too many
+  database resources" [R20]. Each migration after the cutover opens with `SET LOCAL lock_timeout =
+  '5s';` and `SET LOCAL statement_timeout = '60s';`. `SET LOCAL` ends with the file's transaction, so
+  the values never reach the next file. The two values are this repository's convention; no ADR or
+  standard sets them yet (reported for `ADR-GLB-004`).
+- **One excluded rule**, `prefer-bigint-over-int`, whose problem is "Using 32 bit integer fields can
+  result in hitting the max int limit" [R21]. The schema uses `integer` only where a value is bounded:
+  the single-row records, attempt counters, a run's counts and a mapping's version. Every identifier is
+  a `uuid` and every version received from Organization a `bigint`, so the rule has no column to land
+  on. Any other waiver is a reviewed `squawk-ignore` on its statement, never an exclusion.
+
+**The Atlas pin.** CI installs the CLI with `ariga/setup-atlas` and fails unless `atlas version` reads
+`v1.3.4`, the release the migrate image carries (§The Migrate Image and Its Exceptions, 1.20.0), so CI
+validates with the binary that applies.
 
 ### Keycloak
 
@@ -907,8 +992,11 @@ adopt(principal, reason, dry_run, caller):               provider only
   is active again, and `created_at` at its identifier's time, when the Principal was created. Check 3
   leaves out every mapping an adoption wrote, which the backup never held: counted, each adoption would
   raise the bar, and an orphan older than one adopted first would be refused (the drill found this).
-  A Principal created through the API after the restore does count, so the orphans are adopted before
-  any new Principal is created.
+  A Principal created through the API after the restore does count, so every orphan is adopted or
+  triaged before any new Principal is created (1.24.0, `ADR-IAM-001 §5.11` as amended 2026-10-20:
+  "After a restore, every orphan is adopted before any new Principal is created"). One created
+  first makes every older orphan fail check 3, and those go to triage instead. The restore runbook's
+  step order holds it; the code does not refuse a creation while an orphan finding is open.
 - **A workload is refused.** Its user is its client's service account, rebuilt with the client
   (`TDD-identity-control-004`).
 - **The creation address is written again** from the kernel user's email, as creation writes it
@@ -1120,25 +1208,100 @@ appears in structured logs; `keycloak_user_id` does not.
 
 ### Audit Retention
 
-1.23.0, `STD-GLB-007` 1.1.0 §Data Retention: audit logs are "Retained in immutable storage for
-`7 years`", every audit record counts, privileged access included, and "A record younger than 7 years
-is never purged". This service's audit records are the tables that record a decision, an access or an
-outcome with who made it and why: `privileged_access`, `provider_emergency_use`, `kernel_event`,
-`bootstrap_ceremony` and its reviews, `ceremony_grant_retirement`, `principal_relink`,
-`principal_release`, `principal_adoption`, `registration_adoption`, `registration_state_change`,
-`registration_change`, `registration_request`, `registration_owner`, `application_developer`,
-`drift_exception`, `workload_owner_change`, `workload_review`, `security_operation` and its attempts,
-`temporary_password_issuance` and `temporary_password_outcome`, and `security_notification`.
+1.23.0, rewritten in 1.24.0. `STD-GLB-007` 1.2.1 §Data Retention: audit logs are "Retained in
+immutable storage for `7 years`", every audit record counts, privileged access included, they are
+"purged after that by the owning service's own maintenance", and "A record younger than 7 years is
+never purged". Its §5 item 4 asks for tests that the purge "deletes only records older than 7 years",
+and that "a direct `DELETE` of a younger record and a `TRUNCATE` are refused, as the migration role
+and as a superuser". 1.2.1 records that this service had built neither; 1.24.0 builds both.
 
-Checked on 2026-10-20: this service purges none of them, at any age. The runtime role holds no
-`DELETE` and no `TRUNCATE` on any (`grants.sql`), no migration and no production source deletes from
-one, and the schema holds no rule or trigger that could. It holds no Tenant's data, so the Tenant
-decommissioning purge has nothing to delete here. Compliance item 4 is asserted on every build:
-`TestNoAuditRecordIsPurgedBeforeSevenYears` reads the catalog, and `TestNoSourceDeletesAnAuditRecord`
-reads every migration and production file. The earliest record dates from 2026-08, so a purge past 7
-years, through a policy that admits only that delete, is not needed before 2033 and is not built.
-Kernel events are kept until Audit & Evidence has them (`STD-IAM-001` §3.8); a purge of those
-follows that platform.
+This service's audit records are the tables that record a decision, an access or an outcome with who
+made it and why: `privileged_access`, `provider_emergency_use`, `kernel_event`, `bootstrap_ceremony`
+and its reviews, `ceremony_grant_retirement`, `principal_relink`, `principal_release`,
+`principal_adoption`, `registration_adoption`, `registration_state_change`, `registration_change`,
+`registration_request`, `registration_owner`, `application_developer`, `drift_exception`,
+`workload_owner_change`, `workload_review`, `security_operation` and its attempts,
+`temporary_password_issuance` and `temporary_password_outcome`, and `security_notification`
+(`controldb.AuditTables`). It holds no Tenant's data, so the Tenant decommissioning purge has nothing
+to delete here.
+
+**The table refuses the early delete, for every role** (migration `20261020200000_audit_retention`).
+Each audit table carries the two triggers STD-GLB-007 1.2.0 describes, on
+`identity.refuse_young_audit_delete()`, as organization-control's tables do:
+
+- `<table>_retention`, `BEFORE DELETE … FOR EACH ROW`, raises on a row younger than 7 years. A row's
+  age is its newest timestamp: the greatest of every `timestamptz` column it holds, passed to the
+  function by name, so a row rewritten after it was inserted (a decision, a revocation, a last use)
+  counts from its last write. A row whose columns are all null is refused, not deleted.
+- `<table>_no_truncate`, `BEFORE TRUNCATE … FOR EACH STATEMENT`, raises on every one. A row trigger
+  alone misses it: "TRUNCATE will not fire any ON DELETE triggers" (`STD-GLB-007` [R4]).
+- The error rolls the statement back with its trigger (`STD-GLB-007` [R4]). A row-level security
+  policy is not used: it binds neither a superuser nor the table's owner, and does not cover
+  `TRUNCATE` (ibid.). Disabling a trigger needs the table's owner or a superuser, the same people
+  who could drop a policy, so the triggers add to the grants and replace none.
+- The boundary is `now() - make_interval(years => 7)`, on the database clock, as the purge's is.
+  `now()` is the transaction's start, so the purge and the triggers agree on every row.
+- The function is created with `CREATE OR REPLACE`: Atlas clears its dev database between replays of
+  the directory by the objects it models, and Atlas Community models no function, so a plain
+  `CREATE` met the copy an earlier replay left (`atlas migrate validate` then `diff`, 2026-10-20).
+
+**The purge** (`controldb.PurgeExpiredAuditRecords`). The scheduled pass (`cmd/identity-control`,
+every `IDENTITY_REGISTRATION_RECONCILE_INTERVAL`) runs it once a day: a boundary of years needs no
+finer step, and a pass reads each audit table whole. A failed pass is logged at `ERROR` and retried
+on the next. It runs in one transaction of its own, which any error rolls back whole, and refuses a
+retention under 7 years before it runs anything.
+
+- **As a role allowed only that delete.** `identity_audit_purger` (`roles.sql`) is `NOLOGIN` and holds
+  `DELETE` on each table the pass purges, `SELECT` on the columns its statements read, and nothing
+  else (`grants.sql`): no `INSERT`, `UPDATE` or `TRUNCATE`, no other table, not even a row's
+  identifier. The runtime is its member `WITH INHERIT FALSE, SET TRUE`, so `DELETE` on an audit table
+  is never among the runtime's own privileges, and the purge becomes the role with `SET LOCAL ROLE`
+  for its transaction alone: "The effects of `SET LOCAL` last only till the end of the current
+  transaction, whether committed or not" [R16]. The `SET` option "allows the member to change to the
+  granted role using the `SET ROLE` command", and through `identity_app` "only if there is a chain of
+  grants each of which has `SET TRUE`" [R17]. The triggers refuse it every younger row, so the one
+  delete it can make is the purge's.
+- **Children first.** An attempt goes before its command, and a temporary password's outcome with its
+  issuance in one statement, so no foreign key stops the pass.
+- **A row still in force is not purged, at any age.** Deleting it would change what the service does,
+  not what it remembers: an ownership or a developer standing not revoked; a change or a request not
+  decided; a security command not `applied` or `refused` (an `unresolved` one can still be re-driven),
+  and its attempts; a notification still `requested`; and a temporary password with no recorded
+  outcome, which the lapse sweep still owes. Each is purged once it closes and its newest timestamp is
+  7 years old.
+- **Not purged by this pass** (`Purged: false`), each keeping its triggers:
+  - `kernel_event`: `STD-IAM-001` §3.8 keeps the record "until Audit & Evidence has received it", and
+    "until it receives an event the record cannot be released without losing it". Its purge follows
+    that platform.
+  - `bootstrap_ceremony`, `bootstrap_ceremony_review` and `ceremony_grant_retirement`: they are the
+    realm's state as well as its record. The retirement's absence is what keeps the ceremony's grant
+    retired (`TDD-identity-control-006` §The Ceremony's Grant), and the review's presence is what the
+    ceremony record reports as `reviewed`. **Open, for the architecture:** STD-GLB-007 1.2.1 says the
+    rule stands as written, so keeping these past 7 years needs its decision.
+
+**Tested against PostgreSQL on every build** (`internal/controldb`):
+
+- `TestNoAuditRecordIsPurgedBeforeSevenYears`, from the catalog: the runtime holds no `DELETE` or
+  `TRUNCATE` on any audit table and does not inherit the purge role but may become it; the purge role
+  holds `DELETE` on exactly the purged tables and no other write anywhere; every audit table carries
+  its two triggers, and the schema holds no other trigger and no rule.
+- `TestTheRetentionTriggersReadEveryTimestamp`: each row trigger reads exactly the table's
+  `timestamptz` columns, the ones `controldb.AuditTables` names.
+- `TestAYoungAuditRecordIsNeverDeleted`: a record 6 years 364 days old is refused to the superuser that
+  owns the table and applies the migrations here, the migration role and the superuser in one, and to
+  the purge role; one 7 years and a day old is deleted by the purge role; and `TRUNCATE … CASCADE` is
+  refused on every audit table.
+- `TestTheAuditPurgeDeletesOnlyExpiredRecords`: the purge refuses 6 years, deletes an 8-year-old
+  access, an applied command with its attempt and a used temporary password with its outcome, and
+  keeps a 6-year-old access, an `unresolved` command and an issuance with no outcome.
+- `TestNoSourceDeletesAnAuditRecord` reads every migration and production file: only
+  `internal/controldb/retention.go` deletes from an audit table, and
+  `TestThePurgeComparesEveryDeleteWithSevenYears` reads that each of its deletes compares with the
+  boundary.
+
+A test's own rows are removed with `SET LOCAL session_replication_role = replica`, which turns the
+triggers off for that transaction: "Only superusers and users with the appropriate `SET` privilege can
+change this setting" [R18]. The suites run as the disposable database's superuser.
 
 ### Restore Evidence
 
@@ -1466,6 +1629,10 @@ not pulled.
 | Conforms to | STD-GLB-003 1.1.0 §State Metrics — the pending and quarantined gauges (1.18.0) |
 | Conforms to | STD-GLB-009 1.8.0 §Container Images rules 4, 5, 7, 8 and 10 — the migrate image's exceptions as VEX statements, and the zlib upgrade; 1.8.0 lands with scnehaux-architecture #86 (1.19.0) [R2]–[R10] |
 | Conforms to | STD-GLB-009 1.8.0 §Container Images rules 1 and 4 — the Atlas pin moves to 1.3.4, which fixes GO-2026-6617 and every earlier advisory in the binary, and its statements go (1.20.0) [R11] [R12] |
+| Conforms to | STD-GLB-007 1.2.1 §Data Retention and §5 item 4 — audit records kept 7 years, younger ones refused to every role by triggers, purged after by the scheduled pass as a role allowed only that delete (1.24.0) |
+| Conforms to | ADR-GLB-004 §5.1 items 1 to 3 — integrity, the destructive-statement gate (squawk after the cutover, the text match before it and for `TRUNCATE`) and synchronisation (1.24.0) |
+| Conforms to | STD-IAM-001 2.10.0 §3.10, ADR-IAM-001 §5.11 as amended 2026-10-20 — the reviewer is the one person served before the bootstrap review; every orphan adopted or triaged before a new Principal (1.24.0) |
+| Plans | ADR-IAM-011 §5.1 to §5.6 — enrolment from an invitation, a third creation path, not built (1.24.0) |
 
 ### Open Proof-of-Concept Questions
 
@@ -1574,3 +1741,29 @@ Keycloak release:
   files or directories from the build context." "If this file exists, the files and directories that
   match patterns in the files are removed from the build context before it's sent to the builder."
   "This helps avoid sending unwanted files and directories to the builder".
+- **[R16]** The PostgreSQL Global Development Group, _PostgreSQL 17 Documentation_, SET, accessed
+  2026-10-20. <https://www.postgresql.org/docs/17/sql-set.html>. "The effects of `SET LOCAL` last only
+  till the end of the current transaction, whether committed or not."
+- **[R17]** The PostgreSQL Global Development Group, _PostgreSQL 17 Documentation_, GRANT, §GRANT on
+  Roles, accessed 2026-10-20. <https://www.postgresql.org/docs/17/sql-grant.html>. INHERIT: "If it is
+  set to `TRUE`, it causes the new member to inherit from the granted role. If set to `FALSE`, the new
+  member does not inherit." SET: "The `SET` option, if it is set to `TRUE`, allows the member to change
+  to the granted role using the `SET ROLE` command. If a role is an indirect member of another role, it
+  can use `SET ROLE` to change to that role only if there is a chain of grants each of which has `SET
+  TRUE`." "To modify that options of an existing membership, simply specify the membership with
+  updated option values."
+- **[R18]** The PostgreSQL Global Development Group, _PostgreSQL 17 Documentation_, §19.11 Client
+  Connection Defaults, `session_replication_role`, accessed 2026-10-20.
+  <https://www.postgresql.org/docs/17/runtime-config-client.html>. "Only superusers and users with the
+  appropriate `SET` privilege can change this setting." "Since foreign keys are implemented as
+  triggers, setting this parameter to `replica` also disables all foreign key checks".
+- **[R19]** Ariga, _Atlas: Applying Migrations_, accessed 2026-10-20.
+  <https://atlasgo.io/versioned/apply>. "By default, Atlas creates one transaction per migration
+  file".
+- **[R20]** squawk, _require-timeout-settings_, accessed 2026-10-20.
+  <https://squawkhq.com/docs/require-timeout-settings>. "You must configure a `lock_timeout` to safely
+  apply migrations." "Additionally, a statement_timeout also helps prevent long migrations that consume
+  too many database resources."
+- **[R21]** squawk, _prefer-bigint-over-int_, accessed 2026-10-20.
+  <https://squawkhq.com/docs/prefer-bigint-over-int>. "Using 32 bit integer fields can result in
+  hitting the max int limit."

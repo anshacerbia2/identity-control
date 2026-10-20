@@ -617,7 +617,7 @@ Built in the order TDD-005 §Build Order states, one PR per slice:
 - ✅ **3b · Consents** (TDD-005 2.13.0, STD-IAM-002 1.9.0 §3.6, ADR-IAM-003 §5.11).
   - Which clients ask is decided: an `external` registration requires consent and no other class does, derived from the class at registration, adoption, recovery and recreation, never a field. The sweep holds it as the `consent` field class, repaired when attributed, and a registration reports `consent_required` (TDD-003 1.39.0).
   - `GET /v1/me/consents` lists a person's consents, each with its client, its granted scopes and the access token lifetime its registration bounds. `POST /v1/me/consents/{security_ref}:withdraw` is a self security operation, `consent.withdraw`, read back against the kernel's listing. identity-kernel's compat proof of both is run 37607165522.
-  - `deploy-dev`'s smoke lists the bootstrap operator's consents. A consent page needs identity-kernel to mark the scopes an `external` client releases "display on consent screen": that is identity-kernel's change, and until it lands the listing is empty.
+  - `deploy-dev`'s smoke lists the bootstrap operator's consents. A consent page needs identity-kernel to mark the scopes an `external` client releases "display on consent screen": that is identity-kernel's change, and until it lands the listing is empty. The live proof is item 18.
 - ✅ **Provider routes at two factors** (ADR-IAM-004; TDD-005 2.4.0 §Step-Up).
   - Every `providerOnly` route requires `acr` `aal2`, reads included, under NIST SP 800-53 IA-2(1). `/v1/me/authenticators/{ref}:remove` requires `aal2` and freshness.
   - A shortfall is answered with RFC 9470's challenge carrying `acr_values="aal2"`, plus `max_age` for a command.
@@ -804,6 +804,61 @@ slice:
      Grants already apply any greater version. Integration tests prove a 10^9 jump applied, the next
      version after it, a late pre-restore one discarded, and every version column a `bigint`.
 
+## Alignment with the architecture (2026-10-20)
+
+The numbering continues the list above. Each item names the ADR, standard or SAD section it comes
+from; an open one says what it waits on.
+
+14. ✅ **Audit records are purged after 7 years, and never before** (STD-GLB-007 1.2.1 §Data Retention
+    and §5 item 4, TDD-001 1.24.0 §Audit Retention). Recorded 2026-10-20, built 2026-10-20.
+    - Every audit table carries a `BEFORE DELETE` row trigger that refuses a row younger than 7 years
+      and a `BEFORE TRUNCATE` trigger that refuses every one, for every role (migration
+      `20261020200000_audit_retention`, organization-control's triggers the precedent).
+    - The scheduled pass purges once a day as `identity_audit_purger`, which holds `DELETE` on the
+      purged tables and nothing else; the runtime becomes it with `SET LOCAL ROLE` and never inherits it.
+      A row still in force (an ownership not revoked, a command not final, a password with no outcome)
+      is not purged.
+    - Tests against PostgreSQL: a young record refused to the superuser and the purge role, an old one
+      purged, `TRUNCATE` refused on every audit table, the purge's in-force rows kept.
+    - ⏳ **Waits on the architecture:** the kernel event record is kept until Audit & Evidence has it
+      (STD-IAM-001 §3.8), and the ceremony, its reviews and the ceremony grant's retirement are kept
+      while the realm exists, because they are its state. STD-GLB-007 1.2.1 has the rule stand as
+      written, so keeping them past 7 years needs its decision.
+15. ✅ **Only the first Principal and the reviewer are served before the bootstrap review** (STD-IAM-001
+    2.10.0 §3.10, ADR-IAM-001 §5.11 requirement 3, amended 2026-10-20; TDD-001 1.24.0 §The Bootstrap
+    Ceremony). `docs/runbooks/bootstrap-ceremony.md` steps 5 and 6 create only the reviewer's Principal
+    before the review, and nothing else until it is recorded. The code enforces no gate, as it enforces
+    no deadline. Done 2026-10-20.
+16. ✅ **After a restore, every orphan is adopted or triaged before any new Principal** (ADR-IAM-001
+    §5.11, amended 2026-10-20; TDD-001 1.24.0 §Re-Adopting an Orphan). `:adopt`'s check 3 leaves out
+    mappings an adoption wrote and counts every other, so the restore runbook's step 7 creates no
+    Principal while an `orphan` finding is open. Done 2026-10-20.
+17. ⏳ **Enrolment from an invitation** (ADR-IAM-011 §5.1 to §5.6, accepted 2026-10-20; TDD-001 1.24.0
+    §Enrolment From an Invitation). Planned, recorded 2026-10-20: `POST /v1/enrolments` and
+    `POST /v1/enrolments/{enrolment_id}:verify` (anonymous, rate-limited, one answer), the client of
+    Organization Control's `POST /v1/invitations/resolve`, and the enrolment record. Waits on
+    organization-control's resolve route and identity-experience's enrolment page; in production on the
+    Notification Platform.
+18. ⏳ **3b in `deploy-dev`: an `external` test registration and a live consent withdrawal**
+    (STD-IAM-002 1.9.0 §3.6, ADR-IAM-003 §5.11, TDD-005 2.13.0). Recorded 2026-10-20. Today the smoke
+    lists the bootstrap operator's consents, and the list is empty. Waits on identity-kernel marking
+    the scopes an `external` client releases "display on consent screen".
+19. ⏳ **The schemas against the handlers** (ADR-GLB-010 §5.1). Recorded 2026-10-20: a contract test
+    that sends each documented body to its handler (§API specification). Meanwhile identity-experience's
+    contract test found one gap, fixed in item 20.
+20. ✅ **`api/openapi.yaml` 1.1.0** (ADR-GLB-010 §5.1, ADR-GLB-006). Done 2026-10-20.
+    - `PublicJWK` documents `use` (`sig`) and `alg` (`PS256`), which the handler always accepted, and
+      that no other member is accepted. Found by identity-experience #60's contract test, which fails
+      until identity-experience pins this version.
+    - The `Idempotency-Key` window, 7 days from completion, and the temporary password's exception are
+      published (STD-GLB-001 1.8.0; TDD-003 1.40.0 §Key Retention).
+21. ✅ **The migration gates are written down** (ADR-GLB-004 §5.1 items 1 to 3; TDD-001 1.24.0 §Migration
+    Gates): the cutover, squawk v2.70.0 after it and the text match before it and for `TRUNCATE`, the
+    Atlas v1.3.4 pin, and `.squawk.toml`'s timeouts and its one excluded rule. Done 2026-10-20. The
+    timeout values are this repository's; no ADR or standard sets them yet.
+22. ✅ **One registration per developer device, in the design** (ADR-IAM-001 §5.12 as amended
+    2026-10-20, STD-GLB-009 1.10.0 rule 15; TDD-003 1.40.0 §Client Key Records). Done 2026-10-20.
+
 ## Waiting on the Keycloak proof-of-concept
 
 Each item names the question that unblocks it. All of them are adapters, which is why
@@ -931,7 +986,8 @@ SHALL publish its specification (OpenAPI for HTTP) as a versioned artifact".
   by digest, with every rule of its recommended set an error (`api/redocly.yaml`).
 - **Not checked yet: the schemas against the handlers.** The request and response schemas are read
   from the handlers' types by hand. A contract test that sends each documented body to the handler is
-  a later item.
+  item 19 (⏳, recorded 2026-10-20). identity-experience's contract test found `PublicJWK` missing
+  `use` and `alg`, fixed in 1.1.0 (item 20).
 - **The BFFs' clients are identity-experience's.** ADR-GLB-010 §5.1 has a hand-written client
   contract-tested in CI against this document; that test lives in identity-experience.
 
@@ -993,6 +1049,13 @@ Where each stands (2026-10-08):
     Its first attempt found the drill itself wrong: compose prefers an exported variable to `.env`, so
     the restored service had started in `disable` and disabled the client and the orphan. The runbook's
     step 7 now says so.
+  - ✅ **The backup keeps the newest 14 complete sets, by count** (STD-GLB-009 2.0.0 rule 9 and
+    compliance check 7, both from 1.10.0; TDD-001 1.23.0 §Restore Evidence). The drill's step 3a seeds
+    16 older complete sets, a lone roles file and a `.partial`, and requires `deploy/dev/backup.sh` to
+    keep exactly the newest 14, the one it wrote among them, and delete only the three oldest; step 4a
+    requires a backup run with the database down to fail and delete nothing. First passing run:
+    deploy-dev run 39482677934, 2026-10-20, every check `true` (`retention` in
+    `restore-evidence.json`).
 - ✅ **Accept-to-enforcement delay, measured.** `deploy-dev` measures both on every run against the
   live kernel and writes them to the job summary. Above the 60-second propagation budget
   (`SAD-001 §7.7`) the job fails, and above this service's 2-second share it warns.
@@ -1039,11 +1102,12 @@ Where each stands (2026-10-08):
     `suspended`, recorded insert-only in `identity.principal_adoption`; and `GET /v1/bootstrap-ceremony`
     reads the ceremony record. Still not built: a human `:retire`; a route ending a quarantined
     Principal's sessions before its release.
-  - ✅ **Audit records are kept 7 years** (STD-GLB-007 1.1.0, TDD-001 1.23.0 §Audit Retention). Checked
-    2026-10-20: no audit table is purged at any age; the runtime holds no `DELETE` or `TRUNCATE` on any,
-    and no migration or production source deletes from one. `TestNoAuditRecordIsPurgedBeforeSevenYears`
-    and `TestNoSourceDeletesAnAuditRecord` assert it on every build. A purge past 7 years is not needed
-    before 2033 and is not built.
+  - ✅ **Audit records are kept 7 years, then purged** (STD-GLB-007 1.2.1 §Data Retention and §5 item
+    4, TDD-001 1.24.0 §Audit Retention; item 14). Every audit table refuses a younger record's delete
+    and every `TRUNCATE` to every role, and the scheduled pass purges the expired ones daily as a role
+    allowed only that delete. `TestNoAuditRecordIsPurgedBeforeSevenYears`,
+    `TestAYoungAuditRecordIsNeverDeleted`, `TestTheAuditPurgeDeletesOnlyExpiredRecords` and
+    `TestNoSourceDeletesAnAuditRecord` run on every build.
   - ✅ **Idempotency-Keys are kept 7 days** (STD-GLB-001 1.7.0, TDD-003 1.39.0 §Key Retention): the
     scheduled sweep purges completed keys past the published window through foundation-platform
     v0.5.0's `PurgeCompleted`; an uncompleted key is never purged.
@@ -1075,5 +1139,5 @@ operator, `GET /v1/bootstrap-ceremony` serves the record, and `POST /v1/bootstra
 records an insert-only review that the route and the database refuse from the operator, the witness or
 the first Principal. **Owner decision pending:** the names of the ceremony role and of the reviewer, and
 the review deadline, are explicit placeholders in the runbook's §Who performs it, and remain open until
-the owner decides (NIST SP 800-53 AU-6's assignments). The runbook also asks the owner to confirm that
-the reviewer's own Principal is the one the realm serves before the review.
+the owner decides (NIST SP 800-53 AU-6's assignments). ✅ Who the realm serves before the review is
+decided: the first Principal and the reviewer, and no one else (STD-IAM-001 2.10.0 §3.10, item 15).

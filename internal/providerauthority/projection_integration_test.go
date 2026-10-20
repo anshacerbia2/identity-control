@@ -83,6 +83,9 @@ func read(t *testing.T, p *db.Pool, grantID id.UUID) (held, bool) {
 func cleanup(t *testing.T, p *db.Pool, grantID id.UUID, events ...event.Envelope) {
 	t.Cleanup(func() {
 		_ = p.InTx(context.Background(), func(ctx context.Context, tx db.Tx) error {
+			// The use record refuses a young delete to every role (STD-GLB-007 1.2.1); off for this
+			// transaction alone.
+			_, _ = tx.Exec(ctx, `SET LOCAL session_replication_role = replica`)
 			_, _ = tx.Exec(ctx, `DELETE FROM identity.provider_emergency_use WHERE grant_id = $1`, grantID.String())
 			_, _ = tx.Exec(ctx, `DELETE FROM identity.provider_grant WHERE grant_id = $1`, grantID.String())
 			for _, e := range events {

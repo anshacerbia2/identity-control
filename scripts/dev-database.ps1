@@ -124,6 +124,8 @@ $checks = @(
     @{ label = "runtime cannot create in identity";    sql = "SELECT has_schema_privilege('identity_app','identity','CREATE');";               want = "f" }
     @{ label = "runtime cannot reach atlas schema";    sql = "SELECT has_schema_privilege('identity_app','atlas','USAGE');";                   want = "f" }
     @{ label = "runtime owns no table";                sql = "SELECT count(*) = 0 FROM pg_tables WHERE tableowner IN ('identity_app','identity_runtime');"; want = "t" }
+    @{ label = "runtime cannot delete an audit record"; sql = "SELECT has_table_privilege('identity_app','identity.privileged_access','DELETE');"; want = "f" }
+    @{ label = "runtime can become the purge role";    sql = "SELECT pg_has_role('identity_app','identity_audit_purger','SET');";               want = "t" }
 )
 $failed = $false
 foreach ($check in $checks) {
