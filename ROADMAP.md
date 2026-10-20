@@ -855,7 +855,7 @@ from; an open one says what it waits on.
 21. ✅ **The migration gates are written down** (ADR-GLB-004 §5.1 items 1 to 3; TDD-001 1.24.0 §Migration
     Gates): the cutover, squawk v2.70.0 after it and the text match before it and for `TRUNCATE`, the
     Atlas v1.3.4 pin, and `.squawk.toml`'s timeouts and its one excluded rule. Done 2026-10-20. The
-    timeout values are this repository's; no ADR or standard sets them yet.
+    timeout values are ADR-GLB-004 §5.1 item 2's (amended 2026-10-20).
 22. ✅ **One registration per developer device, in the design** (ADR-IAM-001 §5.12 as amended
     2026-10-20, STD-GLB-009 1.10.0 rule 15; TDD-003 1.40.0 §Client Key Records). Done 2026-10-20.
 

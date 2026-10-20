@@ -491,8 +491,8 @@ configuration for the day one exists.
   apply migrations", and "a statement_timeout also helps prevent long migrations that consume too many
   database resources" [R20]. Each migration after the cutover opens with `SET LOCAL lock_timeout =
   '5s';` and `SET LOCAL statement_timeout = '60s';`. `SET LOCAL` ends with the file's transaction, so
-  the values never reach the next file. The two values are this repository's convention; no ADR or
-  standard sets them yet (reported for `ADR-GLB-004`).
+  the values never reach the next file. The two values are the estate's: `ADR-GLB-004` §5.1 item 2,
+  "Every new migration sets its own lock and statement timeouts (amended 2026-10-20)".
 - **One excluded rule**, `prefer-bigint-over-int`, whose problem is "Using 32 bit integer fields can
   result in hitting the max int limit" [R21]. The schema uses `integer` only where a value is bounded:
   the single-row records, attempt counters, a run's counts and a mapping's version. Every identifier is
