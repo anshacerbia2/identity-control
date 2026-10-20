@@ -145,8 +145,16 @@ function Get-ScnehauxToken {
         # "openid organization:<tenant_id>" (ADR-IAM-006).
         [string] $Scope = "openid",
         # Returns the whole token response, the refresh token among them, rather than the access token.
-        [switch] $FullResponse
+        [switch] $FullResponse,
+        # The password to choose when the kernel requires one at this sign-in, as it does after a
+        # provider's temporary password (ADR-IAM-010 §5.3). Never printed.
+        [string] $NewPassword = "",
+        # Offers -Password, the temporary value, as the new password first, and records in
+        # $global:ScnehauxSameValueRefused whether the kernel refused it, as the realm's password
+        # history must (ADR-IAM-010 §5.2). Then chooses -NewPassword.
+        [switch] $OfferSameFirst
     )
+    $global:ScnehauxSameValueRefused = $null
 
     if ($OperatorTotpFile) {
         $AcrValues = "aal2"
@@ -319,6 +327,20 @@ function Get-ScnehauxToken {
             } else {
                 throw "the kernel asks for a one-time code: pass -Otp, or -TotpSecretFile on a development server"
             }
+        } elseif ($content -match 'name="password-new"') {
+            # The kernel's login-update-password page: a required new password.
+            if (-not $NewPassword) { throw "the kernel requires a new password at this sign-in: pass -NewPassword" }
+            $chosen = $NewPassword
+            if ($OfferSameFirst -and $null -eq $global:ScnehauxSameValueRefused) {
+                # Redisplayed with the same form if the kernel refuses it; set to $true below.
+                $chosen = $Password
+                $global:ScnehauxSameValueRefused = $false
+            } elseif ($OfferSameFirst -and $global:ScnehauxSameValueRefused -eq $false) {
+                # The page came back after the temporary value was offered: it was refused.
+                $global:ScnehauxSameValueRefused = $true
+            }
+            $fields["password-new"] = $chosen
+            $fields["password-confirm"] = $chosen
         } else {
             throw "the kernel showed a page this script does not answer"
         }

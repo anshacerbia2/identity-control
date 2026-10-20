@@ -14,10 +14,10 @@ Week numbers are relative to the first build week, not calendar dates.
 | `TDD-identity-control-002` | Tenant context projection into the kernel's Organizations, and its reconciliation | approved 2.0.0 (ADR-IAM-006); built in slices, below |
 | `TDD-identity-control-003` | Protocol client and protected-resource registration | approved |
 | `TDD-identity-control-004` | Workload and bounded agent identity | approved |
-| `TDD-identity-control-005` | Account-security and investigation API mediation | approved |
+| `TDD-identity-control-005` | Account-security and investigation API mediation | approved; 2.12.0's first credential is item 12 below |
 | `TDD-identity-control-006` | Provider authority from Organization's records: delivery intake, local projection, freshness, the per-request decision that replaces `provider_scope`, and the ceremony grant | built: intake and projection, bootstrap and freshness (`cmd/identity-provider-bootstrap`, the frontier poll), the per-request decision (`providerauthority.Decider`; `provider_scope` refused) and the ceremony grant with its insert-only retirement. The kernel's `provider_scope` mapper is removed in identity-kernel. Emergency grant validation (1.3.0, ADR-ORG-002 §5.2): each request a projected emergency grant authorizes records its use, and one unused for 90 days is overdue on `GET /v1/provider-grants:emergency-validation` and logged at WARN by the scheduled pass |
 | `TDD-identity-control-007` | The kernel event record and its completeness | built (item 8 below) |
-| `TDD-identity-control-008` | Account security notifications: addresses, requests from the kernel event record, dispatch | built in slices; the first is item 10 below |
+| `TDD-identity-control-008` | Account security notifications: addresses, requests from the kernel event record, dispatch | built in slices: items 10 and 11 below (1.7.0) |
 
 Three documents were inherited from the former monorepo. All three are gone from `docs/designs`,
 and their content lives here:
@@ -747,10 +747,38 @@ slice:
      production, this remains a production gate.
    - The development server runs the stand-in (1.6.0): `deploy/dev/.env.example` sets
      `IDENTITY_NOTIFICATION_DELIVERY=standin`, and its README says why.
-   - Open (1.6.0), each an owner decision: how an added address is proven on a development server,
-     whose code the stand-in delivers to no one (TDD-008 §Proving an Address on a Development Server,
-     four options); and a provider adding an address for a person with none, which ADR-IAM-007 §5.2
-     names and no design specifies (§A Person With No Address).
+   - ✅ Both 1.6.0 questions are decided by ADR-IAM-007 as amended 2026-10-19, and built (1.7.0):
+     - a development server proves an address with the `smtp-catcher` adapter and the stack's Mailpit
+       (option A): pinned by digest, SMTP on the internal network only, no relay, its interface on
+       `127.0.0.1`. Startup refuses the adapter unless `IDENTITY_ENVIRONMENT=development`, which
+       `deploy/dev/compose.yaml` now sets. `deploy-dev` reads each code from Mailpit's API;
+     - no provider adds an address (§A Person With No Address, aligned with §5.2 as narrowed).
+11. ✅ **Proven addresses for invitations** (`TDD-identity-control-008` 1.7.0, ADR-ORG-007 §5.3).
+   - `POST /v1/me/notification-addresses/{address_id}:send-proof` sends a code to an address the
+     person holds and has not proven, such as the creation address. One good code at a time; any
+     level; `:verify` then sets `verified_at`.
+   - `POST /v1/principals/{principal_id}/identifiers:match` answers Organization Control's workload,
+     the one `IDENTITY_DELIVERY_PRINCIPAL_ID` names, `{"match": true|false}`: whether an active human
+     holds the address `active` with `verified_at`. One shape for every case, no address in a response
+     or a log. `keyOptional`, a read carried in a body. organization-control calls it at an
+     invitation's acceptance.
+12. ✅ **A first credential** (`TDD-identity-control-005` 2.12.0, ADR-IAM-010, STD-IAM-001 2.8.0 §3.1).
+   - `POST /v1/principals/{principal_id}:issue-temporary-password`: a provider at a recent `aal2`, with a
+     reason and a key, while the kernel user still owes `UPDATE_PASSWORD`. 120 bits from the operating
+     system, set through the kernel's `reset-password` with `temporary` on, answered once with
+     `Cache-Control: no-store`. A retry answers the issuance without the value; the value is in no row,
+     log or idempotency record. `credential-established` once the person has set their own.
+   - Insert-only `identity.temporary_password_issuance` and `identity.temporary_password_outcome`
+     (used, lapsed, replaced, failed), and a `privileged_access` row per issuance.
+   - The lapse sweep (`IDENTITY_TEMPORARY_PASSWORD_TTL`, 24 hours at most;
+     `IDENTITY_TEMPORARY_PASSWORD_SWEEP_INTERVAL`) deletes the issuance's own password up to one interval
+     before its lapse; the person's change in the kernel event record, or a user no longer owing
+     `UPDATE_PASSWORD`, records it used. The admin `reset-password` is notified as a password bound by an
+     administrator (`TDD-identity-control-008` 1.7.0).
+   - Proven against the live kernel by `scripts/dev-first-credential-proof.ps1` in `deploy-dev`. The
+     refusal of the temporary value as the new password needs identity-kernel's `passwordHistory`
+     (identity-kernel #70); against a kernel without it the step warns, and `deploy-dev` is run by hand
+     with `kernel_ref` naming that branch.
 
 ## Waiting on the Keycloak proof-of-concept
 

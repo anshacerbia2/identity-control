@@ -31,6 +31,12 @@ func TestEachProvenMarkMapsAsTheTableSays(t *testing.T) {
 		"a removal through the Admin API": {keycloak.KernelEvent{Kind: keycloak.KindAdminEvent, ID: "a", Type: "ACTION",
 			UserID: "kc-operator", ResourceType: "USER", ResourcePath: "users/kc-subject/credentials/c1"},
 			EventAuthenticatorRemoved, "kc-subject", map[string]string{"actor": ActorAdministrator}},
+		"a password set through the Admin API, a temporary one among them (ADR-IAM-010)": {keycloak.KernelEvent{
+			Kind: keycloak.KindAdminEvent, ID: "r", Type: "ACTION", UserID: "kc-service", ResourceType: "USER",
+			ResourcePath: "users/kc-subject/reset-password"},
+			EventAuthenticatorBound, "kc-subject", map[string]string{"authenticator": "password", "actor": ActorAdministrator}},
+		"another admin action on a user": {keycloak.KernelEvent{Kind: keycloak.KindAdminEvent, ID: "l", Type: "ACTION",
+			ResourceType: "USER", ResourcePath: "users/kc-subject/logout"}, "", "", nil},
 		"the enrolment's LOGIN": {user("LOGIN", map[string]string{"credential_type": "recovery-authn-codes",
 			"custom_required_action": "CONFIGURE_RECOVERY_AUTHN_CODES"}), "", "", nil},
 		"the legacy UPDATE_TOTP": {user("UPDATE_TOTP", map[string]string{"credential_type": "otp"}), "", "", nil},

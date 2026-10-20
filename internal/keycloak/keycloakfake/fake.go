@@ -25,6 +25,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/anshacerbia2/foundation-platform/id"
 
@@ -98,6 +99,11 @@ type Client struct {
 	AmbiguousOrganizationCreate bool
 	organizations               map[string]*organization
 
+	// Now dates a credential SetTemporaryPassword creates; nil uses the wall clock. temporary holds
+	// the last value set, for a test's assertion alone.
+	Now       func() time.Time
+	temporary map[keycloak.UserID]string
+
 	users    map[keycloak.UserID]stored
 	security map[keycloak.UserID]Security
 	nextID   int
@@ -115,6 +121,8 @@ type Calls struct {
 	Logout            int
 	DeleteCredential  int
 	DeleteSession     int
+	// SetTemporaryPassword counts first credentials set (ADR-IAM-010).
+	SetTemporaryPassword int
 	// CreateOrganization counts Organizations created, so a test can assert that a lost response
 	// was followed by a lookup rather than a second create.
 	CreateOrganization int

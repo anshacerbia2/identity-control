@@ -639,3 +639,21 @@ func TestNotificationRecordsAreNeverDeleted(t *testing.T) {
 		}
 	}
 }
+
+// A temporary password's issuance and outcome are insert-only (ADR-IAM-010, TDD-identity-control-005
+// 2.12.0): the runtime records and reads them, and rewrites or removes neither.
+func TestTemporaryPasswordRecordsAreInsertOnly(t *testing.T) {
+	pool, ctx := openPool(t)
+	for _, table := range []string{"identity.temporary_password_issuance", "identity.temporary_password_outcome"} {
+		for _, privilege := range []string{"SELECT", "INSERT"} {
+			if !queryBool(t, pool, ctx, `SELECT has_table_privilege($1, $2, $3)`, runtimeRole, table, privilege) {
+				t.Errorf("%s lacks %s on %s", runtimeRole, privilege, table)
+			}
+		}
+		for _, privilege := range []string{"UPDATE", "DELETE", "TRUNCATE"} {
+			if queryBool(t, pool, ctx, `SELECT has_table_privilege($1, $2, $3)`, runtimeRole, table, privilege) {
+				t.Errorf("%s holds %s on %s; the record of a first credential could be rewritten", runtimeRole, privilege, table)
+			}
+		}
+	}
+}

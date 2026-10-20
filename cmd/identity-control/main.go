@@ -32,6 +32,7 @@ import (
 
 	"github.com/anshacerbia2/identity-control/internal/config"
 	"github.com/anshacerbia2/identity-control/internal/delivery"
+	"github.com/anshacerbia2/identity-control/internal/firstcredential"
 	"github.com/anshacerbia2/identity-control/internal/httpapi"
 	"github.com/anshacerbia2/identity-control/internal/identity/provisioning"
 	"github.com/anshacerbia2/identity-control/internal/investigation"
@@ -322,7 +323,26 @@ func run() error {
 	// Each kernel event recorded for the first time that ADR-IAM-007 notifies requests its notification
 	// in the same transaction (TDD-identity-control-008).
 	requester := securitynotify.NewRequester(logger)
-	kernelEvents.OnRecorded(requester.FromKernelEvent)
+	// A provider's temporary password for a person who has never set one (ADR-IAM-010,
+	// TDD-identity-control-005 2.12.0), through the Principal credential, which holds manage-users. The
+	// person's own password change in the kernel event record ends it as used.
+	firstCredentials, err := firstcredential.New(pool, kernel, firstcredential.Config{
+		Realm: keycloak.Realm(cfg.KeycloakRealm), TTL: cfg.TemporaryPasswordTTL, CallTimeout: cfg.ProvisionTimeout,
+		SweepInterval: cfg.TemporaryPasswordSweepInterval,
+	}, logger)
+	if err != nil {
+		return fmt.Errorf("first credential service: %w", err)
+	}
+	temporaryPasswords, err := httpapi.NewTemporaryPasswords(firstCredentials, cfg.StepUpMaxAge)
+	if err != nil {
+		return fmt.Errorf("temporary password handler: %w", err)
+	}
+	kernelEvents.OnRecorded(func(ctx context.Context, tx db.Tx, realm keycloak.Realm, e keycloak.KernelEvent) error {
+		if err := requester.FromKernelEvent(ctx, tx, realm, e); err != nil {
+			return err
+		}
+		return firstCredentials.FromKernelEvent(ctx, tx, realm, e)
+	})
 	// The security commands request their own notifications in the transaction that records them
 	// applied: a provider's restore, the last step of assisted recovery (TDD-identity-control-008
 	// 1.3.0), and an authenticator removed by the person or a provider, told as who acted (1.4.0).
@@ -346,10 +366,12 @@ func run() error {
 		Investigation: investigationHandler,
 		Security:      securityHandler,
 		Me:            meHandler,
-		Assurance:     httpapi.AssurancePolicy{Report: cfg.ReportAssurance, Logger: logger},
-		Database:      pool,
-		Keys:          pool,
-		Telemetry:     telemetry,
+
+		TemporaryPasswords: temporaryPasswords,
+		Assurance:          httpapi.AssurancePolicy{Report: cfg.ReportAssurance, Logger: logger},
+		Database:           pool,
+		Keys:               pool,
+		Telemetry:          telemetry,
 	}
 	projection, err := providerauthority.New(pool)
 	if err != nil {
@@ -377,10 +399,13 @@ func run() error {
 			return fmt.Errorf("delivery routes: %w", err)
 		}
 		routesConfig.Deliveries, routesConfig.DeliveryVerifier = router, deliveryVerifier
-		logger.Info("the delivery intake admits Organization Control's workload",
+		// The identifier match admits the same workload, with the same rule (TDD-identity-control-008
+		// 1.7.0, ADR-ORG-007 §5.3).
+		routesConfig.Identifiers, routesConfig.IdentifierVerifier = addresses, deliveryVerifier
+		logger.Info("the delivery intake and the identifier match admit Organization Control's workload",
 			slog.String("principal_id", cfg.DeliveryPrincipal.String()))
 	} else {
-		logger.Warn("IDENTITY_DELIVERY_PRINCIPAL_ID is unset; the provider authority intake accepts no delivery")
+		logger.Warn("IDENTITY_DELIVERY_PRINCIPAL_ID is unset; the provider authority intake accepts no delivery and the identifier match answers 503")
 	}
 
 	// The projection's freshness, read from Organization Control's frontier as this service's
@@ -536,15 +561,28 @@ func run() error {
 	go scheduleWorkloadSweeps(ctx, workloads, cfg.WorkloadSweepInterval, logger)
 	// The dispatcher hands requested notifications to the delivery adapter. With none configured the
 	// requests are recorded and wait for the Notification Platform (TDD-identity-control-008).
-	if cfg.NotificationDelivery == "standin" {
-		dispatcher, err := securitynotify.NewDispatcher(pool, securitynotify.StandIn{Logger: logger}, logger)
+	var deliverer securitynotify.Deliverer
+	switch cfg.NotificationDelivery {
+	case "standin":
+		deliverer = securitynotify.StandIn{Logger: logger}
+		logger.Warn("IDENTITY_NOTIFICATION_DELIVERY=standin: account security notifications are accepted and not delivered")
+	case "smtp-catcher":
+		// A development server's mail catcher (ADR-IAM-007 §5.3, TDD-identity-control-008 1.7.0); config
+		// refused it unless IDENTITY_ENVIRONMENT is development.
+		deliverer = securitynotify.SMTPCatcher{Address: cfg.SMTPCatcherAddress, From: cfg.SMTPCatcherFrom,
+			Timeout: cfg.ProvisionTimeout, Logger: logger}
+		logger.Warn("IDENTITY_NOTIFICATION_DELIVERY=smtp-catcher: account security notifications go to the development mail catcher and reach no inbox",
+			slog.String("catcher", cfg.SMTPCatcherAddress))
+	}
+	if deliverer != nil {
+		dispatcher, err := securitynotify.NewDispatcher(pool, deliverer, logger)
 		if err != nil {
 			return fmt.Errorf("security notification dispatcher: %w", err)
 		}
 		dispatcher.WithSealer(refs)
-		logger.Warn("IDENTITY_NOTIFICATION_DELIVERY=standin: account security notifications are accepted and not delivered")
 		go scheduleNotificationDispatch(ctx, dispatcher, logger)
 	}
+	go scheduleTemporaryPasswordSweeps(ctx, firstCredentials, cfg.TemporaryPasswordSweepInterval, logger)
 	go scheduleSweeps(ctx, provisioner, registrar, workloads, reconciler, providers, cfg.RegistrationReconcileInterval, logger)
 	if freshness != nil {
 		go freshness.Poll(ctx, projection, frontier, providerauthority.PollInterval, logger)
@@ -762,6 +800,24 @@ func scheduleTenantSweeps(ctx context.Context, sweep *tenantcontext.Reconciler, 
 
 // scheduleNotificationDispatch hands due account security notifications to the adapter every
 // interval, the first at once (TDD-identity-control-008 §Dispatch).
+// scheduleTemporaryPasswordSweeps lapses unused temporary passwords every interval, the first at once
+// (ADR-IAM-010 §5.2). A failed removal is logged and retried by the next sweep.
+func scheduleTemporaryPasswordSweeps(ctx context.Context, sweeper *firstcredential.Service, interval time.Duration,
+	logger *slog.Logger) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		if _, err := sweeper.Sweep(ctx); err != nil && ctx.Err() == nil {
+			logger.Error("temporary password lapse sweep failed", slog.String("error", err.Error()))
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
 func scheduleNotificationDispatch(ctx context.Context, dispatcher *securitynotify.Dispatcher, logger *slog.Logger) {
 	ticker := time.NewTicker(securitynotify.DispatchInterval)
 	defer ticker.Stop()

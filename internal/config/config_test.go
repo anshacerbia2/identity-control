@@ -625,3 +625,78 @@ func TestTheNotificationStandInIsRefusedInProduction(t *testing.T) {
 		}
 	}
 }
+
+// The mail catcher adapter renders messages, codes included, for a catcher that delivers nothing, so
+// only a development server admits it (ADR-IAM-007 §5.3, TDD-identity-control-008 1.7.0).
+func TestTheMailCatcherIsAdmittedOnADevelopmentServerAlone(t *testing.T) {
+	for _, c := range []struct {
+		environment, address string
+		ok                   bool
+	}{
+		{"development", "mailpit:1025", true},
+		{"development", "", false},
+		{"development", "mailpit", false},
+		{"non-production", "mailpit:1025", false},
+		{"production", "mailpit:1025", false},
+	} {
+		setRequired(t)
+		t.Setenv("IDENTITY_ENVIRONMENT", c.environment)
+		t.Setenv("IDENTITY_NOTIFICATION_DELIVERY", "smtp-catcher")
+		t.Setenv("IDENTITY_SMTP_CATCHER_ADDRESS", c.address)
+		cfg, err := config.Load()
+		if (err == nil) != c.ok {
+			t.Errorf("%s with %q: err %v, want accepted %t", c.environment, c.address, err, c.ok)
+		}
+		if err == nil && (!cfg.Development || cfg.Production || cfg.SMTPCatcherAddress != c.address ||
+			cfg.SMTPCatcherFrom == "" || cfg.NotificationDelivery != "smtp-catcher") {
+			t.Errorf("%s: %+v", c.environment, cfg)
+		}
+	}
+	// development is non-production for every other rule, and admits the stand-in too.
+	setRequired(t)
+	t.Setenv("IDENTITY_ENVIRONMENT", "development")
+	t.Setenv("IDENTITY_NOTIFICATION_DELIVERY", "standin")
+	if cfg, err := config.Load(); err != nil || cfg.Production || !cfg.Development {
+		t.Errorf("development with standin: %+v, %v", cfg, err)
+	}
+}
+
+// A temporary password lasts 24 hours by default and at most, and at least an hour (STD-IAM-001 2.8.0
+// §3.1, ADR-IAM-010 §5.2).
+func TestTheTemporaryPasswordLapseIsBounded(t *testing.T) {
+	for _, c := range []struct {
+		value string
+		want  time.Duration
+		ok    bool
+	}{
+		{"", 24 * time.Hour, true},
+		{"1h", time.Hour, true},
+		{"12h", 12 * time.Hour, true},
+		{"59m", 0, false},
+		{"25h", 0, false},
+		{"soon", 0, false},
+	} {
+		setRequired(t)
+		t.Setenv("IDENTITY_TEMPORARY_PASSWORD_TTL", c.value)
+		cfg, err := config.Load()
+		if (err == nil) != c.ok || (err == nil && cfg.TemporaryPasswordTTL != c.want) {
+			t.Errorf("%q: %s, %v", c.value, cfg.TemporaryPasswordTTL, err)
+		}
+	}
+}
+
+// The lapse sweep runs often enough that a value goes by its lapse: it takes each up to one interval
+// early (ADR-IAM-010 §5.2).
+func TestTheLapseSweepIntervalIsBounded(t *testing.T) {
+	for value, ok := range map[string]bool{"": true, "10s": true, "15m": true, "0s": false, "1h": false} {
+		setRequired(t)
+		t.Setenv("IDENTITY_TEMPORARY_PASSWORD_SWEEP_INTERVAL", value)
+		cfg, err := config.Load()
+		if (err == nil) != ok {
+			t.Errorf("%q: %v, want accepted %t", value, err, ok)
+		}
+		if value == "" && err == nil && cfg.TemporaryPasswordSweepInterval != 5*time.Minute {
+			t.Errorf("the default is %s", cfg.TemporaryPasswordSweepInterval)
+		}
+	}
+}

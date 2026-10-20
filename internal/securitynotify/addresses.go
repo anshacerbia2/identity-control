@@ -41,6 +41,10 @@ var (
 	ErrNotPending     = errors.New("securitynotify: the address is not waiting for a proof")
 	ErrWrongCode      = errors.New("securitynotify: the code is wrong, expired or used up")
 	ErrLastAddress    = errors.New("securitynotify: the last active address cannot be removed")
+	// ErrProven and ErrProofOutstanding refuse a send-proof (TDD-identity-control-008 1.7.0): the address
+	// is not an active one without verified_at, or a code sent to it is still good.
+	ErrProven           = errors.New("securitynotify: the address is not an active address waiting to be proven")
+	ErrProofOutstanding = errors.New("securitynotify: a code sent to the address is still good; use it, or wait until it expires")
 )
 
 // Sealer seals a proof code for its request and opens it for the dispatcher: *securityref.Codec.
@@ -58,6 +62,8 @@ type Address struct {
 	State      string     `json:"state"`
 	AddedAt    time.Time  `json:"added_at"`
 	VerifiedAt *time.Time `json:"verified_at,omitempty"`
+	// ProofExpiresAt is when the code sent to the address stops being good, while one is outstanding.
+	ProofExpiresAt *time.Time `json:"proof_expires_at,omitempty"`
 }
 
 // Addresses serves a person's own addresses.
@@ -115,7 +121,8 @@ func Mask(address string) string {
 	return local[:1] + "***@" + domain
 }
 
-const listOwnStatement = `SELECT address_id::text, channel, address, origin, state, added_at, verified_at
+const listOwnStatement = `SELECT address_id::text, channel, address, origin, state, added_at, verified_at,
+       CASE WHEN proof_hash IS NOT NULL AND proof_attempts < 5 AND proof_expires_at > now() THEN proof_expires_at END
 FROM identity.notification_address
 WHERE principal_id = $1 AND state <> 'removed'
 ORDER BY added_at, address_id`
@@ -134,13 +141,18 @@ func (a *Addresses) List(ctx context.Context, principal id.UUID) ([]Address, err
 				v       Address
 				address string
 			)
-			if err := rows.Scan(&address, &v.Channel, &v.Address, &v.Origin, &v.State, &v.AddedAt, &v.VerifiedAt); err != nil {
+			if err := rows.Scan(&address, &v.Channel, &v.Address, &v.Origin, &v.State, &v.AddedAt, &v.VerifiedAt,
+				&v.ProofExpiresAt); err != nil {
 				return err
 			}
 			if v.AddressID, err = id.Parse(address); err != nil {
 				return err
 			}
 			v.AddedAt = v.AddedAt.UTC()
+			if v.ProofExpiresAt != nil {
+				at := v.ProofExpiresAt.UTC()
+				v.ProofExpiresAt = &at
+			}
 			out = append(out, v)
 		}
 		return rows.Err()
@@ -261,15 +273,105 @@ func (a *Addresses) Add(ctx context.Context, principal id.UUID, raw string) (Add
 	return Address{AddressID: addressID, Channel: "email", Address: address, Origin: "added", State: "pending", AddedAt: now}, nil
 }
 
-const readProofStatement = `SELECT proof_hash, proof_expires_at, proof_attempts, address
+const readProofStatement = `SELECT proof_hash, proof_expires_at, proof_attempts, address, state
 FROM identity.notification_address
-WHERE address_id = $1 AND principal_id = $2 AND state = 'pending'`
+WHERE address_id = $1 AND principal_id = $2
+  AND (state = 'pending' OR (state = 'active' AND verified_at IS NULL))`
 
 const failedAttemptStatement = `UPDATE identity.notification_address SET proof_attempts = proof_attempts + 1 WHERE address_id = $1`
 
 const activateStatement = `UPDATE identity.notification_address
 SET state = 'active', verified_at = now(), proof_hash = NULL, proof_expires_at = NULL
 WHERE address_id = $1`
+
+// sendProofStatement gives an active, unproven address a new code: its hash, its expiry, and a fresh
+// count of attempts. It applies only while no code sent before is still good, so a code is never
+// replaced by a resend before it could be used up or lapse.
+const sendProofStatement = `UPDATE identity.notification_address
+SET proof_hash = $3, proof_expires_at = $4, proof_attempts = 0
+WHERE address_id = $1 AND principal_id = $2 AND state = 'active' AND verified_at IS NULL
+  AND NOT (proof_hash IS NOT NULL AND proof_attempts < 5 AND proof_expires_at > $5)
+RETURNING address, origin, added_at`
+
+const readHeldStatement = `SELECT state, verified_at IS NOT NULL
+FROM identity.notification_address
+WHERE address_id = $1 AND principal_id = $2 AND state <> 'removed'`
+
+// SendProof sends a proof code to an address the person holds and has not proven, such as the address
+// a provider created them with (ADR-ORG-007 §5.3, TDD-identity-control-008 1.7.0). The code is drawn,
+// sealed and sent as an added address's is, to that address alone. Proving it changes no recipient,
+// so nothing else is told.
+func (a *Addresses) SendProof(ctx context.Context, principal, addressID id.UUID) (Address, error) {
+	code, err := a.newCode()
+	if err != nil {
+		return Address{}, err
+	}
+	sealed, err := a.sealer.Seal(securityref.KindNotificationProof, principal, ProofPurpose, "", code)
+	if err != nil {
+		return Address{}, fmt.Errorf("securitynotify: seal the proof code: %w", err)
+	}
+	now := a.now().UTC()
+	expires := now.Add(a.ttl)
+	out := Address{AddressID: addressID, Channel: "email", State: "active", ProofExpiresAt: &expires}
+	err = a.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		if _, err := lockOwn(ctx, tx, principal); err != nil {
+			return err
+		}
+		rows, err := tx.Query(ctx, sendProofStatement, addressID.String(), principal.String(),
+			proofHash(addressID, code), expires, now)
+		if err != nil {
+			return err
+		}
+		sent := rows.Next()
+		if sent {
+			err = rows.Scan(&out.Address, &out.Origin, &out.AddedAt)
+		}
+		rows.Close()
+		if err == nil {
+			err = rows.Err()
+		}
+		if err != nil {
+			return err
+		}
+		if !sent {
+			var (
+				state  string
+				proven bool
+			)
+			rows, err := tx.Query(ctx, readHeldStatement, addressID.String(), principal.String())
+			if err != nil {
+				return err
+			}
+			found := rows.Next()
+			if found {
+				err = rows.Scan(&state, &proven)
+			}
+			rows.Close()
+			if err == nil {
+				err = rows.Err()
+			}
+			switch {
+			case err != nil:
+				return err
+			case !found:
+				return ErrNoSuchAddress
+			case state == "active" && !proven:
+				return ErrProofOutstanding
+			default:
+				return ErrProven
+			}
+		}
+		out.AddedAt = out.AddedAt.UTC()
+		// One request per code: the source key names the address and the instant the code was drawn.
+		return a.request(ctx, tx, principal, EventAddressProof,
+			fmt.Sprintf("command:address:%s:proof:%d", addressID, now.UnixNano()),
+			map[string]string{"address": Mask(out.Address)}, []id.UUID{addressID}, &sealed)
+	})
+	if err != nil {
+		return Address{}, fmt.Errorf("securitynotify: send a proof: %w", err)
+	}
+	return out, nil
+}
 
 // Verify proves a pending address with its code. A wrong code counts an attempt and is committed, so
 // guessing is bounded across requests.
@@ -302,10 +404,11 @@ func (a *Addresses) Verify(ctx context.Context, principal, addressID id.UUID, co
 			expires  *time.Time
 			attempts int
 			address  string
+			state    string
 			pending  = rows.Next()
 		)
 		if pending {
-			err = rows.Scan(&hash, &expires, &attempts, &address)
+			err = rows.Scan(&hash, &expires, &attempts, &address, &state)
 		}
 		rows.Close()
 		if err == nil {
@@ -326,6 +429,11 @@ func (a *Addresses) Verify(ctx context.Context, principal, addressID id.UUID, co
 		}
 		if _, err := tx.Exec(ctx, activateStatement, addressID.String()); err != nil {
 			return err
+		}
+		if state == "active" {
+			// An address already held is proven (1.7.0): it already received every notification, so
+			// no recipient changes and nobody is told.
+			return nil
 		}
 		return a.request(ctx, tx, principal, EventAddressChanged, "command:address:"+addressID.String()+":added",
 			map[string]string{"change": "added", "address": Mask(address), "actor": ActorSelf}, before, nil)

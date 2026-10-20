@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-005
   title: Account Security and Investigation API Mediation
   owner: Core Platform Team
-  version: 2.11.2
+  version: 2.12.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-14
-  last_reviewed: 2026-10-09
+  last_reviewed: 2026-10-19
   parent_sad: SAD-001
 ---
 
@@ -37,6 +37,8 @@ API that does not expose Keycloak identifiers or unsupported kernel interfaces.
 - Step-up requirements, self-action boundaries, reason capture, idempotency, retry,
   and evidence publication.
 - Read access to reconciler findings and enterprise audit events.
+- A provider's temporary password for a person who has never set one, its record and its lapse
+  (2.12.0, `ADR-IAM-010`, §A First Credential).
 
 **Out of scope**
 
@@ -335,6 +337,125 @@ POST  /v1/me/authenticators:enroll          {"type":"recovery-codes"}  ->  {"act
   - A set below its total has been used for recovery. The account page says so, and offers a new
     set (`ADR-IAM-005 §5.4`).
 
+## A First Credential (2.12.0)
+
+A person a provider creates holds no credential. `POST /v1/principals` creates the kernel user with
+`UPDATE_PASSWORD` outstanding (`TDD-identity-control-001` §Creation Path), and a required action runs
+only "after the user provides credentials" (`ADR-IAM-010` [R9]). `ADR-IAM-010` decides that a provider
+issues a temporary password, shown once. `STD-IAM-001` 2.8.0 §3.1 admits that one value into this
+service and the issuing BFF, for one response, under conditions this section holds one by one.
+
+```text
+POST /v1/principals/{principal_id}:issue-temporary-password
+     provider, aal2 within IDENTITY_STEP_UP_MAX_AGE, X-Administrative-Reason, Idempotency-Key
+     body: empty or {}
+201  Cache-Control: no-store
+     {"temporary_password": {"issuance_id", "principal_id", "issued_by", "issued_at", "lapses_at", "value"}}
+200  a retry with the same Idempotency-Key: the same object without "value", Cache-Control: no-store
+403  the provider's own Principal
+404  no such Principal
+409  state-transition-refused, detail "credential-established: ...": the person has set a password
+409  state-transition-refused: not an active human linked to its kernel user
+503  dependency-unavailable: the kernel could not be reached; issue again
+```
+
+**Who and when.** A provider, held like every provider command: `aal2`, an authentication within
+`IDENTITY_STEP_UP_MAX_AGE`, and a reason (§Step-Up). The Principal is a human, `active`, linked to its
+kernel user, and that user still has `UPDATE_PASSWORD` outstanding, read from the kernel at the
+request. It is not a password reset, which `ADR-IAM-010 §6` leaves undecided. `ADR-IAM-010 §5.1` names the
+refusal `credential-established`. The problem registry is closed (foundation-platform `httpapi`), so the
+name leads the detail of a `409 state-transition-refused`.
+
+**The conditions of `STD-IAM-001` 2.8.0 §3.1, as built:**
+
+| Condition | How it holds |
+| :-- | :-- |
+| Generated, never chosen, at least 112 bits | 24 symbols of Crockford's base32 alphabet, "10 digits and 22 letters" without I, L and O, which "Can be confused with `1`" or `0` [R19], each the low 5 bits of a byte from `crypto/rand`, the operating system's source: 120 bits. A body other than empty or `{}` is refused, so a provider cannot send a value |
+| Temporary in the kernel, refused as the new password | `PUT /admin/realms/{realm}/users/{id}/reset-password` with `temporary` true, "the user must change the password at the first login" (`ADR-IAM-010` [R9][R10]). The realm's `passwordHistory(3)` refuses it at the change: identity-kernel's compat `TestAFirstCredentialIsChangedAtFirstSignInAndNeverKept` proves "Invalid password: must not be equal to any of last 3 passwords" (`TDD-identity-kernel-001` §Password Policy) |
+| Shown once, to a provider at `aal2`, over TLS | The provider route's level and freshness; the BFF reaches this service over TLS in every shared environment |
+| `Cache-Control: no-store` | On every answer of the route, a refusal included |
+| Never logged, persisted or replayed | The value is held in this process only between its generation and the response. It is in no row, no log line (the log names the issuance, the Principal and the provider), no trace, and no idempotency record: the key's answer is the issuance without the value. The kernel's admin event records the path and no representation (identity-kernel compat, 26.7.5) |
+| Lapses within 24 hours | `IDENTITY_TEMPORARY_PASSWORD_TTL`, 24 hours by default and at most, 1 hour at least. The record's check constraint refuses a lapse beyond 24 hours, and the sweep removes a value up to one sweep interval before its lapse, never after |
+
+**The order, which keeps every value the kernel holds accounted for.**
+
+```text
+issue(provider, principal, reason, key):
+    T1  claim the key (platform.idempotency_key, scope temporary-password:principal:<provider>)
+        replay: answer the recorded issuance, without a value
+        lock the mapping; refuse unless an active human with a kernel user
+    read the kernel user's required actions; refuse credential-established unless UPDATE_PASSWORD
+    generate the value
+    T2  insert the issuance (issued_at, lapses_at); an earlier open issuance of the Principal ends 'replaced'
+    PUT reset-password {type: password, value, temporary: true}
+        a definite refusal: the issuance ends 'failed'; the key is released
+        no answer: the issuance stays open, so the sweep removes whatever the kernel holds
+    T3  the privileged_access row (temporary_password.issue, applied) and the key's answer, without the value
+    answer 201 with the value
+```
+
+A refusal before T2 releases the key, so a corrected retry runs. A process that stops after T2 leaves
+an open issuance the sweep lapses, and a key in progress that refuses its retry, which is the safe
+direction. The provider issues again with a new key, which replaces the issuance.
+
+**Records.** Both insert-only; the runtime holds neither `UPDATE` nor `DELETE` (`grants.sql`):
+
+```sql
+CREATE TABLE identity.temporary_password_issuance (
+    issuance_id    UUID PRIMARY KEY,
+    principal_id   UUID NOT NULL REFERENCES identity.principal_mapping,
+    issued_by      UUID NOT NULL,        -- the provider; never the Principal itself
+    reason         TEXT NOT NULL,
+    correlation_id TEXT NOT NULL,
+    emergency      BOOLEAN NOT NULL,
+    assurance      TEXT NOT NULL,        -- acr and auth_time of the issuing provider
+    issued_at      TIMESTAMPTZ NOT NULL,
+    lapses_at      TIMESTAMPTZ NOT NULL  -- after issued_at, at most 24 hours after it
+);
+CREATE TABLE identity.temporary_password_outcome (
+    issuance_id UUID PRIMARY KEY REFERENCES identity.temporary_password_issuance,
+    outcome     TEXT NOT NULL,           -- used, lapsed, replaced, failed
+    recorded_at TIMESTAMPTZ NOT NULL
+);
+```
+
+An issuance with no outcome is open. Neither table holds the value.
+
+**Used.** The kernel event record shows the person's change at the first sign-in as a user
+`UPDATE_CREDENTIAL` naming `credential_type=password` (identity-kernel compat, 26.7.5;
+`TDD-identity-control-007`). The sweep's hook records every open issuance of that Principal issued
+before the event `used`, in the sweep's transaction. A change the record has not yet swept is found by
+the lapse sweep instead: a user no longer owing `UPDATE_PASSWORD` has replaced the value.
+
+**Lapsed.** Every `IDENTITY_TEMPORARY_PASSWORD_SWEEP_INTERVAL` (5 minutes), the lapse sweep takes the
+realm's open issuances lapsing before its next run:
+
+```text
+for each open issuance with lapses_at <= now + interval, oldest first, 50 a run:
+    the kernel user is gone                     -> lapsed
+    the user no longer owes UPDATE_PASSWORD     -> used
+    otherwise delete each password credential created within one call timeout and a minute of
+        issued_at (DELETE /users/{id}/credentials/{credentialId}), then -> lapsed
+    a kernel failure leaves it open, and the next run retries it
+```
+
+- **Only the issuance's own password is deleted.** The person can only choose a password after the
+  response that carries the value, so a password created after the set window is theirs and is kept,
+  even if `UPDATE_PASSWORD` still reads outstanding in the instant between two reads.
+- **The authenticator guard does not apply.** `last_authenticator` keeps a person's last first factor
+  (§Authenticator Guard). The person never held this one: it was set for them and never used.
+- **Told.** The kernel's admin `ACTION` on `users/{id}/reset-password` is notified as a password bound
+  by an administrator, and the removal at the lapse as an authenticator removed by an administrator
+  (`TDD-identity-control-008` 1.7.0). An issuance that lapses unused is logged at `WARN` with the
+  Principal, for the issuing provider (`ADR-IAM-010 §6`).
+
+**Development server.** `scripts/dev-first-credential-proof.ps1`, in `deploy-dev`: issue, the value
+once with `no-store`, a retry without it, the first sign-in forced to change it, the temporary value
+refused as the new one and no longer signing in, a second issue refused `credential-established`, both
+notifications, and an unused value lapsed and removed, with no value in any record or log line. The
+lapse cannot wait 24 hours: the harness moves the issuance's `lapses_at` to one second after its issue
+as the database's superuser, a test's clock that the runtime role cannot use.
+
 ## Containment as Built (2.2.0)
 
 Slice 2 builds `:suspend`, `:restore`, `sessions:terminate-all`, `authenticators/{security_ref}:revoke`
@@ -599,6 +720,7 @@ GET   /v1/principals/{principal_id}/events
 POST  /v1/principals/{principal_id}:suspend
 POST  /v1/principals/{principal_id}:restore
 POST  /v1/principals/{principal_id}:retire
+POST  /v1/principals/{principal_id}:issue-temporary-password     2.12.0, §A First Credential
 POST  /v1/principals/{principal_id}/sessions:terminate-all
 POST  /v1/principals/{principal_id}/authenticators/{security_ref}:revoke
 
@@ -812,6 +934,8 @@ transaction, and the table stays the local record.
 | `IDENTITY_ADMIN_SEARCH_MIN_LENGTH` | `3` | Minimum search specificity |
 | `IDENTITY_ADMIN_SEARCH_PAGE_SIZE` | `25` | Maximum results per page |
 | `IDENTITY_AUDIT_QUERY_TIMEOUT` | `1s` | Enterprise evidence read budget |
+| `IDENTITY_TEMPORARY_PASSWORD_TTL` | `24h` | How long a temporary password lasts unused; at least `1h`, at most `24h` (2.12.0) |
+| `IDENTITY_TEMPORARY_PASSWORD_SWEEP_INTERVAL` | `5m` | How often the lapse sweep runs, between `1s` and `15m`; it removes a value up to one interval before its lapse (2.12.0) |
 
 Reference encryption keys and the Keycloak administration credential come from the
 approved secret manager and have independent rotation schedules.
@@ -848,6 +972,24 @@ approved secret manager and have independent rotation schedules.
 - Every administrative read and mutation emits attributable evidence.
 - Administrative mutation without reason, version, correlation, or idempotency key is
   refused before any kernel call.
+
+### A First Credential (2.12.0)
+
+- The value is 24 symbols of the alphabet, 120 bits, and evenly drawn; a failed random source issues
+  nothing (`internal/firstcredential`).
+- Issued once: the kernel holds it as temporary with `UPDATE_PASSWORD` outstanding, one issuance and one
+  evidence row are recorded, and the value is in no row of the issuance, outcome, evidence,
+  notification or idempotency tables. A retry with the key answers without it and calls nothing; the
+  key on another Principal is a conflict. A second issuance replaces the first.
+- Refused: a person who set their own password (`credential-established`), an unknown, suspended or
+  unlinked Principal, a provider's own Principal, a request without a reason, a key or a recent `aal2`,
+  and a body that names a value. Each refusal releases or rolls back its key.
+- A kernel failure leaves the issuance open, and the sweep removes it. The sweep lapses an unused
+  value, records a used one used, deletes only the issuance's own password, retries what the kernel
+  refused, and finds nothing on a repeat. The person's password change in the kernel event record is a
+  use; one before the issuance is not.
+- The records are insert-only, and refuse a lapse beyond 24 hours.
+- Against the live kernel in `deploy-dev`, as §A First Credential lists.
 
 ### Enforcement Delay (2.10.0)
 
@@ -919,6 +1061,9 @@ degradation.
 | Depends on | `TDD-identity-control-003` - consent client and token-lifetime registration |
 | Consumed by | `TDD-identity-experience-002` - self-service account security |
 | Consumed by | `TDD-identity-experience-003` - administration and investigation |
+| Governed by | ADR-IAM-010 - a person created by a provider receives a temporary password, shown once (2.12.0) |
+| Conforms to | STD-IAM-001 2.8.0 §3.1 - the first-credential exception, every condition (2.12.0) |
+| Proven by | identity-kernel `compat/first_credential_test.go` - temporary, forced change, the value refused, a deleted value no longer signs in |
 
 ## References
 
@@ -942,3 +1087,4 @@ degradation.
 | R16 | STD-IAM-002 1.4.0, *Token and Verification Profile*, §3.2: the kernel writes `sid` into its access tokens, "the session identifier OpenID Connect logout defines". |
 | R17 | Keycloak 26.7.5, *Server Administration Guide*, Registering WebAuthn credentials using AIA, source `docs/documentation/server_admin/topics/authentication/webauthn.adoc` at tag 26.7.5, accessed 2026-10-03: "The actions *Webauthn Register* (`kc_action=webauthn-register`) and *Webauthn Register Passwordless* (`kc_action=webauthn-register-passwordless`) are available for the applications if enabled in the Required actions tab." |
 | R18 | SAD-001 §7.7, *Revocation Classes and Enforcement*: "The propagation budget is 60 seconds as the planning figure, against an operational target below 10 seconds"; Session class: "kernel session removal", maximum delay "60s + class"; and "the production gate MUST include measured acceptance-to-enforcement evidence for every class in the table above." |
+| R19 | Douglas Crockford, *Base 32*, <https://www.crockford.com/base32.html>, accessed 2026-10-19: "We chose a symbol set of 10 digits and 22 letters."; "We exclude 4 of the 26 letters: `I L O U`."; I and L "Can be confused with `1`", O "Can be confused with `0`"; the symbols `0123456789ABCDEFGHJKMNPQRSTVWXYZ`. |

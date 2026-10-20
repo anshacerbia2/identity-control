@@ -145,18 +145,28 @@ services:
       # (TDD-identity-control-001 1.13.0). Report on a development server, whose realm may hold users
       # made before this service; GET /v1/principals:unmapped lists them.
       IDENTITY_UNMAPPED_USERS: ${IDENTITY_UNMAPPED_USERS:-report}
-      # Account security notifications (TDD-identity-control-008): standin on a development server
-      # accepts them and delivers none, until the Notification Platform exists. Empty records and
-      # waits. .env.example sets standin (README §First start, step 1).
+      # Account security notifications (TDD-identity-control-008): smtp-catcher on a development server
+      # renders each and hands it to the mail catcher below, which delivers nothing, so a proof code can
+      # be read there (1.7.0, ADR-IAM-007 §5.3). standin accepts them and delivers none. Empty records
+      # and waits. .env.example sets smtp-catcher (README §First start, step 1).
       IDENTITY_NOTIFICATION_DELIVERY: ${IDENTITY_NOTIFICATION_DELIVERY:-}
+      IDENTITY_SMTP_CATCHER_ADDRESS: mailpit:1025
+      IDENTITY_SMTP_CATCHER_FROM: identity-control@scnehaux.local
+      # How long a provider's temporary password lasts unused (ADR-IAM-010 §5.2): 24 hours by default
+      # and at most, 1 hour at least.
+      IDENTITY_TEMPORARY_PASSWORD_TTL: ${IDENTITY_TEMPORARY_PASSWORD_TTL:-24h}
+      # How often the lapse sweep runs; it removes a value up to one interval before its lapse.
+      IDENTITY_TEMPORARY_PASSWORD_SWEEP_INTERVAL: ${IDENTITY_TEMPORARY_PASSWORD_SWEEP_INTERVAL:-5m}
       IDENTITY_TOKEN_TYPE: ${IDENTITY_TOKEN_TYPE:-report}
       # Provider routes require acr aal2 (ADR-IAM-004). report serves a lower token and logs it, for a
       # server whose kernel does not yet map the levels; deploy identity-kernel first and keep enforce.
       IDENTITY_ASSURANCE: ${IDENTITY_ASSURANCE:-enforce}
       # The OpenTelemetry Collector's OTLP/HTTP base URL. Empty: no metric or trace leaves the service.
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
-      # A development server: a registration may hold fewer than two owners (ADR-IAM-003 §5.1).
-      IDENTITY_ENVIRONMENT: non-production
+      # A development server: non-production, so a registration may hold fewer than two owners
+      # (ADR-IAM-003 §5.1), and the one environment that admits the mail catcher adapter (ADR-IAM-007
+      # §5.3).
+      IDENTITY_ENVIRONMENT: development
       # The issuer is the kernel's public one, whatever address Keycloak is reached on: Keycloak's
       # hostname fixes iss. The key set is fetched over the private network. It is configuration and
       # never read from a token, because a token that could name its own key source would choose the
@@ -181,11 +191,36 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+      mailpit:
+        condition: service_started
     volumes:
       - ./keys:/keys:ro
     ports:
       - "127.0.0.1:${IDENTITY_CONTROL_PORT:-8082}:8090"
     networks: [internal, kernel, api]
+
+  # The development mail catcher (ADR-IAM-007 §5.3, 2026-10-19; TDD-identity-control-008 1.7.0). Mailpit
+  # "acts as an SMTP server, provides a modern web interface to view & test captured emails, and
+  # includes an API for automated integration testing". It relays nothing: relaying is opt-in, through
+  # a configuration file this stack does not give it. Its SMTP listener is reached on the internal
+  # network alone, by identity-control; its web interface and API are published on loopback only, for
+  # the owner through the tunnel or on the server (README §Reading a code in the mail catcher).
+  # Messages live in its memory and go when it stops.
+  mailpit:
+    # axllent/mailpit:v1.31.6, resolved from Docker Hub on 2026-10-19.
+    image: axllent/mailpit@sha256:23fe39e81bde596a918000b3135c0f85dc8bb4c9ea6be274b051143f3e300387
+    restart: unless-stopped
+    environment:
+      # The listeners inside the container: SMTP for identity-control, HTTP for the interface and API.
+      MP_SMTP_BIND_ADDR: 0.0.0.0:1025
+      MP_UI_BIND_ADDR: 0.0.0.0:8025
+      # Keep the newest 500 messages and drop older ones.
+      MP_MAX_MESSAGES: "500"
+      # No version check against GitHub, and no anonymous usage report.
+      MP_DISABLE_VERSION_CHECK: "true"
+    ports:
+      - "127.0.0.1:${MAILPIT_UI_PORT:-8025}:8025"
+    networks: [internal]
 
 volumes:
   postgres:

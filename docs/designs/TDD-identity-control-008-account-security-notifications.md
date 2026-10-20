@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-008
   title: Account Security Notifications
   owner: Core Platform Team
-  version: 1.6.0
+  version: 1.7.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -41,17 +41,22 @@ hands it to the Notification Platform (`PAD-PLT-005`) to deliver. The kernel sen
   account recovered (`ADR-IAM-007 §5.1`).
 - **A removal told as who acted (1.4.0).** An authenticator this service's own command removed is
   told as the person's or the provider's, with its type, rather than as an Admin API removal.
+- **Proven addresses for Organization Control (1.7.0, `ADR-ORG-007 §5.3`).** A command that sends a
+  proof code to an address the person holds and has not proven, such as the creation address, and
+  `POST /v1/principals/{principal_id}/identifiers:match`, which answers Organization Control's
+  workload whether a Principal holds an address, proven.
+- **A development mail catcher (1.7.0, `ADR-IAM-007 §5.3`, 2026-10-19).** The `smtp-catcher` adapter,
+  so a proof code can be read on a development server.
+- **A password an administrator set (1.7.0, `ADR-IAM-010 §5.3`).** The kernel's admin `reset-password`
+  is told as a password bound by an administrator.
 
 **Not yet**
 
 - **The Identity Experience page** that serves these routes. It follows in `identity-experience`.
 - **The Notification Platform client.** It waits on that platform. Until then no notification leaves
   a development server.
-- **Proving an added address on a development server (1.6.0).** The code goes to the new address
-  alone, and the stand-in delivers nothing, so no one can read it there. The options are in §Proving
-  an Address on a Development Server; none is chosen.
-- **A provider adding an address for a person (1.6.0).** `ADR-IAM-007 §5.2` says "A provider can do
-  it through assisted recovery". No route does, and this design has none (§A Person With No Address).
+- **A provider adding an address for a person.** `ADR-IAM-007 §5.2`, amended 2026-10-19, withdraws
+  it: no provider adds an address (§A Person With No Address).
 
 ## Technical Context
 
@@ -68,6 +73,7 @@ every interval. identity-kernel's `compat/notified_events_test.go` records how 2
 | A password changed | user `UPDATE_CREDENTIAL`, `credential_type=password` | `authenticator_bound`, `password` (1.1.0) |
 | A TOTP, passkey or security key removed by the person | user `REMOVE_CREDENTIAL`, naming the credential type | `authenticator_removed`, by the person (1.1.0) |
 | An authenticator removed through the Admin API | admin `ACTION`, resource `USER`, path `users/{user}/credentials/{credential}` | `authenticator_removed`, by an administrator, unless this service's command made it (1.4.0) |
+| A password set through the Admin API, a provider's temporary password among them | admin `ACTION`, resource `USER`, path `users/{user}/reset-password`, no representation (identity-kernel `compat/first_credential_test.go`) | `authenticator_bound`, `password`, by an administrator (1.7.0) |
 
 Three facts about those marks shape the mapping:
 
@@ -234,15 +240,29 @@ the sweep reads the admin ACTION on users/{user}/credentials/{credential}:
   count, never an address. Startup refuses `standin` in production, so no production deployment can
   believe a notification was delivered when it was not.
 
-The Notification Platform's client replaces the stand-in when that platform exists.
+- **`smtp-catcher` (1.7.0).** The development adapter of `ADR-IAM-007 §5.3` (2026-10-19). It renders each
+  request as a plain message, one per recipient so no recipient sees another's address, and hands it by
+  SMTP to the mail catcher at `IDENTITY_SMTP_CATCHER_ADDRESS`. The message says what happened, when, the
+  request's bounded details, and how to repudiate it; a proof request's message carries its code. The
+  log names the notification, its event and its recipient count, never an address or a code; an SMTP
+  failure names the step and never the recipient. Startup refuses it unless `IDENTITY_ENVIRONMENT` is
+  `development`, which only a development server's `compose.yaml` sets: ASVS 5.0 13.4.2, "debug modes
+  are disabled for all components in production environments" (`ADR-IAM-007` [R10]).
 
-**A development server runs `standin` (1.6.0).** `deploy/dev/.env.example` sets it, and its README
-says why, as `deploy-dev` in CI already did. Empty would leave every request `requested` on that
-server, so the dispatch path, the backoff and the seal's clearing would run only in CI. The stand-in
-delivers nothing, so `standin` on a development server tells no one anything: what it adds is that
-the server records each request as handed over, as production will.
+The Notification Platform's client replaces both when that platform exists.
 
-### Proving an Address on a Development Server (1.6.0, open)
+**The development stack's catcher is Mailpit (1.7.0).** Mailpit "acts as an SMTP server, provides a
+modern web interface to view & test captured emails, and includes an API for automated integration
+testing" (`ADR-IAM-007` [R8]). `deploy/dev/compose.yaml` runs it pinned by digest, its SMTP listener
+reached on the stack's internal network alone, and its interface and API on `127.0.0.1` only
+(STD-GLB-009 rule 6). It relays nothing: "To enable SMTP relaying, the configuration file (yaml syntax)
+must be provided to Mailpit" [R5], and the stack provides none. `image-scan` scans its image with the
+others; it needs no ignore rule.
+
+**A development server runs `smtp-catcher` (1.7.0).** `deploy/dev/.env.example` sets it, and `deploy-dev`
+runs it. Up to 1.6.0 both ran `standin`, which delivers nothing, so no code could be read there.
+
+### Proving an Address on a Development Server (1.6.0; option A chosen in 1.7.0)
 
 A person adds an address in the account application, and it stays pending until its code comes back
 (§A Person's Own Addresses). On a development server the code goes to the stand-in, which delivers
@@ -273,9 +293,10 @@ at startup as it refuses `standin`.
 | C. A development-only read route | `GET /v1/me/notification-addresses/{id}/proof-code` answers the opened code to its own person, only when `IDENTITY_ENVIRONMENT` is not production | The account application could show it; the proof script could use it | A code in a response is the disclosure ASVS 14.3.2 names. Its whole safety rests on one switch, which production must never carry |
 | D. Leave it unproven on development servers | Today's state, stated | Nothing new to secure | The account application's add path cannot be completed on a development server, and only the integration tests prove the right code |
 
-**No option is chosen.** Option A is the closest to production and the only one that puts no code
-on disk or in a response, but it touches `ADR-IAM-007 §5.3`, which is cross-cutting and belongs to the
-architecture repository. Until a decision is recorded there, this design keeps option D.
+**Option A is chosen (1.7.0).** `ADR-IAM-007 §5.3`, amended 2026-10-19, admits it as a development-only
+exception and rejects B, C and D. It is built as §The Adapter's `smtp-catcher`, and
+`scripts/dev-notifications-proof.ps1` reads each code from the catcher's API and proves `:verify` end to
+end in `deploy-dev`.
 
 | Ref | Source |
 | :-- | :-- |
@@ -283,20 +304,23 @@ architecture repository. Until a decision is recorded there, this design keeps o
 | R2 | OWASP, *Logging Cheat Sheet*, Data to exclude, <https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html>, accessed 2026-10-19: "Session identification values", "Access tokens", "Authentication passwords", "Encryption keys and other primary secrets" |
 | R3 | NIST, *SP 800-63B-4*, §4.6 Subscriber Notifications, <https://pages.nist.gov/800-63-4/sp800-63b.html>, accessed 2026-10-19: "Events that require notification SHALL cause a notification to be sent to the notification addresses stored in the subscriber account. Notification addresses may be any means by which the subscriber can be reliably contacted" |
 | R4 | Mailpit, <https://mailpit.axllent.org/>, accessed 2026-10-19: "email & SMTP testing tool with API for developers"; "Integration testing using the REST API to view, read and process messages" |
+| R5 | Mailpit, *SMTP relay* and *Runtime options*, <https://mailpit.axllent.org/docs/configuration/smtp-relay/> and <https://mailpit.axllent.org/docs/configuration/runtime-options/>, accessed 2026-10-20: "To enable SMTP relaying, the configuration file (yaml syntax) must be provided to Mailpit"; `MP_SMTP_BIND_ADDR` "SMTP bind interface and port."; `MP_UI_BIND_ADDR` "HTTP bind interface and port for UI."; `MP_MAX_MESSAGES` "Maximum number of messages to store."; `MP_DISABLE_VERSION_CHECK` "When enabled, Mailpit will not contact GitHub to check for new releases." |
 
-### A Person With No Address (1.6.0, open)
+### A Person With No Address (1.6.0; aligned with ADR-IAM-007 §5.2 in 1.7.0)
 
 A Principal created without an email holds no address, and every request for it is `no_address`
-(§Dispatch). Up to 1.5.0 §Operational Notes said "give them one". Only the person can:
+(§Dispatch). Only the person can give it one:
 
 - **The person adds one,** in the account application, at a recent `aal2`, and proves it with its
   code (§A Person's Own Addresses). Until that is proven they still hold none, and the first address
   has no address held before it to notify.
-- **No provider route adds one.** `ADR-IAM-007 §5.2` says "A provider can do it through assisted
-  recovery", and this design has no such command. It is not built, because what it needs is not
-  designed: whether a provider-added address is proven by its code like the person's, which address is
-  told, and how it is recorded as assisted recovery's evidence. A route is not added without that
-  design.
+- **No provider adds one (1.7.0).** `ADR-IAM-007 §5.2`, amended 2026-10-19, withdraws "A provider can do
+  it through assisted recovery": assisted recovery restores the person's sign-in (`ADR-IAM-005 §5.5`),
+  and the person then adds and proves an address at `aal2` themselves. A provider's only address is the
+  creation address, and it counts as proven only once its holder returns a code (§Proving an Address
+  Already Held). NIST gives the change to the person: "The CSP SHOULD allow subscribers with
+  authentication at AAL2 or higher … to update their notification addresses" (`ADR-IAM-007` [R1]).
+  This design has no provider route that adds one, and adds none.
 
 ## API / Interface
 
@@ -350,11 +374,65 @@ POST /v1/me/notification-addresses/{address_id}:remove  self, aal2 recent
 - **An address is an email.** It is parsed as one bare addr-spec, with no display name, at most 254
   characters, and stored as given.
 
+### Proving an Address Already Held (1.7.0)
+
+```text
+POST /v1/me/notification-addresses/{address_id}:send-proof     self, any level, Idempotency-Key
+200 {"notification_address": {..., "state": "active", "proof_expires_at": "..."}}
+404 no such address of the caller
+409 state-transition-refused: not an active address without verified_at, or a code sent is still good
+```
+
+- **What it is for.** `ADR-ORG-007 §5.3` counts only a proven address for an invitation's acceptance.
+  The creation address is `active` from creation with no `verified_at`: a provider recorded it, and
+  nobody has shown the person reads it. This command sends it a code, as an added address's is sent.
+- **The code.** 8 digits from the operating system's random source, its SHA-256 bound to the address,
+  good for the `securityref` lifetime and five attempts, sealed while it waits, sent to that address
+  alone (§A Person's Own Addresses). NIST: confirmation codes "SHALL include at least 6 decimal digits"
+  and are valid "24 hours when sent to a validated email address" at most (`ADR-ORG-007` [R12]).
+- **One good code at a time.** A send while a code is still good and not used up is refused, so a code
+  is never replaced early and the address is not flooded; once it expires or is used up, a send
+  draws a new one with fresh attempts.
+- **Any level.** The code goes to an address the person already holds, and proving it changes no
+  recipient, so it is not a change of addresses and needs no step-up. `:verify` with the code sets
+  `verified_at` and leaves the address `active`; nobody else is told.
+- **The list** carries `proof_expires_at` on an address while a code is outstanding.
+
+### The Identifier Match (1.7.0)
+
+```text
+POST /v1/principals/{principal_id}/identifiers:match
+Authorization: Bearer <Organization Control's workload token: aud identity-control-api,
+               subject_type workload, principal_id = IDENTITY_DELIVERY_PRINCIPAL_ID>
+{"address": "person@example.com"}
+200 {"match": true} | {"match": false}            Cache-Control: no-store
+400 a malformed principal_id, body or address
+401 no token, or a token of any other caller
+503 not configured, or the record could not be read
+```
+
+- **Who.** Organization Control's workload alone, verified as the delivery intake verifies it
+  (`TDD-identity-control-006`): the same issuer, audience and keys, `subject_type` `workload`, and the
+  `principal_id` `IDENTITY_DELIVERY_PRINCIPAL_ID` names. It is mounted apart from every caller route,
+  behind that verification. Unconfigured, it answers `503`.
+- **What matches.** An address the Principal holds that is `active` with `verified_at` set, compared
+  without case, of a Principal that is an `active` human. The creation address counts once proven.
+- **Nothing else leaks.** The answer is one boolean, the same shape for an unknown Principal, a
+  Principal without the address, one holding it unproven, and a suspended one. It is one indexed
+  lookup whichever it is. No address is in a response or a log line; the log names the Principal and
+  the answer, so a run of `false` for one Principal is visible (`ADR-ORG-007 §6`). It changes nothing,
+  so it needs no `Idempotency-Key` (`keyOptional`: a read carried in a body).
+- **The address in the body,** never in a path or a query, so no access log carries it.
+
 ## Configuration
 
 | Variable | Default | Purpose |
 | :-- | :-- | :-- |
-| `IDENTITY_NOTIFICATION_DELIVERY` | empty | `standin` on a development server; refused in production |
+| `IDENTITY_NOTIFICATION_DELIVERY` | empty | `smtp-catcher` on a development server (1.7.0), refused unless `IDENTITY_ENVIRONMENT=development`; `standin`, refused in production |
+| `IDENTITY_SMTP_CATCHER_ADDRESS` | none | The catcher's SMTP listener, `host:port`, required with `smtp-catcher` |
+| `IDENTITY_SMTP_CATCHER_FROM` | `identity-control@scnehaux.local` | The sender the catcher's messages name |
+| `IDENTITY_ENVIRONMENT` | `production` | `development` (1.7.0) is non-production and the one value that admits `smtp-catcher` |
+| `IDENTITY_DELIVERY_PRINCIPAL_ID` | empty | Organization Control's workload, admitted by the delivery intake and the identifier match (1.7.0) |
 
 ## Testing Strategy
 
@@ -374,7 +452,16 @@ POST /v1/me/notification-addresses/{address_id}:remove  self, aal2 recent
 - A request is recorded once per source key, and a request with no address is `no_address`.
 - The dispatcher hands a due request over once, backs off on a refusal, and fails it at ten
   attempts.
-- Startup refuses `standin` in production.
+- Startup refuses `standin` in production, and `smtp-catcher` unless the environment is `development`.
+- The `smtp-catcher` adapter sends one message per recipient, the code in a proof's, and logs neither an
+  address nor a code (1.7.0).
+- The kernel's admin `reset-password` maps to a password bound by an administrator (1.7.0).
+- Proving an address already held (1.7.0): a code goes to it alone, sealed; a second send while it is
+  good is refused, and one after it expires draws a new code; the code sets `verified_at` and tells
+  nobody; a proven or pending address takes no new code.
+- The identifier match (1.7.0): true only for an active, proven address of an active human, without
+  case; false alike for an unproven, removed or other address, an unknown Principal and a suspended
+  one; a token of any caller but Organization Control's workload is refused.
 - A person's own addresses (1.2.0):
   - Adding needs a recent `aal2`. A malformed, duplicate or sixth address is refused.
   - The proof request goes to the new address alone, and its code is sealed. Once handed over, the
@@ -385,8 +472,10 @@ POST /v1/me/notification-addresses/{address_id}:remove  self, aal2 recent
     address cannot be removed.
 - The runtime role cannot delete an address or a request.
 - Against the live kernel in `deploy-dev`: the bootstrap operator's TOTP enrolment requests
-  `authenticator_bound` and `recovery_codes_issued` to the creation address, and the stand-in
-  accepts them.
+  `authenticator_bound` and `recovery_codes_issued` to the creation address, and the catcher receives
+  them. An added address and the creation address are each proven with the code read from the
+  catcher's API, and the identifier match answers the Tenant proof's stand-in for Organization
+  Control's workload (1.7.0).
 
 ## Security Notes
 
@@ -414,3 +503,5 @@ impossible to lose without losing the event as well.
 | Consumes | `TDD-identity-control-005`, the applied restore of assisted recovery (1.3.0) |
 | Proven by | identity-kernel `compat/notified_events_test.go`, the kernel marks |
 | Delivers through | PAD-PLT-005, the Notification Platform, once it exists |
+| Consumed by | organization-control, `ADR-ORG-007 §5.3`: the identifier match at an invitation's acceptance (1.7.0) |
+| Governed by | ADR-ORG-007 §5.3 and ADR-IAM-007 §5.2 and §5.3 as amended 2026-10-19 (1.7.0) |

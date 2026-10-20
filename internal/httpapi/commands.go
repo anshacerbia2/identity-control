@@ -44,7 +44,7 @@ const missingKey = "This route changes state and requires an " + IdempotencyHead
 // it. The route checks only that the key is present.
 var serviceKeyed = map[string]string{
 	"POST /v1/principals":                                                      "provisioning claims it with the pending mapping (TDD-identity-control-001)",
-	"POST /v1/principals/{target}":                                             ":suspend and :restore are security operations keyed per actor (TDD-identity-control-005); :relink and :release (TDD-identity-control-001 1.18.0) are replayed here",
+	"POST /v1/principals/{target}":                                             ":suspend and :restore are security operations keyed per actor (TDD-identity-control-005); :issue-temporary-password is claimed by the first-credential path in the transaction that checks the Principal and completed without the value (TDD-identity-control-005 2.12.0); :relink and :release (TDD-identity-control-001 1.18.0) are replayed here",
 	"POST /v1/registrations":                                                   "registration claims it with the pending registration (TDD-identity-control-003)",
 	"POST /v1/workloads":                                                       "the workload path claims it with the pending workload (TDD-identity-control-004)",
 	"POST /v1/me/sessions/{session_action}":                                    "a security operation, keyed per actor (TDD-identity-control-005)",
@@ -72,7 +72,7 @@ var replayedKey = map[string]string{
 	"POST /v1/workloads/{target}":                                      "suspend, restore, retire, rebuild, reassign, review",
 	"POST /v1/security-operations/{operation_action}":                  "a re-drive",
 	"POST /v1/me/notification-addresses":                               "an address added",
-	"POST /v1/me/notification-addresses/{address_action}":              "an address verified or removed",
+	"POST /v1/me/notification-addresses/{address_action}":              "an address verified, removed, or sent a proof code",
 }
 
 // adoptKey is POST /v1/registrations:adopt: the adoption requires the key and the service claims it;
@@ -101,6 +101,8 @@ var keyOptional = map[string]string{
 		"state and changes nothing a first did not (TDD-identity-control-002 2.5.0)",
 	"POST /v1/deliveries": "a report identified by the identifier it carries: each event's id passes " +
 		"the inbox guard, so a repeat is acknowledged and applied once (TDD-identity-control-006)",
+	"POST /v1/principals/{principal_id}/identifiers:match": "a read carried in a body: it answers whether " +
+		"the Principal holds the address, proven, and changes nothing (TDD-identity-control-008 1.7.0)",
 }
 
 // KeyStore opens the transaction a claim is made and completed in. The pool satisfies it.
