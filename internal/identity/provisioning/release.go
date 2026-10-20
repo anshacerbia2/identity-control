@@ -37,6 +37,11 @@ var (
 	// ErrWorkloadRelease refuses a workload: its user is its client's service account, rebuilt with
 	// the client, and its quarantine is not this route's.
 	ErrWorkloadRelease = errors.New("provisioning: a workload's mapping is not released here")
+
+	// ErrSelfRelease refuses an operator releasing their own Principal (TDD-identity-control-001
+	// 1.22.0 §Leaving Quarantine): the person the hold is about does not decide to lift it, which is
+	// the separation of duties NIST SP 800-53 AC-5 asks for.
+	ErrSelfRelease = errors.New("provisioning: an operator cannot release their own Principal")
 )
 
 // ReleaseRequest is an operator releasing a quarantined mapping to the one kernel user left.
@@ -112,6 +117,8 @@ func (p *Provisioner) Release(ctx context.Context, req ReleaseRequest) (ReleaseR
 		return ReleaseResult{}, ErrReasonRequired
 	case req.ReleasedBy.IsNil():
 		return ReleaseResult{}, errors.New("provisioning: the releasing Principal is required")
+	case req.ReleasedBy == req.PrincipalID:
+		return ReleaseResult{}, ErrSelfRelease
 	case strings.TrimSpace(req.Username) == "":
 		return ReleaseResult{}, fmt.Errorf("%w: a release names the username the triage kept", ErrReleaseRefused)
 	}

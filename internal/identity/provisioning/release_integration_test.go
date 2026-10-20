@@ -145,6 +145,34 @@ func TestOnlyAQuarantinedPersonIsReleased(t *testing.T) {
 	}
 }
 
+// A person never releases their own quarantined Principal, even when the kernel shows the duplicate
+// resolved (TDD-identity-control-001 1.22.0, NIST SP 800-53 AC-5): the refusal comes before any read,
+// and the mapping stays held, unrecorded.
+func TestAnOperatorCannotReleaseTheirOwnPrincipal(t *testing.T) {
+	p := newPortability(t)
+	created, _, copied := p.quarantinedDuplicate("self.release")
+	p.kernel.DeleteUser(copied)
+	if _, err := p.provisioner.Release(context.Background(), provisioning.ReleaseRequest{
+		PrincipalID: created.PrincipalID, ReleasedBy: created.PrincipalID, Reason: "it is me; ticket 42",
+		Username: "self.release"}); !errors.Is(err, provisioning.ErrSelfRelease) {
+		t.Fatalf("a self release answered %v, want ErrSelfRelease", err)
+	}
+	if state, _ := p.state(created.PrincipalID); state != "quarantined" {
+		t.Errorf("a refused self release left the mapping %s", state)
+	}
+	var recorded int
+	if err := p.pool.InTx(context.Background(), func(ctx context.Context, tx db.Tx) error {
+		return tx.QueryRow(ctx, `SELECT count(*) FROM identity.principal_release WHERE principal_id = $1`,
+			created.PrincipalID.String()).Scan(&recorded)
+	}); err != nil || recorded != 0 {
+		t.Errorf("%d release record(s) (%v), want none", recorded, err)
+	}
+	// Another operator releases it.
+	if result, err := p.release(created.PrincipalID, "self.release"); err != nil || result.State != "suspended" {
+		t.Errorf("another operator's release: %+v, %v", result, err)
+	}
+}
+
 // The pending listing marks a mapping overdue past the recovery threshold.
 func TestThePendingListingMarksTheOverdue(t *testing.T) {
 	p := newPortability(t)

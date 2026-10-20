@@ -152,6 +152,7 @@ func TestAReleaseRefusesWhatItCannotDo(t *testing.T) {
 		"two users left":         {`{"username":"a"}`, "why", fmt.Errorf("%w: 2 kernel users carry this principal_id", provisioning.ErrReleaseRefused), http.StatusConflict},
 		"not quarantined":        {`{"username":"a"}`, "why", provisioning.ErrInvalidTransition, http.StatusConflict},
 		"a workload":             {`{"username":"a"}`, "why", provisioning.ErrWorkloadRelease, http.StatusConflict},
+		"the caller's own":       {`{"username":"a"}`, "why", provisioning.ErrSelfRelease, http.StatusForbidden},
 		"no such Principal":      {`{"username":"a"}`, "why", provisioning.ErrNotFound, http.StatusNotFound},
 		"the kernel unreachable": {`{"username":"a"}`, "why", keycloak.ErrUnavailable, http.StatusServiceUnavailable},
 	} {
@@ -161,6 +162,32 @@ func TestAReleaseRefusesWhatItCannotDo(t *testing.T) {
 		}
 		if w := serve(principalRoutes(t, &stubProvisioner{err: c.err}), r); w.Code != c.want {
 			t.Errorf("%s answered %d, want %d", name, w.Code, c.want)
+		}
+	}
+}
+
+// A provider never releases the Principal in its own token (TDD-identity-control-001 1.22.0, NIST SP
+// 800-53 AC-5): the refusal is a 403 before the reason or the body is read, and nothing is released.
+func TestAReleaseOfTheCallersOwnPrincipalIsForbidden(t *testing.T) {
+	for name, c := range map[string]struct {
+		body, reason string
+	}{
+		"a complete request": {`{"username":"me"}`, "it is me"},
+		"no reason":          {`{"username":"me"}`, ""},
+		"no body":            {``, "it is me"},
+	} {
+		stub := &stubProvisioner{}
+		r, operator := asPrincipal(t, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(c.body)))
+		r.URL.Path = "/v1/principals/" + operator.String() + ":release"
+		if c.reason != "" {
+			r.Header.Set(httpapi.AdministrativeReasonHeader, c.reason)
+		}
+		w := serve(principalRoutes(t, stub), r)
+		if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "its own token") {
+			t.Errorf("%s: a self release answered %d: %s", name, w.Code, w.Body)
+		}
+		if stub.released != nil {
+			t.Errorf("%s: a self release reached the provisioner: %+v", name, stub.released)
 		}
 	}
 }

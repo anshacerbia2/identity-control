@@ -144,6 +144,12 @@ func (h *Principals) PrincipalAction(w http.ResponseWriter, r *http.Request) {
 		httpapi.Problem(w, r, httpapi.ValidationFailed, "principal_id is not a valid identifier")
 		return
 	}
+	// The self-action boundary comes before the request is validated, in TDD-identity-control-005's
+	// refusal order: a caller never releases the Principal in their own token (1.22.0).
+	if action == "release" && target == principal {
+		httpapi.Problem(w, r, httpapi.Forbidden, selfReleaseDetail)
+		return
+	}
 	reason := strings.TrimSpace(r.Header.Get(AdministrativeReasonHeader))
 	if reason == "" {
 		httpapi.Problem(w, r, httpapi.ValidationFailed, "A "+action+" requires an X-Administrative-Reason header")
@@ -168,13 +174,17 @@ func (h *Principals) PrincipalAction(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// selfReleaseDetail is the 403 a caller releasing their own Principal is answered.
+const selfReleaseDetail = "A provider cannot release the Principal in its own token"
+
 // releaseRequest names the kernel user the duplicate triage decided is the person.
 type releaseRequest struct {
 	Username string `json:"username"`
 }
 
 // release handles POST /v1/principals/{principal_id}:release (TDD-identity-control-001 1.18.0): a
-// quarantined mapping bound to the one kernel user left, and moved to suspended.
+// quarantined mapping bound to the one kernel user left, and moved to suspended. A caller releasing
+// their own Principal is refused with 403 (1.22.0).
 func (h *Principals) release(w http.ResponseWriter, r *http.Request, target, principal id.UUID, reason string) {
 	var body releaseRequest
 	decoder := json.NewDecoder(io.LimitReader(r.Body, maxBodyBytes))
@@ -189,6 +199,8 @@ func (h *Principals) release(w http.ResponseWriter, r *http.Request, target, pri
 	switch {
 	case err == nil:
 		writeJSON(w, http.StatusOK, result)
+	case errors.Is(err, provisioning.ErrSelfRelease):
+		httpapi.Problem(w, r, httpapi.Forbidden, selfReleaseDetail)
 	case errors.Is(err, provisioning.ErrReleaseRefused):
 		// The message names a count or a mismatch, never a kernel identifier.
 		httpapi.Problem(w, r, httpapi.StateTransitionRefused, err.Error())

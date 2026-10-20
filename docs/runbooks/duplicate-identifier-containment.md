@@ -91,6 +91,8 @@ administrator deletes the extra user in step 8; this service deletes no user.
         the wrong user may have been deleted.
       - `409` for a mapping that is not quarantined, or a workload; `503` when the kernel did not
         confirm the containment, with nothing recorded, so retry with the same key.
+      - `403` means the Principal is your own (`TDD-identity-control-001` 1.22.0): another
+        provider releases it.
    3. `POST /v1/principals:reconcile`. The sweep resolves the `duplicate` finding as `user_absent`
       once it no longer finds the deleted user.
    4. **Return the person to service** with `POST /v1/principals/{principal_id}:restore`

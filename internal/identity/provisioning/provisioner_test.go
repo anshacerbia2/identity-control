@@ -571,3 +571,20 @@ func TestResponseCarriesNoKernelIdentifier(t *testing.T) {
 	}
 	_ = id.UUID{}
 }
+
+// A release of the caller's own Principal is refused before the mapping is read or the kernel
+// searched (TDD-identity-control-001 1.22.0 §Leaving Quarantine, NIST SP 800-53 AC-5).
+func TestASelfReleaseIsRefusedBeforeAnyRead(t *testing.T) {
+	tx := &fakeTx{}
+	kernel := keycloakfake.New()
+	p := newProvisioner(t, tx, kernel)
+	self, _ := id.NewV7()
+	_, err := p.Release(context.Background(), provisioning.ReleaseRequest{
+		PrincipalID: self, ReleasedBy: self, Reason: "it is me", Username: "operator"})
+	if !errors.Is(err, provisioning.ErrSelfRelease) {
+		t.Fatalf("a self release answered %v, want ErrSelfRelease", err)
+	}
+	if tx.used != 0 || kernel.Calls.FindByPrincipalID != 0 {
+		t.Errorf("a self release opened %d transaction(s) and searched the kernel %d time(s)", tx.used, kernel.Calls.FindByPrincipalID)
+	}
+}

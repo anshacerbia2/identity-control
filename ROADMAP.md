@@ -971,6 +971,10 @@ Where each stands (2026-10-08):
     Tenant sweep's runs recorded. Idempotency-Key classes (STD-GLB-001 1.4.0): `:release` is replayed,
     as `:relink`; the re-drive and the sweep are `keyOptional`, level-driven sweeps. Proof B 6b releases
     and restores a duplicate against the kernel, and the Tenant proof uses the projection routes.
+  - ✅ `:release` refuses the caller's own Principal with `403`, before the reason or the body is
+    read (TDD-001 1.22.0, NIST SP 800-53 AC-5), as `:suspend` and `:restore` already do (TDD-005).
+    Proven by `TestAReleaseOfTheCallersOwnPrincipalIsForbidden` and, against PostgreSQL,
+    `TestAnOperatorCannotReleaseTheirOwnPrincipal`.
   - Still not built, recorded in the runbooks: a human `:retire`; a route binding an orphan's
     identifier again after a restore; a route ending a quarantined Principal's sessions before its
     release; a route reading the ceremony record.
