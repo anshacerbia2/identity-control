@@ -555,6 +555,21 @@ Daily, from the operator's crontab (`crontab -e`), with the checkout's path:
 15 2 * * * /home/development/apps/identity-control/deploy/dev/backup.sh /mnt/backups/identity-control >/dev/null
 ```
 
+The cron line runs `backup.sh`, never a bare `pg_dump`, because the script is what writes the two
+steps and keeps the count (STD-GLB-009 rule 9, 1.10.0):
+
+- **Each file is written as `<name>.partial`**, with `umask 077`, and renamed only once its command
+  succeeded. A failed run stops there and leaves at most a `.partial`, never a file that looks like a
+  backup.
+- **Retention is by count: the newest 14 complete sets.** Once both files of the new set are in
+  place, the script deletes the complete sets older than the newest 14 and names each on stderr. A
+  set is complete when both files of one `<date>` exist under their final names. A failed run
+  deletes nothing, and the set just written is never deleted. A lone file or a `.partial` is not
+  counted and not deleted: look at it, then remove it by hand. Never prune with an age-based
+  `find -mtime +N -delete`, which deletes the last good sets once backups have stopped for N days.
+- **The directory is on this host.** A copy off the host is required before production, and a
+  development server records its absence on its environment page.
+
 `keys/` belongs to `KEYS_OWNER`, the container's user, so it is copied with `sudo`:
 `sudo tar -C . -czf "/mnt/backups/identity-control/keys-$(date +%F).tgz" keys .env`. Keep the archive as private as the keys.
 
@@ -578,7 +593,9 @@ refused.
 **What is proven, and what is not.** `deploy-dev` runs both scripts on every change and weekly, as
 the restore drill `scripts/dev-restore-drill.sh` (STD-GLB-002 §Restore Evidence): it backs the filled
 stack up, deletes its volume, restores, compares schema, migration version, every table, sequence and
-role with the source, then starts the service and reads the registrations through the API. The
+role with the source, then starts the service and reads the registrations through the API. It also
+seeds a directory with 16 older complete sets and requires `backup.sh` to keep exactly the newest 14,
+the one it wrote among them, and to fail and delete nothing while the database is down. The
 recovery is timed against the 15-minute RTO, and the evidence is the job's `restore-evidence`
 artifact. A daily dump loses up to 24 hours of changes, against the 1-minute RPO of
 `PAD-PLT-001 §6.2`; meeting it needs WAL archiving on the production platform. The runbook is

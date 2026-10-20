@@ -419,7 +419,8 @@ jobs:
       # deletes the database. The same run drills a restore older than the kernel: changes made after
       # the backup, the restored service in report mode, and the runbook's reconciliation checked
       # (scripts/dev-restore-older-point.ps1), the Tenant proof's delivering workload standing in for
-      # Organization Control's repair.
+      # Organization Control's repair. It also drills backup.sh's retention, the newest 14 complete sets,
+      # and that a failed backup deletes none (STD-GLB-009 rule 9 and compliance check 7, 1.10.0).
       - name: the Control Database restores from its backup
         run: |
           set -a; . deploy/dev/.env; set +a
@@ -440,6 +441,7 @@ jobs:
             ${{ runner.temp }}/restore-drill/*.sql
             ${{ runner.temp }}/restore-drill/older-point/older-point-evidence.json
             !${{ runner.temp }}/restore-drill/backup/**
+            !${{ runner.temp }}/restore-drill/retention/**
           if-no-files-found: ignore
           retention-days: 90
 
