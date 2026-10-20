@@ -23,6 +23,69 @@ type SecurityReader interface {
 	UserFederatedIdentities(ctx context.Context, realm Realm, userID UserID) ([]FederatedIdentity, error)
 }
 
+// Consents lists and withdraws a person's consents (TDD-identity-control-005 2.13.0, slice 3b):
+// "Get consents granted by the user" and "Revoke consent and offline tokens for particular client
+// from user" (Keycloak Admin REST API). identity-kernel's compat/consent_test.go proves both on the
+// pinned kernel: the listing names the client and its granted scopes, and a withdrawal ends the
+// refresh tokens issued on it. The withdrawal needs manage-users, which the Principal credential holds.
+type Consents interface {
+	UserConsents(ctx context.Context, realm Realm, userID UserID) ([]Consent, error)
+	// RevokeConsent withdraws the consent to one client, named by its clientId. A consent already
+	// gone is ErrNotFound, which the executor reads as withdrawn once the listing agrees.
+	RevokeConsent(ctx context.Context, realm Realm, userID UserID, clientID string) error
+}
+
+// Consent is one client a person consented to: its clientId, the client scopes granted, and when.
+type Consent struct {
+	ClientID string
+	Scopes   []string
+	Granted  time.Time
+	Updated  time.Time
+}
+
+type consentRepresentation struct {
+	ClientID            string   `json:"clientId"`
+	GrantedClientScopes []string `json:"grantedClientScopes"`
+	CreatedDate         int64    `json:"createdDate"`
+	LastUpdatedDate     int64    `json:"lastUpdatedDate"`
+}
+
+// UserConsents lists the person's consents, by clientId.
+func (a *Admin) UserConsents(ctx context.Context, realm Realm, userID UserID) ([]Consent, error) {
+	var raw []consentRepresentation
+	if err := a.getList(ctx, realm, userID, "consents", &raw); err != nil {
+		return nil, err
+	}
+	consents := make([]Consent, 0, len(raw))
+	for _, r := range raw {
+		scopes := append([]string{}, r.GrantedClientScopes...)
+		sort.Strings(scopes)
+		consent := Consent{ClientID: r.ClientID, Scopes: scopes, Granted: time.UnixMilli(r.CreatedDate).UTC()}
+		if r.LastUpdatedDate > 0 {
+			consent.Updated = time.UnixMilli(r.LastUpdatedDate).UTC()
+		}
+		consents = append(consents, consent)
+	}
+	sort.SliceStable(consents, func(i, j int) bool { return consents[i].ClientID < consents[j].ClientID })
+	return consents, nil
+}
+
+// RevokeConsent withdraws one consent. Not marked mutating: a repeat answers 404, the state wanted.
+func (a *Admin) RevokeConsent(ctx context.Context, realm Realm, userID UserID, clientID string) error {
+	if userID == "" || clientID == "" {
+		return errors.New("keycloak: a user and a client identifier are required")
+	}
+	response, err := a.do(ctx, http.MethodDelete, a.userPath(realm, userID)+"/consents/"+url.PathEscape(clientID),
+		nil, nil, false)
+	if err != nil {
+		return err
+	}
+	response.Close()
+	return nil
+}
+
+var _ Consents = (*Admin)(nil)
+
 // Session is one of a user's sessions. Its kernel identifier never leaves this service; the IP
 // address the kernel records is not carried at all.
 type Session struct {

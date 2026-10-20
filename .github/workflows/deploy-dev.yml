@@ -209,12 +209,12 @@ jobs:
 
       - name: perform the bootstrap ceremony
         working-directory: deploy/dev
-        run: bash ./bootstrap.sh "ci@scnehaux.local" "deploy-dev workflow"
+        run: bash ./bootstrap.sh "ci@scnehaux.local" "ci-witness@scnehaux.local" "deploy-dev workflow"
 
       - name: the ceremony succeeds only once
         working-directory: deploy/dev
         run: |
-          if docker compose run --rm bootstrap -operator "ci@scnehaux.local" -reason "again" \
+          if docker compose run --rm bootstrap -operator "ci@scnehaux.local" -witness "ci-witness@scnehaux.local" -reason "again" \
                -username second-operator -email second@scnehaux.local; then
             echo "::error::a second bootstrap ceremony succeeded; it must be refused"
             exit 1
@@ -419,7 +419,8 @@ jobs:
       # deletes the database. The same run drills a restore older than the kernel: changes made after
       # the backup, the restored service in report mode, and the runbook's reconciliation checked
       # (scripts/dev-restore-older-point.ps1), the Tenant proof's delivering workload standing in for
-      # Organization Control's repair.
+      # Organization Control's repair. It also drills backup.sh's retention, the newest 14 complete sets,
+      # and that a failed backup deletes none (STD-GLB-009 rule 9 and compliance check 7, 1.10.0).
       - name: the Control Database restores from its backup
         run: |
           set -a; . deploy/dev/.env; set +a
@@ -440,6 +441,7 @@ jobs:
             ${{ runner.temp }}/restore-drill/*.sql
             ${{ runner.temp }}/restore-drill/older-point/older-point-evidence.json
             !${{ runner.temp }}/restore-drill/backup/**
+            !${{ runner.temp }}/restore-drill/retention/**
           if-no-files-found: ignore
           retention-days: 90
 

@@ -39,7 +39,7 @@ help:
 	@echo   make env               copy .env.example to .env (does not overwrite)
 	@echo   make migrate           roles and platform schema, Atlas, privileges, against IDENTITY_MIGRATION_DATABASE_URL
 	@echo   make run               the service on IDENTITY_LISTEN_ADDRESS -- needs a Keycloak, see .env.example
-	@echo   make bootstrap OPERATOR=... REASON=... USERNAME=... [RESUME=1]   the one-time ceremony
+	@echo   make bootstrap OPERATOR=... WITNESS=... REASON=... USERNAME=... [RESUME=1]   the one-time ceremony
 	@echo   make provider-bootstrap  the provider authority projection from Organization Control's snapshot
 	@echo   make gates             everything CI runs: fmt vet build arch tidy test coverage
 	@echo   make test-ci           the suite against a CI-shaped database, not the dev one
@@ -75,10 +75,11 @@ run:
 # required rather than defaulted. RESUME=1 completes an interrupted ceremony under the recorded
 # operator, which is also how an estate whose ceremony ran before rule 5 registers its resource.
 bootstrap:
-	@if "$(OPERATOR)"=="" (echo Usage: make bootstrap OPERATOR=name REASON=why USERNAME=user [EMAIL=address] && exit 1)
+	@if "$(OPERATOR)"=="" (echo Usage: make bootstrap OPERATOR=name WITNESS=name REASON=why USERNAME=user [EMAIL=address] && exit 1)
+	@if "$(WITNESS)"=="" (echo WITNESS is required: a second named person, never the operator, recorded immutably && exit 1)
 	@if "$(REASON)"=="" (echo REASON is required: it is recorded immutably && exit 1)
 	@if "$(USERNAME)"=="" (echo USERNAME is required: the first Principal's username && exit 1)
-	go run ./cmd/identity-bootstrap -operator "$(OPERATOR)" -reason "$(REASON)" -username "$(USERNAME)" $(if $(EMAIL),-email "$(EMAIL)",) $(if $(RESUME),-resume "$(OPERATOR)",)
+	go run ./cmd/identity-bootstrap -operator "$(OPERATOR)" -witness "$(WITNESS)" -reason "$(REASON)" -username "$(USERNAME)" $(if $(EMAIL),-email "$(EMAIL)",) $(if $(RESUME),-resume "$(OPERATOR)",)
 
 # TDD-identity-control-006 §Bootstrap. Needs Organization Control running with this service
 # registered as its identity-control consumer, and IDENTITY_ORGANIZATION_BASE_URL with the workload

@@ -49,6 +49,12 @@ var (
 	// unrepeatable, so this is the mechanism working.
 	ErrCeremonyAlreadyPerformed = errors.New("provisioning: the bootstrap ceremony has already been performed")
 
+	// ErrWitnessRequired and ErrWitnessIsOperator refuse a ceremony without its second person:
+	// "Dual authorization mechanisms require the approval of two authorized individuals to execute"
+	// (NIST SP 800-53 AC-3(2), cited by STD-IAM-001 §3.10).
+	ErrWitnessRequired   = errors.New("provisioning: witness is required; two named people run the ceremony")
+	ErrWitnessIsOperator = errors.New("provisioning: the witness is the operator; two different people run the ceremony")
+
 	// ErrRegistryNotEmpty reports that Principals exist without a ceremony record. Reaching
 	// this means Principals were created some other way — an out-of-band INSERT, or a restored
 	// database — and the ceremony refuses rather than adding one more.
@@ -69,6 +75,10 @@ type CeremonyRequest struct {
 	// person is accountable for the one identifier nobody else authorized.
 	Operator string
 	Reason   string
+
+	// Witness is the second named person present, never the operator (STD-IAM-001 2.9.0 §3.10,
+	// ADR-IAM-001 §5.11 requirement 3 as amended 2026-10-20). Recorded immutably beside the operator.
+	Witness string
 }
 
 func (r CeremonyRequest) validate() error {
@@ -81,13 +91,23 @@ func (r CeremonyRequest) validate() error {
 		return errors.New("provisioning: operator is required; the ceremony records a person, not a process")
 	case strings.TrimSpace(r.Reason) == "":
 		return errors.New("provisioning: reason is required")
+	case strings.TrimSpace(r.Witness) == "":
+		return ErrWitnessRequired
+	case samePerson(r.Witness, r.Operator):
+		return ErrWitnessIsOperator
 	}
 	return nil
+}
+
+// samePerson compares two recorded names as the database's checks do: trimmed, case folded.
+func samePerson(a, b string) bool {
+	return strings.EqualFold(strings.TrimSpace(a), strings.TrimSpace(b))
 }
 
 // CeremonyRecord is the durable evidence of the ceremony.
 type CeremonyRecord struct {
 	Operator       string
+	Witness        string
 	Reason         string
 	IdempotencyKey string
 
@@ -100,8 +120,8 @@ type CeremonyRecord struct {
 }
 
 const claimCeremonyStatement = `INSERT INTO identity.bootstrap_ceremony
-    (id, operator, reason, idempotency_key, principal_id)
-VALUES ($1, $2, $3, $4, $5)
+    (id, operator, reason, idempotency_key, principal_id, witness)
+VALUES ($1, $2, $3, $4, $5, $6)
 ON CONFLICT (id) DO NOTHING`
 
 // readCeremonyStatement reads the claimed row and the registry's size in one round trip.
@@ -110,6 +130,7 @@ ON CONFLICT (id) DO NOTHING`
 // claim: a count taken in a separate statement could be read after another transaction inserted a
 // mapping, and the emptiness assertion would be checking a moment that had already passed.
 const readCeremonyStatement = `SELECT c.operator,
+       c.witness,
        c.reason,
        c.idempotency_key,
        coalesce(c.principal_id::text, ''),
@@ -125,6 +146,7 @@ WHERE c.id = $1`
 // domain signature. The table holds at most one row by constraint, so max() is that row's value.
 const probeCeremonyStatement = `SELECT count(*),
        coalesce(max(operator), ''),
+       coalesce(max(witness), ''),
        coalesce(max(reason), ''),
        coalesce(max(idempotency_key), '')
 FROM identity.bootstrap_ceremony`
@@ -168,7 +190,8 @@ func (p *Provisioner) Bootstrap(ctx context.Context, req CeremonyRequest) (Respo
 
 	if err := p.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
 		tag, execErr := tx.Exec(ctx, claimCeremonyStatement,
-			ceremonyRowID, strings.TrimSpace(req.Operator), strings.TrimSpace(req.Reason), key, minted.String())
+			ceremonyRowID, strings.TrimSpace(req.Operator), strings.TrimSpace(req.Reason), key, minted.String(),
+			strings.TrimSpace(req.Witness))
 		if execErr != nil {
 			return fmt.Errorf("provisioning: claim the ceremony row: %w", execErr)
 		}
@@ -183,7 +206,7 @@ func (p *Provisioner) Bootstrap(ctx context.Context, req CeremonyRequest) (Respo
 			principal string
 		)
 		if scanErr := tx.QueryRow(ctx, readCeremonyStatement, ceremonyRowID).
-			Scan(&record.Operator, &record.Reason, &record.IdempotencyKey, &principal, &existing); scanErr != nil {
+			Scan(&record.Operator, &record.Witness, &record.Reason, &record.IdempotencyKey, &principal, &existing); scanErr != nil {
 			return fmt.Errorf("provisioning: read the ceremony row: %w", scanErr)
 		}
 		// A row claimed before principal_id was recorded, whose Principal was never created, names
@@ -215,6 +238,7 @@ func (p *Provisioner) Bootstrap(ctx context.Context, req CeremonyRequest) (Respo
 	if claimed {
 		p.logger.InfoContext(ctx, "bootstrap ceremony claimed",
 			slog.String("operator", record.Operator),
+			slog.String("witness", record.Witness),
 			slog.String("realm", string(req.Realm)))
 	} else {
 		p.logger.InfoContext(ctx, "bootstrap ceremony already recorded; resuming under the stored key",
@@ -255,7 +279,7 @@ func (p *Provisioner) CeremonyPerformed(ctx context.Context) (CeremonyRecord, bo
 
 	if err := p.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
 		if scanErr := tx.QueryRow(ctx, probeCeremonyStatement).
-			Scan(&count, &record.Operator, &record.Reason, &record.IdempotencyKey); scanErr != nil {
+			Scan(&count, &record.Operator, &record.Witness, &record.Reason, &record.IdempotencyKey); scanErr != nil {
 			return fmt.Errorf("provisioning: read the ceremony row: %w", scanErr)
 		}
 		return nil

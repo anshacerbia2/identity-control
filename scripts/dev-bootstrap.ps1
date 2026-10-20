@@ -18,10 +18,14 @@
 #   $env:KC_ADMIN_PASSWORD        = '...'   # Keycloak bootstrap admin, for step 2 only
 #   $env:IDENTITY_CALLER_PASSWORD = '...'   # the password step 2 sets
 #
-# Usage: pwsh ./scripts/dev-bootstrap.ps1 [-Operator you@example.com] [-Resume]
+# Usage: pwsh ./scripts/dev-bootstrap.ps1 -Witness <a second person> [-Operator you@example.com] [-Resume]
+#
+# Two named people run the ceremony, an operator and a witness, never the same person
+# (STD-IAM-001 2.9.0 §3.10). The witness is not defaulted: a guessed second person is no witness.
 
 param(
     [string]$Operator = "",
+    [string]$Witness  = "",
     [string]$Reason   = "local development harness stand-up",
     [string]$Username = "bootstrap-operator",
     [switch]$Resume
@@ -61,6 +65,9 @@ if ([string]::IsNullOrWhiteSpace($Operator)) {
     $Operator = "$env:USERNAME@$env:COMPUTERNAME"
     Write-Host "no -Operator given; recording '$Operator'"
 }
+if ([string]::IsNullOrWhiteSpace($Witness)) {
+    throw "-Witness is required: the second named person present, never the operator (STD-IAM-001 3.10)"
+}
 
 # ---------------------------------------------------------------------------------------------
 Write-Host ""
@@ -80,6 +87,7 @@ $env:IDENTITY_TOKEN_AUDIENCE = "identity-control-api"
 $arguments = @(
     "run", "./cmd/identity-bootstrap",
     "-operator", $Operator,
+    "-witness", $Witness,
     "-reason", $Reason,
     "-username", $Username,
     "-email", "$Username@scnehaux.local"

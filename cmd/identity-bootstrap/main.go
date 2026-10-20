@@ -12,7 +12,10 @@
 // It holds no credential. The kernel user is created owing a credential-setting action, so the
 // first human interaction establishes the credential and this process never handles one.
 //
-//	identity-bootstrap -operator 'ansha@…' -reason 'initial estate stand-up' -username ansha
+// Two named people run it, an operator and a witness, never the same person, and both are recorded
+// (STD-IAM-001 2.9.0 §3.10, ADR-IAM-001 §5.11 requirement 3).
+//
+//	identity-bootstrap -operator '<operator>' -witness '<witness>' -reason 'initial estate stand-up' -username '<first>'
 package main
 
 import (
@@ -38,6 +41,7 @@ import (
 
 func main() {
 	operator := flag.String("operator", "", "the human performing the ceremony; recorded immutably")
+	witness := flag.String("witness", "", "the second named person present, never the operator; recorded immutably")
 	reason := flag.String("reason", "", "why the ceremony is being performed; recorded immutably")
 	username := flag.String("username", "", "username of the first Principal")
 	email := flag.String("email", "", "email of the first Principal (optional)")
@@ -45,13 +49,13 @@ func main() {
 	timeout := flag.Duration("timeout", 2*time.Minute, "upper bound on the whole ceremony")
 	flag.Parse()
 
-	if err := run(*operator, *reason, *username, *email, *resume, *timeout); err != nil {
+	if err := run(*operator, *witness, *reason, *username, *email, *resume, *timeout); err != nil {
 		fmt.Fprintf(os.Stderr, "identity-bootstrap: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run(operator, reason, username, email, resume string, timeout time.Duration) error {
+func run(operator, witness, reason, username, email, resume string, timeout time.Duration) error {
 	cfg, err := config.LoadBootstrap()
 	if err != nil {
 		return fmt.Errorf("configuration: %w", err)
@@ -109,8 +113,8 @@ func run(operator, reason, username, email, resume string, timeout time.Duration
 	}
 	if performed && resume == "" {
 		return fmt.Errorf(
-			"%w\n  operator: %s\n  reason:   %s\npass -resume %q to complete an interrupted ceremony",
-			provisioning.ErrCeremonyAlreadyPerformed, record.Operator, record.Reason, record.Operator)
+			"%w\n  operator: %s\n  witness:  %s\n  reason:   %s\npass -resume %q to complete an interrupted ceremony",
+			provisioning.ErrCeremonyAlreadyPerformed, record.Operator, record.Witness, record.Reason, record.Operator)
 	}
 	if performed && resume != record.Operator {
 		// Naming the recorded operator is the confirmation. It cannot be guessed from the flags
@@ -124,6 +128,7 @@ func run(operator, reason, username, email, resume string, timeout time.Duration
 		Username: username,
 		Email:    email,
 		Operator: operator,
+		Witness:  witness,
 		Reason:   reason,
 	})
 	if err != nil {
@@ -145,7 +150,8 @@ func run(operator, reason, username, email, resume string, timeout time.Duration
 	logger.InfoContext(ctx, "bootstrap ceremony complete",
 		slog.String("principal_id", response.PrincipalID.String()),
 		slog.String("realm", string(response.Realm)),
-		slog.String("operator", record.Operator))
+		slog.String("operator", record.Operator),
+		slog.String("witness", record.Witness))
 
 	// Printed to stdout separately from the log so the operator can copy the identifier without
 	// parsing JSON. The next step is stated because a Principal owing a credential cannot yet
@@ -155,9 +161,12 @@ func run(operator, reason, username, email, resume string, timeout time.Duration
 	fmt.Printf("  username      %s\n", username)
 	fmt.Printf("  realm         %s\n", response.Realm)
 	fmt.Printf("  operator      %s\n", record.Operator)
+	fmt.Printf("  witness       %s\n", record.Witness)
 	fmt.Printf("  resource      %s (registration %s)\n", resource.ClientKey, resource.ID)
 	fmt.Printf("\nThis Principal is a provider by the ceremony's grant until Organization's first\n")
 	fmt.Printf("emergency provider:identity-control grant is projected (TDD-identity-control-006).\n")
+	fmt.Printf("\nAn independent reviewer, neither of the two above, records a review of this record\n")
+	fmt.Printf("with POST /v1/bootstrap-ceremony:review before the realm serves anyone else (STD-IAM-001 §3.10).\n")
 	fmt.Printf("\nThis Principal owes a credential. It cannot authenticate until the kernel's\n")
 	fmt.Printf("credential-setting action is completed; this command never held one.\n")
 	return nil

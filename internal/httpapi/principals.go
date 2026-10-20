@@ -31,6 +31,7 @@ type Provisioner interface {
 	Create(ctx context.Context, req provisioning.CreateRequest) (provisioning.Response, error)
 	Relink(ctx context.Context, req provisioning.RelinkRequest) (provisioning.RelinkResult, error)
 	Release(ctx context.Context, req provisioning.ReleaseRequest) (provisioning.ReleaseResult, error)
+	Adopt(ctx context.Context, req provisioning.AdoptRequest) (provisioning.AdoptPlan, error)
 	Pending(ctx context.Context) ([]provisioning.PendingMapping, error)
 	Quarantined(ctx context.Context) ([]provisioning.QuarantinedMapping, error)
 	Dangling(ctx context.Context) ([]provisioning.DanglingFinding, error)
@@ -126,8 +127,8 @@ func (h *Principals) CreatePrincipal(w http.ResponseWriter, r *http.Request) {
 }
 
 // PrincipalAction handles POST /v1/principals/{principal_id}:{action}. The mux matches whole
-// segments only, so the action is read from the segment here. :relink and :release are built here;
-// :suspend and :restore are the security commands' (routes.go).
+// segments only, so the action is read from the segment here. :relink, :release and :adopt are built
+// here; :suspend and :restore are the security commands' (routes.go).
 func (h *Principals) PrincipalAction(w http.ResponseWriter, r *http.Request) {
 	principal, ok := callerPrincipal(r)
 	if !ok {
@@ -135,7 +136,7 @@ func (h *Principals) PrincipalAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	raw, action, _ := strings.Cut(r.PathValue("target"), ":")
-	if action != "relink" && action != "release" {
+	if action != "relink" && action != "release" && action != "adopt" {
 		httpapi.Problem(w, r, httpapi.NotFound, "No such Principal action")
 		return
 	}
@@ -150,6 +151,10 @@ func (h *Principals) PrincipalAction(w http.ResponseWriter, r *http.Request) {
 		httpapi.Problem(w, r, httpapi.Forbidden, selfReleaseDetail)
 		return
 	}
+	if action == "adopt" && target == principal {
+		httpapi.Problem(w, r, httpapi.Forbidden, selfAdoptDetail)
+		return
+	}
 	reason := strings.TrimSpace(r.Header.Get(AdministrativeReasonHeader))
 	if reason == "" {
 		httpapi.Problem(w, r, httpapi.ValidationFailed, "A "+action+" requires an X-Administrative-Reason header")
@@ -157,6 +162,10 @@ func (h *Principals) PrincipalAction(w http.ResponseWriter, r *http.Request) {
 	}
 	if action == "release" {
 		h.release(w, r, target, principal, reason)
+		return
+	}
+	if action == "adopt" {
+		h.adopt(w, r, target, principal, reason)
 		return
 	}
 	result, err := h.provisioner.Relink(r.Context(), provisioning.RelinkRequest{
@@ -176,6 +185,46 @@ func (h *Principals) PrincipalAction(w http.ResponseWriter, r *http.Request) {
 
 // selfReleaseDetail is the 403 a caller releasing their own Principal is answered.
 const selfReleaseDetail = "A provider cannot release the Principal in its own token"
+
+// selfAdoptDetail is the 403 a caller adopting their own Principal is answered.
+const selfAdoptDetail = "A provider cannot adopt the Principal in its own token"
+
+// principalAdoptRequest is :adopt's body: dry_run plans only.
+type principalAdoptRequest struct {
+	DryRun bool `json:"dry_run"`
+}
+
+// adopt handles POST /v1/principals/{principal_id}:adopt (ADR-IAM-001 §5.11 as amended 2026-10-20,
+// TDD-identity-control-001 1.23.0): an orphan's identifier re-adopted after a restore to an older
+// point, landing suspended. A plan answers 200 with its four checks; an adoption the checks refuse
+// answers 409 with the refusal; an adoption answers 200 with the plan and state suspended.
+func (h *Principals) adopt(w http.ResponseWriter, r *http.Request, target, principal id.UUID, reason string) {
+	var body principalAdoptRequest
+	decoder := json.NewDecoder(io.LimitReader(r.Body, maxBodyBytes))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+		httpapi.Problem(w, r, httpapi.ValidationFailed, `An adoption takes {"dry_run": true|false}`)
+		return
+	}
+	plan, err := h.provisioner.Adopt(r.Context(), provisioning.AdoptRequest{
+		PrincipalID: target, AdoptedBy: principal, Reason: reason, DryRun: body.DryRun})
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusOK, plan)
+	case errors.Is(err, provisioning.ErrSelfAdopt):
+		httpapi.Problem(w, r, httpapi.Forbidden, selfAdoptDetail)
+	case errors.Is(err, provisioning.ErrNotAdoptable):
+		// The refusal names a check and what it read, never a kernel identifier.
+		httpapi.Problem(w, r, httpapi.StateTransitionRefused, "The identifier is not adoptable: "+plan.Refusal)
+	case errors.Is(err, provisioning.ErrMapped):
+		httpapi.Problem(w, r, httpapi.StateTransitionRefused,
+			"A mapping already holds this identifier; only an orphan's identifier is adopted")
+	case errors.Is(err, provisioning.ErrAdoptionUnavailable):
+		httpapi.Problem(w, r, httpapi.DependencyUnavailable, "The kernel's creation journal is not configured")
+	default:
+		writeProvisioningError(w, r, err)
+	}
+}
 
 // releaseRequest names the kernel user the duplicate triage decided is the person.
 type releaseRequest struct {

@@ -700,3 +700,26 @@ func TestTheLapseSweepIntervalIsBounded(t *testing.T) {
 		}
 	}
 }
+
+// The consumer's own reconciliation runs every 15 minutes unless set, and cannot be turned off
+// (ADR-ORG-001 §5.7).
+func TestTheOrganizationReconcileIntervalIsPositive(t *testing.T) {
+	setRequired(t)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.OrganizationReconcileInterval != 15*time.Minute {
+		t.Errorf("default interval %s, want 15m", cfg.OrganizationReconcileInterval)
+	}
+	t.Setenv("IDENTITY_ORGANIZATION_RECONCILE_INTERVAL", "5m")
+	if cfg, err = config.Load(); err != nil || cfg.OrganizationReconcileInterval != 5*time.Minute {
+		t.Errorf("Load with 5m: %s, %v", cfg.OrganizationReconcileInterval, err)
+	}
+	for _, value := range []string{"0s", "-1m"} {
+		t.Setenv("IDENTITY_ORGANIZATION_RECONCILE_INTERVAL", value)
+		if _, err := config.Load(); err == nil || !strings.Contains(err.Error(), "IDENTITY_ORGANIZATION_RECONCILE_INTERVAL") {
+			t.Errorf("Load with %s: %v", value, err)
+		}
+	}
+}

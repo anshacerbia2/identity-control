@@ -1319,3 +1319,52 @@ func TestALogoutChangeInFlightIsNotTakenForDrift(t *testing.T) {
 		t.Errorf("the sweep after the change ran %+v, want converged", run)
 	}
 }
+
+// Consent follows the audience class (STD-IAM-002 1.9.0 §3.6, ADR-IAM-003 §5.11): an internal client
+// never asks it. Turned on in the console, it is repaired when the change is attributed, and left for
+// an operator when nobody can be named for it, as every repairable class is.
+func TestTheConsentSettingIsHeldToTheAudienceClass(t *testing.T) {
+	h := newHarness(t)
+	caller := h.caller()
+	h.tick(time.Second)
+	if run := h.sweep(); run.Outcome != Converged {
+		t.Fatalf("a client holding its consent setting swept %+v", run)
+	}
+
+	h.tick(time.Second)
+	h.kernel.ConsoleChange(admin, caller.client, func(c *keycloak.Client) { c.ConsentRequired = true })
+	h.tick(time.Second)
+	if run := h.sweep(); run.Outcome != Drift {
+		t.Errorf("consent turned on: run %+v, want drift", run)
+	}
+	if h.live(caller.client).ConsentRequired {
+		t.Error("an internal client still asks consent after the sweep")
+	}
+	repaired := false
+	for _, f := range h.findings(caller.client) {
+		if f.field == string(Consent) && f.class == string(Repaired) && f.actor == admin && f.convergedAt != nil {
+			repaired = true
+		}
+	}
+	if !repaired {
+		t.Errorf("no repaired consent finding: %+v", h.findings(caller.client))
+	}
+
+	// Nobody can be named for this one: it is recorded and left in place.
+	h.tick(10 * time.Minute)
+	h.kernel.ConsoleChange("", caller.client, func(c *keycloak.Client) { c.ConsentRequired = true })
+	h.tick(time.Second)
+	h.sweep()
+	if !h.live(caller.client).ConsentRequired {
+		t.Error("an unattributed consent change was repaired")
+	}
+	unattributed := false
+	for _, f := range h.findings(caller.client) {
+		if f.field == string(Consent) && f.class == string(Unattributed) && f.convergedAt == nil {
+			unattributed = true
+		}
+	}
+	if !unattributed {
+		t.Errorf("no unattributed consent finding: %+v", h.findings(caller.client))
+	}
+}

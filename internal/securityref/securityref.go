@@ -48,6 +48,7 @@ const PurposeAdminRevoke = "admin.authenticator.revoke"
 const (
 	PurposeSelfSessionTerminate    = "self.session.terminate"
 	PurposeSelfAuthenticatorRemove = "self.authenticator.remove"
+	PurposeSelfConsentWithdraw     = "self.consent.withdraw"
 )
 
 // ErrInvalid is any handle that does not open: tampered, expired, sealed for another kind, subject

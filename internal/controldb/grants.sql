@@ -29,6 +29,7 @@ BEGIN
       FROM (VALUES
               ('identity.principal_mapping'),
               ('identity.bootstrap_ceremony'),
+              ('identity.bootstrap_ceremony_review'),
               ('identity.client_registration'),
               ('identity.reconcile_run'),
               ('identity.registration_finding'),
@@ -54,6 +55,7 @@ BEGIN
               ('identity.security_operation_attempt'),
               ('identity.principal_relink'),
               ('identity.principal_release'),
+              ('identity.principal_adoption'),
               ('identity.principal_finding'),
               ('identity.tenant_desired'),
               ('identity.membership_desired'),
@@ -112,6 +114,10 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA platform TO identit
 --
 -- SELECT and INSERT remain: the ceremony claims the row, and a resumed ceremony reads it back.
 REVOKE UPDATE, DELETE, TRUNCATE ON identity.bootstrap_ceremony FROM identity_runtime;
+-- A review of the ceremony's record (STD-IAM-001 2.9.0 §3.10) is evidence about evidence: who read
+-- the record, what they concluded, and when. Insert-only, so neither the reviewer nor the operator
+-- can later change what was concluded.
+REVOKE UPDATE, DELETE, TRUNCATE ON identity.bootstrap_ceremony_review FROM identity_runtime;
 
 -- The registration records are evidence, and TDD-identity-control-003 keeps each of them after it
 -- stops mattering operationally: a retired registration stays auditable, a converged finding is
@@ -186,6 +192,10 @@ REVOKE UPDATE, DELETE, TRUNCATE ON identity.principal_relink FROM identity_runti
 -- A release of a quarantined mapping is the record of who lifted an integrity hold, on what reason,
 -- and onto which kernel user (TDD-identity-control-001 1.18.0): insert-only, as a relink is.
 REVOKE UPDATE, DELETE, TRUNCATE ON identity.principal_release FROM identity_runtime;
+-- An adoption brings an orphan's identifier back into the registry after a restore to an older point
+-- (ADR-IAM-001 §5.11, amended 2026-10-20): the record of who decided it, on what reason, and the
+-- evidence each of the four checks read. Insert-only, as a release is.
+REVOKE UPDATE, DELETE, TRUNCATE ON identity.principal_adoption FROM identity_runtime;
 REVOKE DELETE, TRUNCATE ON identity.principal_finding FROM identity_runtime;
 -- The provider authority projection (TDD-identity-control-006): written by the delivery intake and
 -- the bootstrap, replaced by version, never deleted. A revoked grant stays as the record a late,
@@ -243,6 +253,14 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA platform TO identity_runtime;
 -- The partition maintenance helpers are invoked by the migration job, never by the
 -- runtime. EXECUTE is granted to nobody else.
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA platform FROM PUBLIC;
+
+-- The one platform function the runtime runs: the purge of completed Idempotency-Keys past the
+-- window TDD-identity-control-003 §Key Retention publishes (foundation-platform v0.5.0,
+-- STD-GLB-001 1.7.0). It is SECURITY INVOKER, so it deletes with the runtime's own privileges, which
+-- on platform.idempotency_key are what the key ledger already uses: SELECT to replay, DELETE to
+-- release a refused claim. The function refuses a window under 24 hours and never deletes an
+-- uncompleted key.
+GRANT EXECUTE ON FUNCTION platform.purge_idempotency_keys(interval) TO identity_runtime;
 
 -- A table added by a future migration inherits these privileges. Without this, the next
 -- schema change ships a table the runtime cannot read, and the failure appears at

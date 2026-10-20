@@ -59,13 +59,14 @@ The service then treats the difference as drift, and repairs the kernel toward t
 
 | Made after the backup | What the restored service sees | What to do |
 | :-- | :-- | :-- |
-| A Principal created | An `orphan` kernel user: it carries a `principal_id` no mapping holds | In `report`, it is only recorded and stays enabled. No route binds its identifier to a mapping again (see Gaps). [Unmapped-Principal triage](unmapped-principal-triage.md) decides whether it is replaced |
+| A Principal created | An `orphan` kernel user: it carries a `principal_id` no mapping holds | In `report`, it is only recorded and stays enabled. Re-adopt its identifier, never replace it (`ADR-IAM-001 §5.11`): `POST /v1/principals/{claimed_principal_id}:adopt` with `{"dry_run": true}` and a reason, then the same with `false` once the plan's four checks hold. The mapping lands `suspended` with the user disabled; `POST /v1/principals/{id}:restore`, by an operator, returns it to service. Adopt every orphan before creating any new Principal: check 3 compares with the newest mapping, and a Principal created after the restore is newer than every orphan. A plan refused on `creation_on_record` is not this case: [Unmapped-Principal triage](unmapped-principal-triage.md) decides |
 | A client registered | An `unmanaged` client | In `report`, it is only recorded. A `confidential` client is adopted from its declaration, which converges the finding; another profile is deleted in the console and registered again |
 | A registration changed | Drift from the restored registration (`TDD-identity-control-003` §Drift Reconciliation) | A `redirect_uris` difference disables the client, `blocked`: `POST /v1/registrations:reconcile` naming the finding applies the restored state and enables it, then the change is repeated through the API. Another class is repaired to the restored value when an admin event attributes it, and recorded `unattributed` otherwise. Repeat each change; the kernel's admin events after the backup list them |
 | A Membership granted, or another Membership or Tenant event applied | The first sweep converges the kernel to the restored desired state: a member granted after the backup is removed and recorded `extra_member`, so the projection fails closed. Organization Control does not deliver an acknowledged event again | At once, [projection drift repair](projection-drift-repair.md) §The desired state against the authority: Organization Control's repair puts the Membership back. A Tenant created after the backup reaches the desired state only through the snapshot, which the sweep reads when Organization Control is configured |
 | A security command, such as a suspension | The record is gone: the Principal reads `active` while the kernel keeps the effect, its user disabled | Repeat the command, so the record exists again |
 
-`deploy-dev` checks the first five rows' reconciliation on every run, and the record is
+`deploy-dev` checks the five rows' reconciliation on every run, and a sixth case, a user the console
+made after the backup, whose adoption is refused on `creation_on_record`, and the record is
 `older-point-evidence.json` in the `restore-evidence` artifact. The Tenant row is drilled with a
 Membership; a Tenant created after the backup is not.
 
@@ -102,10 +103,10 @@ Then return `IDENTITY_UNMAPPED_USERS` and `IDENTITY_UNMANAGED_CLIENTS` to `disab
   after the backup, and the converger can act on a restored Membership that Organization Control has
   since revoked, until the reconciliation in §After a restore to an older point lands. A restore older
   than the last change has that window.
-- **A Principal created after the backup cannot be bound again.** Its kernel user carries the
-  `principal_id` the API issued, and Organization Control may hold Memberships under it, but no route
-  adopts an orphan's identifier into a mapping. It stays an `orphan`, and under `disable` its user is
-  disabled. The drill records this case as a gap.
+- **An orphan whose creation left the kernel's 7-day event retention cannot be re-adopted** until
+  Audit & Evidence holds the events (`ADR-IAM-001 §6`). Restore within the week, or triage decides.
+- **The drill does not sign in as the adopted person**, nor follow its Memberships; organization-control's
+  `wiring` job follows a Membership across both services.
 - **Only the procedure is timed.** The drill measures it on CI data, not on a production-sized
   database.
 - **The drill does not cover `.env` and `keys/`.** It deletes the volume only.

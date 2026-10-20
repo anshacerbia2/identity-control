@@ -42,6 +42,10 @@ const (
 	// sessions.terminate-all is the type above with the actor as its subject.
 	TypeSessionTerminate    = "session.terminate"
 	TypeAuthenticatorRemove = "authenticator.remove"
+
+	// TypeConsentWithdraw is a person withdrawing a consent they gave one client (TDD-identity-control-005
+	// 2.13.0, slice 3b). Its reference names the client.
+	TypeConsentWithdraw = "consent.withdraw"
 )
 
 // The operation states.
@@ -164,6 +168,8 @@ type Service struct {
 	jitter  func(limit time.Duration) time.Duration
 	metric  instruments
 	applied AppliedHook
+	// lifetimes reads a consent's client lifetime; nil leaves it null.
+	lifetimes LifetimeReader
 }
 
 // Applied is a security command the kernel applied, as the applied hook receives it.
@@ -243,6 +249,8 @@ func Route(operationType string, self bool) string {
 			return "POST /v1/me/sessions:terminate-all"
 		case TypeAuthenticatorRemove:
 			return "POST /v1/me/authenticators/{security_ref}:remove"
+		case TypeConsentWithdraw:
+			return "POST /v1/me/consents/{security_ref}:withdraw"
 		}
 		return ""
 	}
@@ -261,7 +269,8 @@ func Route(operationType string, self bool) string {
 
 // referenced reports whether an operation type names one object by a reference.
 func referenced(operationType string) bool {
-	return operationType == TypeRevoke || operationType == TypeSessionTerminate || operationType == TypeAuthenticatorRemove
+	return operationType == TypeRevoke || operationType == TypeSessionTerminate ||
+		operationType == TypeAuthenticatorRemove || operationType == TypeConsentWithdraw
 }
 
 func (c Command) validate() error {
@@ -295,6 +304,8 @@ func refBinding(operationType string) (securityref.Kind, string) {
 		return securityref.KindSession, securityref.PurposeSelfSessionTerminate
 	case TypeAuthenticatorRemove:
 		return securityref.KindCredential, securityref.PurposeSelfAuthenticatorRemove
+	case TypeConsentWithdraw:
+		return securityref.KindConsent, securityref.PurposeSelfConsentWithdraw
 	default:
 		return securityref.KindCredential, securityref.PurposeAdminRevoke
 	}

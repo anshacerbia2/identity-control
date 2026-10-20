@@ -55,6 +55,12 @@ event is emitted yet. The finding and the `ERROR` line are the alert (§Reconcil
    - a `404` means no Principal ever held that identifier. Someone typed it in.
    - A Principal that exists means a mapping was lost or retired. A retired Principal's identifier
      on a live user is a re-use. Escalate it as an access incident.
+   - A `404` right after a restore to an older point may be a Principal created after the backup.
+     Plan its adoption: `POST /v1/principals/{claimed_principal_id}:adopt` with `{"dry_run": true}`
+     and a reason. When all four checks hold, it was this service's own Principal: adopt it as
+     [Control Database restore](control-database-restore.md) §After a restore to an older point says,
+     and stop here. A plan refused on `creation_on_record` means this service did not create it, or
+     its creation left the kernel's 7-day retention: continue with step 5.
 5. **Close the creation path that let the user in.** That path is a realm setting identity-kernel
    owns, so the change is made there, not here. Do this before step 6, or the next import makes
    another one.
@@ -91,8 +97,9 @@ event is emitted yet. The finding and the `ERROR` line are the alert (§Reconcil
 
 ## Gaps
 
-- **No route adopts an existing user as a Principal.** A legitimate user made outside the path is
-  replaced, not adopted.
+- **No route adopts a user this service did not create.** `:adopt` re-adopts only an identifier this
+  service issued, proven by the kernel's admin event (`ADR-IAM-001 §5.11`). A legitimate user made
+  outside the path is replaced, not adopted.
 - **No event is emitted.** `identity.principal.*_detected` waits for Audit & Evidence
   (`TDD-identity-control-007` §Scope). Alerting depends on the log line.
 

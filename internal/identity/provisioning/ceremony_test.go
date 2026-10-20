@@ -26,10 +26,13 @@ import (
 // ceremonyPrincipal is the principal_id the ceremony row records, as the read-back returns it.
 const ceremonyPrincipal = "019235f1-8c4a-7c1e-9d0b-3f4a2b6e5d71"
 
+// ceremonyWitness is the witness the ceremony row records (STD-IAM-001 2.9.0 §3.10).
+const ceremonyWitness = "witness@example.com"
+
 func ceremonyClaimed(operator, reason, key string, existingMappings int) *dbtest.Tx {
 	return &dbtest.Tx{
 		Tag:       dbtest.CommandTag(1),
-		RowValues: []any{operator, reason, key, ceremonyPrincipal, existingMappings},
+		RowValues: []any{operator, ceremonyWitness, reason, key, ceremonyPrincipal, existingMappings},
 	}
 }
 
@@ -38,7 +41,7 @@ func ceremonyClaimed(operator, reason, key string, existingMappings int) *dbtest
 func ceremonyAlreadyClaimed(operator, reason, key string, existingMappings int) *dbtest.Tx {
 	return &dbtest.Tx{
 		Tag:       dbtest.CommandTag(0),
-		RowValues: []any{operator, reason, key, ceremonyPrincipal, existingMappings},
+		RowValues: []any{operator, ceremonyWitness, reason, key, ceremonyPrincipal, existingMappings},
 	}
 }
 
@@ -48,6 +51,7 @@ func ceremonyRequest() provisioning.CeremonyRequest {
 		Username: "first.operator",
 		Email:    "first.operator@example.com",
 		Operator: "ansha@example.com",
+		Witness:  ceremonyWitness,
 		Reason:   "initial estate stand-up",
 	}
 }
@@ -134,7 +138,7 @@ func TestTheCeremonyCreatesThePrincipalItsRowNames(t *testing.T) {
 	}
 	minted := ""
 	for _, call := range ceremonyRow.Calls() {
-		if len(call.Args) == 5 {
+		if len(call.Args) == 6 {
 			minted, _ = call.Args[4].(string)
 		}
 	}
@@ -151,7 +155,7 @@ func TestTheCeremonyCreatesThePrincipalItsRowNames(t *testing.T) {
 // cannot be rewritten to; completing it would create a first Principal with no authority.
 func TestACeremonyRowNamingNoPrincipalIsRefused(t *testing.T) {
 	tx := &fakeTx{txs: []*dbtest.Tx{{
-		Tag: dbtest.CommandTag(0), RowValues: []any{"ansha@example.com", "reason", "bootstrap:scnehaux", "", 0},
+		Tag: dbtest.CommandTag(0), RowValues: []any{"ansha@example.com", ceremonyWitness, "reason", "bootstrap:scnehaux", "", 0},
 	}}}
 	kernel := keycloakfake.New()
 	if _, _, err := newProvisioner(t, tx, kernel).Bootstrap(context.Background(), ceremonyRequest()); !errors.Is(err, provisioning.ErrCeremonyUnnamed) {
@@ -198,6 +202,7 @@ func TestResumedCeremonyUsesTheRecordedOperator(t *testing.T) {
 
 	request := ceremonyRequest()
 	request.Operator = "someone.else@example.com"
+	request.Witness = "another.witness@example.com"
 	request.Reason = "a different reason"
 
 	_, record, err := p.Bootstrap(context.Background(), request)
@@ -209,6 +214,9 @@ func TestResumedCeremonyUsesTheRecordedOperator(t *testing.T) {
 	}
 	if record.Reason != "the original reason" {
 		t.Errorf("reason = %q; a resumed ceremony must not rewrite the recorded reason", record.Reason)
+	}
+	if record.Witness != ceremonyWitness {
+		t.Errorf("witness = %q; a resumed ceremony must report who witnessed the first attempt", record.Witness)
 	}
 }
 
@@ -283,6 +291,10 @@ func TestBootstrapRequiresANamedHumanAndAReason(t *testing.T) {
 		"blank reason":   func(r *provisioning.CeremonyRequest) { r.Reason = "\t" },
 		"no username":    func(r *provisioning.CeremonyRequest) { r.Username = "" },
 		"no realm":       func(r *provisioning.CeremonyRequest) { r.Realm = "" },
+		"no witness":     func(r *provisioning.CeremonyRequest) { r.Witness = " " },
+		"the operator as witness": func(r *provisioning.CeremonyRequest) {
+			r.Witness = " ANSHA@example.com "
+		},
 	}
 
 	for name, mutate := range cases {
@@ -324,5 +336,21 @@ func TestCeremonyScopeCannotCollideWithACaller(t *testing.T) {
 	}
 	if scope == "" {
 		t.Error("the ceremony claimed under an empty scope")
+	}
+}
+
+// TestTheWitnessIsNeverTheOperator names the refusal: two different people run the ceremony
+// (STD-IAM-001 2.9.0 §3.10, NIST SP 800-53 AC-3(2) "two-person control"). Names compare trimmed and
+// case folded, as the database's check does.
+func TestTheWitnessIsNeverTheOperator(t *testing.T) {
+	request := ceremonyRequest()
+	request.Witness = "Ansha@Example.com"
+	p := newProvisioner(t, &fakeTx{}, keycloakfake.New())
+	if _, _, err := p.Bootstrap(context.Background(), request); !errors.Is(err, provisioning.ErrWitnessIsOperator) {
+		t.Fatalf("Bootstrap = %v, want ErrWitnessIsOperator", err)
+	}
+	request.Witness = ""
+	if _, _, err := p.Bootstrap(context.Background(), request); !errors.Is(err, provisioning.ErrWitnessRequired) {
+		t.Fatalf("Bootstrap = %v, want ErrWitnessRequired", err)
 	}
 }

@@ -80,8 +80,11 @@ On the server, from `identity-control/deploy/dev`:
 5. **Start the stack:** `docker compose up -d --build`.
 6. **Wait until it is ready:** `curl -fsS http://127.0.0.1:8082/readyz` answers once the migration
    job has succeeded.
-7. **Perform the bootstrap ceremony:**
-   `./bootstrap.sh "you@example.com" "first stand-up of the development server"`.
+7. **Perform the bootstrap ceremony,** two named people, an operator and a witness, never the same
+   person (STD-IAM-001 2.9.0 §3.10):
+   `./bootstrap.sh "you@example.com" "<witness>" "first stand-up of the development server"`.
+   An independent reviewer, neither of the two, then records a review of the record
+   (`docs/runbooks/bootstrap-ceremony.md` §Review).
 
 The same, as one block:
 
@@ -101,7 +104,7 @@ cp .env.example .env
 docker compose up -d --build
 curl -fsS http://127.0.0.1:8082/readyz       # ready once the migration job has succeeded
 
-./bootstrap.sh "you@example.com" "first stand-up of the development server"
+./bootstrap.sh "you@example.com" "<witness>" "first stand-up of the development server"
 ```
 
 The ceremony can succeed once per Control Database, and a second run is refused. That is the
@@ -213,7 +216,7 @@ Each is a service behind a profile that runs the migrate image, and never starts
 
 | Task | Run | When |
 | :-- | :-- | :-- |
-| `bootstrap` | `./bootstrap.sh "<operator>" "<reason>"` the first time; to resume, `docker compose run --rm bootstrap -operator … -resume …` | once per Control Database (ADR-IAM-001 §5.11) |
+| `bootstrap` | `./bootstrap.sh "<operator>" "<witness>" "<reason>"` the first time; to resume, `docker compose run --rm bootstrap -operator … -witness … -resume …` | once per Control Database (ADR-IAM-001 §5.11) |
 | `provider-bootstrap` | `docker compose run --rm provider-bootstrap` | once Organization Control serves this consumer, and again after its registration changes; organization-control's `deploy/dev/README.md` says when. It bootstraps provider authority and the Tenant context, and records the lower mark |
 
 ### Reading a code in the mail catcher
@@ -405,6 +408,16 @@ and the ceremony's grant is the only provider authority (TDD-identity-control-00
 `IDENTITY_DELIVERY_PRINCIPAL_ID` and `IDENTITY_ORGANIZATION_BASE_URL` here and running
 `provider-bootstrap`.
 
+From then on the service reconciles itself with Organization Control every
+`IDENTITY_ORGANIZATION_RECONCILE_INTERVAL` (15 minutes by default): one replica sends this consumer's
+report to `POST /v1/projections/reconcile` as its workload (ADR-ORG-001 §5.7, TDD-identity-control-002
+2.6.0). The consumer registration declares the same `reconciliation_interval` once
+organization-control's registration accepts it; until then the registration names none, as
+organization-control's README shows. Until Organization Control admits a consumer on that route it answers
+403, and the log says `Organization Control refused this consumer's reconciliation report` each
+interval. That is expected on such a server, and the runbook's operator run
+(`docs/runbooks/projection-drift-repair.md`) stays the manual path.
+
 ### Adopting the BFF
 
 `identity-experience-bff` was created by `identity-experience`'s `deploy/dev/create-bff-client.sh`
@@ -441,6 +454,34 @@ the client once `IDENTITY_CLIENT_KEY_ROTATION_OVERLAP` ends (168 hours by defaul
 and the device that signs with it stops working. So list first the key that must keep working. A
 registered client holds one active key, and a second only while a rotation overlaps: moving the BFF
 to the other device's key afterwards is a rotation, `POST /v1/registrations/{registration_id}/keys`.
+The two-key adoption exists for a client caught mid-rotation; a second device is its own registration
+(§Several developer devices).
+
+### Several developer devices
+
+**One registration per device** (STD-GLB-009 1.10.0 rule 15, `ADR-IAM-001 §5.12` as amended
+2026-10-20). A laptop-run BFF that two devices use has one registration per device, each with its own
+single active key, for example `identity-experience-bff-<device>` beside `identity-experience-bff`.
+OAuth treats each deployed instance as its own client: `client_id` "SHOULD vary between instances"
+(RFC 7591 §2, STD-GLB-009 [R64]). With one registration per device, each device has its own sessions
+and events in the kernel, and a lost laptop is suspended without touching the other.
+
+1. **On the second device:** `node scripts/new-client-key.mjs` in the BFF's repository. The private
+   key stays there; only the public JWK leaves.
+2. **On the server, as a provider:** register the device's client through `POST /v1/registrations`
+   with the same declaration as the first device's, its own `client_key` and its own `public_key`:
+   for identity-experience, `confidential`, `privileged` in the `provider-scope` form, audience
+   `identity-control-api`, redirect `http://127.0.0.1:8090/auth/callback`; for organization-experience,
+   its `scripts/dev-register-bff.ps1` with the device's client name.
+3. **On the second device:** set the BFF's client id in its `.env` to that client
+   (`IDENTITY_EXPERIENCE_CLIENT_ID`, `ORGANIZATION_EXPERIENCE_CLIENT_ID`) and its key file to the new key.
+4. **Record the device's client** on the server's environment page (the architecture repository's
+   `deploy/dev/<server>.md`).
+
+Never give `set-client-key.sh` two devices' keys for one client, and never adopt one client with two
+devices' keys to serve both: a second key on a registration is only a rotation's overlap, and it is
+removed when the overlap ends. A device's client is suspended (`POST /v1/registrations/{id}:suspend`)
+when the device is lost, and retired when it is replaced.
 
 The declaration it sends, with a provider-scope token (`scripts/dev-token.ps1`):
 
@@ -555,6 +596,21 @@ Daily, from the operator's crontab (`crontab -e`), with the checkout's path:
 15 2 * * * /home/development/apps/identity-control/deploy/dev/backup.sh /mnt/backups/identity-control >/dev/null
 ```
 
+The cron line runs `backup.sh`, never a bare `pg_dump`, because the script is what writes the two
+steps and keeps the count (STD-GLB-009 rule 9, 1.10.0):
+
+- **Each file is written as `<name>.partial`**, with `umask 077`, and renamed only once its command
+  succeeded. A failed run stops there and leaves at most a `.partial`, never a file that looks like a
+  backup.
+- **Retention is by count: the newest 14 complete sets.** Once both files of the new set are in
+  place, the script deletes the complete sets older than the newest 14 and names each on stderr. A
+  set is complete when both files of one `<date>` exist under their final names. A failed run
+  deletes nothing, and the set just written is never deleted. A lone file or a `.partial` is not
+  counted and not deleted: look at it, then remove it by hand. Never prune with an age-based
+  `find -mtime +N -delete`, which deletes the last good sets once backups have stopped for N days.
+- **The directory is on this host.** A copy off the host is required before production, and a
+  development server records its absence on its environment page.
+
 `keys/` belongs to `KEYS_OWNER`, the container's user, so it is copied with `sudo`:
 `sudo tar -C . -czf "/mnt/backups/identity-control/keys-$(date +%F).tgz" keys .env`. Keep the archive as private as the keys.
 
@@ -578,7 +634,9 @@ refused.
 **What is proven, and what is not.** `deploy-dev` runs both scripts on every change and weekly, as
 the restore drill `scripts/dev-restore-drill.sh` (STD-GLB-002 §Restore Evidence): it backs the filled
 stack up, deletes its volume, restores, compares schema, migration version, every table, sequence and
-role with the source, then starts the service and reads the registrations through the API. The
+role with the source, then starts the service and reads the registrations through the API. It also
+seeds a directory with 16 older complete sets and requires `backup.sh` to keep exactly the newest 14,
+the one it wrote among them, and to fail and delete nothing while the database is down. The
 recovery is timed against the 15-minute RTO, and the evidence is the job's `restore-evidence`
 artifact. A daily dump loses up to 24 hours of changes, against the 1-minute RPO of
 `PAD-PLT-001 §6.2`; meeting it needs WAL archiving on the production platform. The runbook is

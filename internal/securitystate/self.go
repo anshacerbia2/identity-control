@@ -132,3 +132,67 @@ func (s *Service) MyOperation(ctx context.Context, principal, operationID id.UUI
 	}
 	return op, nil
 }
+
+// MyConsent is one client the caller consented to (TDD-identity-control-005 2.13.0, slice 3b).
+// AccessTokenLifetime is the lifetime the client's registration bounds its access tokens to, in
+// seconds, or null for a client no registration describes: a withdrawal prevents the next grant and
+// does not recall a token already issued, which lives that long at most (§Session and Consent
+// Semantics).
+type MyConsent struct {
+	SecurityRef         string     `json:"security_ref"`
+	Client              string     `json:"client"`
+	Scopes              []string   `json:"scopes"`
+	GrantedAt           time.Time  `json:"granted_at"`
+	UpdatedAt           *time.Time `json:"updated_at"`
+	AccessTokenLifetime *int       `json:"access_token_lifetime_seconds"`
+}
+
+// LifetimeReader answers the access token lifetime a client's registration bounds it to. The
+// registration package derives it; the composition root hands it here.
+type LifetimeReader interface {
+	AccessTokenLifetime(ctx context.Context, clientKey string) (seconds int, registered bool, err error)
+}
+
+// UseLifetimes sets how a consent's client lifetime is read. Nil, every lifetime is null.
+func (s *Service) UseLifetimes(lifetimes LifetimeReader) { s.lifetimes = lifetimes }
+
+// MyConsents lists the caller's consents, each with a reference sealed for its withdrawal.
+func (s *Service) MyConsents(ctx context.Context, principal id.UUID) ([]MyConsent, error) {
+	user, err := s.ownUser(ctx, principal)
+	if err != nil {
+		return nil, err
+	}
+	var raw []keycloak.Consent
+	if err := s.call(ctx, func(ctx context.Context) error {
+		var err error
+		raw, err = s.kernel.UserConsents(ctx, s.cfg.Realm, user)
+		return err
+	}); err != nil {
+		return nil, fmt.Errorf("securitystate: read the consents: %w", err)
+	}
+	consents := make([]MyConsent, 0, len(raw))
+	for _, r := range raw {
+		ref, err := s.refs.Seal(securityref.KindConsent, principal, securityref.PurposeSelfConsentWithdraw,
+			string(s.cfg.Realm), r.ClientID)
+		if err != nil {
+			return nil, err
+		}
+		consent := MyConsent{SecurityRef: ref, Client: r.ClientID, Scopes: append([]string{}, r.Scopes...),
+			GrantedAt: r.Granted}
+		if !r.Updated.IsZero() {
+			updated := r.Updated
+			consent.UpdatedAt = &updated
+		}
+		if s.lifetimes != nil {
+			seconds, registered, err := s.lifetimes.AccessTokenLifetime(ctx, r.ClientID)
+			if err != nil {
+				return nil, fmt.Errorf("securitystate: read %s's lifetime: %w", r.ClientID, err)
+			}
+			if registered {
+				consent.AccessTokenLifetime = &seconds
+			}
+		}
+		consents = append(consents, consent)
+	}
+	return consents, nil
+}

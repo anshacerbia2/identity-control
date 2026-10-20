@@ -2,11 +2,12 @@
 # The bootstrap ceremony on the development server, then a local credential for the Principal it
 # creates. Run once, after `docker compose up -d --build`.
 #
-#   ./bootstrap.sh "you@example.com" "why this is being done"
+#   ./bootstrap.sh "<operator>" "<witness>" "why this is being done"
 #
 # Step 1 is the production procedure (ADR-IAM-001 §5.11): identity-bootstrap creates the first
-# Principal through the same path POST /v1/principals uses, records the operator and reason
-# immutably, and succeeds at most once per Control Database.
+# Principal through the same path POST /v1/principals uses, records the operator, the witness and the
+# reason immutably, and succeeds at most once per Control Database. The operator and the witness are
+# two different named people (STD-IAM-001 2.9.0 §3.10); the ceremony refuses one person as both.
 #
 # Step 2 is DEVELOPMENT ONLY. The ceremony leaves the Principal owing a credential so that no
 # process ever holds one; a real operator completes that through the kernel's own flow. Here the
@@ -15,8 +16,9 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-operator="${1:?usage: bootstrap.sh <operator> <reason>}"
-reason="${2:?usage: bootstrap.sh <operator> <reason>}"
+operator="${1:?usage: bootstrap.sh <operator> <witness> <reason>}"
+witness="${2:?usage: bootstrap.sh <operator> <witness> <reason>}"
+reason="${3:?usage: bootstrap.sh <operator> <witness> <reason>}"
 username=bootstrap-operator
 
 set -a
@@ -27,7 +29,7 @@ set +a
 
 echo "[1/2] bootstrap ceremony"
 docker compose run --rm bootstrap \
-	-operator "$operator" -reason "$reason" -username "$username" -email "$username@scnehaux.local"
+	-operator "$operator" -witness "$witness" -reason "$reason" -username "$username" -email "$username@scnehaux.local"
 
 echo "[2/2] local credential  <-- DEVELOPMENT ONLY"
 container="${KERNEL_KEYCLOAK_CONTAINER:-scnehaux-identity-dev-keycloak-1}"

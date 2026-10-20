@@ -74,6 +74,10 @@ type RoutesConfig struct {
 	// 2.12.0). Nil, the action is unknown.
 	TemporaryPasswords *TemporaryPasswords
 
+	// Ceremony serves the bootstrap ceremony's record and its independent review (STD-IAM-001 2.9.0
+	// §3.10). Nil, its routes are not mounted.
+	Ceremony CeremonyRecords
+
 	// Keys is where a command's Idempotency-Key is claimed and its answer recorded, for the routes
 	// replayedKey names (commands.go). The pool satisfies it. Nil, as in a handler's unit test, the
 	// key is still required and nothing is recorded.
@@ -201,6 +205,10 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	if cfg.EmergencyGrants != nil {
 		api.HandleFunc("GET /v1/provider-grants:emergency-validation", p(emergencyValidation(cfg.EmergencyGrants)))
 	}
+	if cfg.Ceremony != nil {
+		api.HandleFunc("GET /v1/bootstrap-ceremony", p(ceremonyRecord(cfg.Ceremony)))
+		api.HandleFunc("POST /v1/bootstrap-ceremony:review", p(k.replay(ceremonyReview(cfg.Ceremony))))
+	}
 	// Route class self: any person, acting on the Principal in its token.
 	s := selfOnly
 	if cfg.Me != nil {
@@ -211,6 +219,10 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 		api.HandleFunc("GET /v1/me/authenticators", s(cfg.Me.Authenticators))
 		api.HandleFunc("POST /v1/me/authenticators/{authenticator_action}", s(k.cmd(cfg.Me.AuthenticatorAction)))
 		api.HandleFunc("POST /v1/me/authenticators:enroll", s(cfg.Me.Enroll))
+		if cfg.Me.consents != nil {
+			api.HandleFunc("GET /v1/me/consents", s(cfg.Me.Consents))
+			api.HandleFunc("POST /v1/me/consents/{consent_action}", s(k.cmd(cfg.Me.ConsentAction)))
+		}
 		api.HandleFunc("GET /v1/me/security-operations/{operation_id}", s(cfg.Me.Operation))
 		if cfg.Me.addresses != nil {
 			api.HandleFunc("GET /v1/me/notification-addresses", s(cfg.Me.NotificationAddresses))
@@ -299,8 +311,8 @@ func (s Surface) Mount(probeChain, apiChain func(http.Handler) http.Handler) htt
 	return root
 }
 
-// principalAction dispatches POST /v1/principals/{target} by its action: :relink and :release to the
-// Principal path, replayed here, :suspend and :restore to the security commands when they are mounted,
+// principalAction dispatches POST /v1/principals/{target} by its action: :relink, :release and :adopt
+// to the Principal path, replayed here, :suspend and :restore to the security commands when they are mounted,
 // which key themselves, and :issue-temporary-password to the first-credential path, which keys itself
 // and never lets its answer reach the replay record (TDD-identity-control-005 2.12.0).
 func principalAction(cfg RoutesConfig, k commands) http.HandlerFunc {

@@ -134,8 +134,11 @@ The registry is left empty. This script writes no Principal.
 ## 5. Perform the bootstrap ceremony
 
 ```powershell
-./scripts/dev-bootstrap.ps1 -Operator 'you@example.com' -Reason 'initial local stand-up'
+./scripts/dev-bootstrap.ps1 -Operator 'you@example.com' -Witness '<a second person>' -Reason 'initial local stand-up'
 ```
+
+Two named people run it, an operator and a witness, never the same person, and both are recorded
+(STD-IAM-001 2.9.0 §3.10). The script does not default the witness.
 
 It also registers this service's resource, `identity-control-api`, which every caller's token
 names in `aud` (`ADR-IAM-001 §5.11` rule 5, STD-IAM-002 §3.1). A local realm whose ceremony ran
@@ -169,13 +172,13 @@ The ceremony can succeed at most once per Control Database, and this is worth se
 
 ```powershell
 # refused, and it shows you who is on record
-./scripts/dev-bootstrap.ps1
+./scripts/dev-bootstrap.ps1 -Witness w
 
 # refused: the recorded operator cannot be guessed from the flags
-go run ./cmd/identity-bootstrap -operator x -reason y -username z -resume 'someone@else.com'
+go run ./cmd/identity-bootstrap -operator x -witness w -reason y -username z -resume 'someone@else.com'
 
 # permitted, and returns the same principal_id with no second kernel call
-go run ./cmd/identity-bootstrap -operator ignored -reason ignored `
+go run ./cmd/identity-bootstrap -operator ignored -witness ignored-too -reason ignored `
     -username bootstrap-operator -resume 'you@example.com'
 ```
 
@@ -357,6 +360,13 @@ bootstrap-provider`, as Organization Control's README §Driving the service by h
   ```
 
   `make api M=POST P=/v1/projections/consumers B=consumer.json KEY=local-consumer-ic`
+
+  The registration does not name `reconciliation_interval` yet: Organization Control refuses a field it
+  does not know, and declares the interval at registration only once it implements ADR-ORG-001 §5.7.
+  Then the registration names the value of `IDENTITY_ORGANIZATION_RECONCILE_INTERVAL`, 15 minutes by
+  default, with which this service sends its own report to `POST /v1/projections/reconcile`
+  (TDD-identity-control-002 2.6.0). Until then the route answers this service's workload `403`, logged
+  each interval.
 
 ### 8.4 Switch Organization Control to the kernel
 

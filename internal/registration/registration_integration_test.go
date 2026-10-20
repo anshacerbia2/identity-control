@@ -6,7 +6,9 @@ package registration
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -498,5 +500,44 @@ func TestAPrivilegedRegistrationTakesItsFormsScope(t *testing.T) {
 	}
 	if n := len(h.clientsNamed("half-console")); n != 0 {
 		t.Errorf("a refused per-sign-in registration created %d client(s)", n)
+	}
+}
+
+// Consent follows the audience class (STD-IAM-002 1.9.0 §3.6, ADR-IAM-003 §5.11): an external
+// client a person signs in to asks for it, and no other class does. The registration reports the
+// derived setting, and the lifetime a withdrawn consent's tokens can still live is read from it.
+func TestAnExternalRegistrationRequiresConsentAndNoOtherDoes(t *testing.T) {
+	h := newHarness(t)
+	h.resource("partner-api", "L2")
+	for _, c := range []struct {
+		key, class string
+		want       bool
+	}{{"staff-web", "internal", false}, {"partner-web", "external", true}} {
+		req := h.request(c.key, ProfilePublic)
+		req.AudienceClass, req.Audience = c.class, []string{"partner-api"}
+		registration, err := h.service.Register(context.Background(), req)
+		if err != nil {
+			t.Fatalf("register %s: %v", c.key, err)
+		}
+		_, client := h.state(registration.ID)
+		spec, _, ok := h.kernel.Spec(keycloak.ClientUUID(client))
+		if !ok || spec.ConsentRequired != c.want {
+			t.Errorf("%s: the client's consent setting is %v, want %v", c.key, spec.ConsentRequired, c.want)
+		}
+		encoded, _ := json.Marshal(registration)
+		if !strings.Contains(string(encoded), fmt.Sprintf(`"consent_required":%v`, c.want)) {
+			t.Errorf("%s: the registration reads %s", c.key, encoded)
+		}
+		seconds, registered, err := h.service.AccessTokenLifetime(context.Background(), c.key)
+		if err != nil || !registered || seconds != 900 {
+			t.Errorf("%s: lifetime %d, %v, %v; want 900 from the L2 audience", c.key, seconds, registered, err)
+		}
+	}
+	if _, registered, err := h.service.AccessTokenLifetime(context.Background(), "nobody"); err != nil || registered {
+		t.Errorf("an unregistered client's lifetime: %v, %v", registered, err)
+	}
+	if ConsentRequired(ProfileResource, "external") || ConsentRequired(ProfileWorkload, "workload") ||
+		!ConsentRequired(ProfileConfidential, "external") {
+		t.Error("ConsentRequired derives the wrong setting")
 	}
 }

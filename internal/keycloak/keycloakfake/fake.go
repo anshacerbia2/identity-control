@@ -106,6 +106,7 @@ type Client struct {
 
 	users    map[keycloak.UserID]stored
 	security map[keycloak.UserID]Security
+	consents map[keycloak.UserID][]keycloak.Consent
 	nextID   int
 }
 
@@ -121,6 +122,7 @@ type Calls struct {
 	Logout            int
 	DeleteCredential  int
 	DeleteSession     int
+	RevokeConsent     int
 	// SetTemporaryPassword counts first credentials set (ADR-IAM-010).
 	SetTemporaryPassword int
 	// CreateOrganization counts Organizations created, so a test can assert that a lost response

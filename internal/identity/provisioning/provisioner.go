@@ -101,6 +101,11 @@ type Provisioner struct {
 	// newID is a seam for tests that need a deterministic or colliding identifier. It is
 	// not configuration: production always mints a UUIDv7.
 	newID func() (id.UUID, error)
+
+	// journal and creator serve :adopt's provenance check (ADR-IAM-001 §5.11 check 4); see
+	// UseCreationJournal.
+	journal keycloak.CreationJournal
+	creator func(context.Context) (string, error)
 }
 
 // New constructs a Provisioner.

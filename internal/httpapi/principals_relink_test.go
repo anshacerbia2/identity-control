@@ -217,3 +217,60 @@ func TestThePendingAndQuarantinedListings(t *testing.T) {
 		}
 	}
 }
+
+// An adoption plans with dry_run, names who and why, and answers the plan; a refusal names the check
+// (ADR-IAM-001 §5.11, TDD-identity-control-001 1.23.0).
+func TestAnAdoptionPlansAndIsRecordedUnderTheCaller(t *testing.T) {
+	target := mustUUID(t)
+	stub := &stubProvisioner{plan: provisioning.AdoptPlan{Adoptable: true, Checks: []provisioning.AdoptCheck{
+		{Check: provisioning.CheckOrphanFinding, Holds: true}}}}
+	r, operator := asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/principals/"+target.String()+":adopt",
+		strings.NewReader(`{"dry_run": true}`)))
+	r.Header.Set(httpapi.AdministrativeReasonHeader, "restored to 2026-10-19; ticket 52")
+	w := serve(principalRoutes(t, stub), r)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"adoptable":true`) ||
+		!strings.Contains(w.Body.String(), `"orphan_finding"`) {
+		t.Fatalf("status %d: %s", w.Code, w.Body)
+	}
+	if stub.adopted == nil || stub.adopted.PrincipalID != target || stub.adopted.AdoptedBy != operator ||
+		!stub.adopted.DryRun || stub.adopted.Reason != "restored to 2026-10-19; ticket 52" {
+		t.Errorf("adopted %+v", stub.adopted)
+	}
+}
+
+func TestAnAdoptionRefusesWhatItCannotDo(t *testing.T) {
+	target := mustUUID(t).String()
+	refused := fmt.Errorf("%w: creation_on_record", provisioning.ErrNotAdoptable)
+	for name, c := range map[string]struct {
+		reason string
+		body   string
+		err    error
+		want   int
+	}{
+		"no reason":          {"", `{}`, nil, http.StatusBadRequest},
+		"an unknown field":   {"why", `{"force": true}`, nil, http.StatusBadRequest},
+		"a check refuses":    {"why", `{}`, refused, http.StatusConflict},
+		"already mapped":     {"why", `{}`, provisioning.ErrMapped, http.StatusConflict},
+		"no journal":         {"why", `{}`, provisioning.ErrAdoptionUnavailable, http.StatusServiceUnavailable},
+		"kernel unreachable": {"why", `{}`, keycloak.ErrUnavailable, http.StatusServiceUnavailable},
+	} {
+		r, _ := asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/principals/"+target+":adopt", strings.NewReader(c.body)))
+		if c.reason != "" {
+			r.Header.Set(httpapi.AdministrativeReasonHeader, c.reason)
+		}
+		if w := serve(principalRoutes(t, &stubProvisioner{err: c.err}), r); w.Code != c.want {
+			t.Errorf("%s answered %d, want %d: %s", name, w.Code, c.want, w.Body)
+		}
+	}
+}
+
+// A provider never adopts the Principal in its own token, refused before the reason is read.
+func TestAnAdoptionOfTheCallersOwnPrincipalIsForbidden(t *testing.T) {
+	stub := &stubProvisioner{}
+	r, operator := asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/principals/x:adopt", nil))
+	r = httptest.NewRequest(http.MethodPost, "/v1/principals/"+operator.String()+":adopt", nil).WithContext(r.Context())
+	r.Header.Set(httpapi.IdempotencyHeader, "key-adopt-self")
+	if w := serve(principalRoutes(t, stub), r); w.Code != http.StatusForbidden || stub.adopted != nil {
+		t.Fatalf("status %d, adopted %+v", w.Code, stub.adopted)
+	}
+}

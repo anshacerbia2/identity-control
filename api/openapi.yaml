@@ -1,0 +1,4384 @@
+openapi: 3.1.0
+info:
+  title: Identity Control API
+  version: 1.0.0
+  summary: The control plane of the Scnehaux Identity Runtime (SAD-001).
+  description: |
+    The HTTP contract of identity-control, published as a versioned artifact under ADR-GLB-010
+    §5.1: "Each served API SHALL publish its specification (OpenAPI for HTTP) as a versioned
+    artifact". It is hand-maintained beside `internal/httpapi/routes.go`, and
+    `internal/httpapi/openapi_test.go` fails the build when a route is registered without an operation
+    here, or an operation names a route that is not registered.
+
+    **Versioning.** `info.version` is this document's version, bumped in the same commit as the code
+    it describes, under ADR-GLB-006's compatibility rules: the major version for a change that breaks
+    a client (a route, field, value or status removed or renamed, or a field becoming required), the
+    minor version for an addition (a route, an action, an optional field, a new value of an open
+    set), and the patch version for a correction of the description alone. The repository commit
+    pins it for a consumer.
+
+    **Mux patterns.** Go's `net/http` mux matches whole path segments, so a custom method such as
+    `:relink` is part of one wildcard segment there (`POST /v1/principals/{target}`). Here each action
+    is its own path, so a client sees each action's body and answers. Every operation names the mux
+    pattern that serves it in `x-mux-pattern`, exactly as `routes.go` writes it.
+
+    **Route classes** (`x-route-class`, TDD-identity-control-005 §What Changed in 2.0.0,
+    TDD-identity-control-003 §Registration Ownership):
+    - `provider`: a Principal holding provider authority by this service's projection of
+      Organization's grants (TDD-identity-control-006), at `acr` `aal2` (ADR-IAM-004). Anyone else is
+      answered `403` before anything is read.
+    - `owner`: a provider, or an owner of the registration or workload the path names; another
+      caller is answered `404`, as for a record that does not exist.
+    - `creator`: a provider, or a Principal holding application developer standing.
+    - `self`: any person, acting on the Principal in its own token.
+    - `person`: any authenticated person; the answer is about the caller.
+    - `workload`: one named workload, verified by the route itself (Organization Control's).
+    - `probe`: no authentication.
+
+    **Commands** (STD-GLB-001 1.4.0 §Commands Require an Idempotency-Key). Every mutating route is
+    classified in `internal/httpapi/commands.go`; a command without an `Idempotency-Key` is answered
+    `400`. A retry with the same key and body answers the first answer. An administrative command
+    also carries `X-Administrative-Reason`, visible US-ASCII (STD-GLB-001 §Request Header Values).
+
+    **Errors** are RFC 9457 problem details from foundation-platform's closed registry. A client
+    branches on `type`, never on `detail`.
+  contact:
+    name: Core Platform Team
+  license:
+    name: Proprietary
+    identifier: LicenseRef-Scnehaux-Proprietary
+servers:
+  - url: http://127.0.0.1:8081
+    description: A development server's loopback port (deploy/dev/README.md).
+security:
+  - bearer: []
+tags:
+  - name: probes
+    description: "Liveness and readiness, unauthenticated."
+  - name: principals
+    description: "Principal creation and the canonical registry (TDD-identity-control-001)."
+  - name: investigation
+    description: "A provider's reads of another Principal, each recorded (TDD-identity-control-005)."
+  - name: containment
+    description: "A provider's security commands on another Principal, through the durable executor (TDD-identity-control-005)."
+  - name: self
+    description: "A person's own sessions, authenticators, consents and addresses."
+  - name: registrations
+    description: "Protocol clients and protected resources (TDD-identity-control-003)."
+  - name: application-developers
+    description: "Application developer standing (ADR-IAM-003 §5.3)."
+  - name: registration-requests
+    description: "Production registration by request (ADR-IAM-003 §5.3)."
+  - name: workloads
+    description: "Workload identity (TDD-identity-control-004)."
+  - name: projections
+    description: "The Tenant context and provider authority projections of Organization's records (TDD-identity-control-002, -006)."
+  - name: kernel-events
+    description: "The kernel event record (TDD-identity-control-007)."
+  - name: ceremony
+    description: "The bootstrap ceremony record and its review (ADR-IAM-001 §5.11)."
+  - name: organization
+    description: "The routes Organization Control's workload calls."
+paths:
+  "/healthz":
+    get:
+      operationId: liveness
+      summary: Liveness. Touches no dependency.
+      tags: [probes]
+      x-route-class: probe
+      x-mux-pattern: "GET /healthz"
+      security: []
+      responses:
+        "200":
+          description: The process serves.
+          content:
+            text/plain:
+              schema:
+                type: string
+                const: "ok\n"
+  "/readyz":
+    get:
+      operationId: readiness
+      summary: Readiness. Answers whether the Control Database is reachable.
+      tags: [probes]
+      x-route-class: probe
+      x-mux-pattern: "GET /readyz"
+      security: []
+      responses:
+        "200":
+          description: The replica can serve.
+          content:
+            text/plain:
+              schema:
+                type: string
+                const: "ready\n"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  "/v1/principals":
+    post:
+      operationId: createPrincipal
+      summary: Mint a principal_id and create its kernel user (TDD-identity-control-001).
+      tags: [principals]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/principals"
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreatePrincipalRequest"
+      responses:
+        "201":
+          description: The Principal, created or replayed for the same key.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PrincipalCreated"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/principals/{principal_id}:relink":
+    post:
+      operationId: relinkPrincipal
+      summary: Return an active mapping whose kernel user is gone to pending, for recovery to recreate.
+      description: Refused 409 while the kernel user still exists. Replayed for the same key.
+      tags: [principals]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/principals/{target}"
+      parameters:
+        - $ref: "#/components/parameters/PrincipalID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      responses:
+        "200":
+          description: The mapping, now pending.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PrincipalState"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/principals/{principal_id}:release":
+    post:
+      operationId: releasePrincipal
+      summary: Bind a quarantined mapping to the one kernel user left, and move it to suspended.
+      description: A caller releasing the Principal in its own token is answered 403 (TDD-identity-control-001 1.22.0).
+      tags: [principals]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/principals/{target}"
+      parameters:
+        - $ref: "#/components/parameters/PrincipalID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [username]
+              properties:
+                username:
+                  type: string
+                  description: The kernel user the duplicate triage decided is the person.
+      responses:
+        "200":
+          description: The mapping, now suspended.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PrincipalState"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/principals/{principal_id}:adopt":
+    post:
+      operationId: adoptPrincipal
+      summary: Re-adopt an orphan's identifier after a restore to an older point (ADR-IAM-001 §5.11).
+      description: |
+        Plans first with `dry_run`. It refuses unless an open orphan finding names the identifier,
+        exactly one kernel user carries it, its UUIDv7 time is later than the newest mapping the
+        restored database holds, and a kernel admin event records this service's own Admin API client
+        creating that user. An adopted mapping lands `suspended`; `:restore` returns it to service.
+      tags: [principals]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/principals/{target}"
+      parameters:
+        - $ref: "#/components/parameters/PrincipalID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                dry_run:
+                  type: boolean
+                  default: false
+                  description: Plan only.
+      responses:
+        "200":
+          description: The plan for a dry run, or, with `adopted` true, the adoption; its mapping is suspended.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PrincipalAdoption"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/principals/{principal_id}:suspend":
+    post:
+      operationId: suspendPrincipal
+      summary: Contain a human Principal by disabling its kernel user and ending its sessions (TDD-identity-control-005).
+      description: Needs an authentication within IDENTITY_STEP_UP_MAX_AGE; an older one is answered 401 with an RFC 9470 challenge. A provider cannot act on its own Principal.
+      tags: [containment]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/principals/{target}"
+      parameters:
+        - $ref: "#/components/parameters/PrincipalID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      requestBody:
+        $ref: "#/components/requestBodies/SecurityCommand"
+      responses:
+        "200":
+          $ref: "#/components/responses/OperationFinal"
+        "202":
+          $ref: "#/components/responses/OperationAccepted"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  "/v1/principals/{principal_id}:restore":
+    post:
+      operationId: restorePrincipal
+      summary: Return a suspended human Principal to service; no session is restored.
+      tags: [containment]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/principals/{target}"
+      parameters:
+        - $ref: "#/components/parameters/PrincipalID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      requestBody:
+        $ref: "#/components/requestBodies/SecurityCommand"
+      responses:
+        "200":
+          $ref: "#/components/responses/OperationFinal"
+        "202":
+          $ref: "#/components/responses/OperationAccepted"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  "/v1/principals/{principal_id}:issue-temporary-password":
+    post:
+      operationId: issueTemporaryPassword
+      summary: Issue a first credential to a person who has never set one (ADR-IAM-010).
+      description: |
+        Answered once with `Cache-Control: no-store`. A retry with the same key answers `200` with the
+        issuance and without the value, which is in no row, log or idempotency record. Needs a recent
+        `aal2`.
+      tags: [principals]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/principals/{target}"
+      parameters:
+        - $ref: "#/components/parameters/PrincipalID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      requestBody:
+        required: false
+        description: Empty or `{}`. The value is generated, never chosen.
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              maxProperties: 0
+      responses:
+        "201":
+          description: The issuance, carrying the value this once.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TemporaryPasswordAnswer"
+        "200":
+          description: A replay, without the value.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TemporaryPasswordAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/principals:dangling":
+    get:
+      operationId: listDanglingPrincipals
+      summary: Active Principals whose kernel user is gone.
+      tags: [principals]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/principals:dangling"
+      responses:
+        "200":
+          description: The open dangling findings.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [dangling]
+                properties:
+                  dangling:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/DanglingFinding"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  "/v1/principals:unmapped":
+    get:
+      operationId: listUnmappedUsers
+      summary: Open findings about kernel users no mapping accounts for (unmapped, orphan, duplicate).
+      tags: [principals]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/principals:unmapped"
+      responses:
+        "200":
+          description: The open findings.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [unmapped]
+                properties:
+                  unmapped:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/UserFinding"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  "/v1/principals:pending":
+    get:
+      operationId: listPendingPrincipals
+      summary: Mappings recovery has not resolved, oldest first.
+      tags: [principals]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/principals:pending"
+      responses:
+        "200":
+          description: The pending mappings.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [pending]
+                properties:
+                  pending:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/PendingMapping"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  "/v1/principals:quarantined":
+    get:
+      operationId: listQuarantinedPrincipals
+      summary: Mappings the reconciler holds.
+      tags: [principals]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/principals:quarantined"
+      responses:
+        "200":
+          description: The quarantined mappings.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [quarantined]
+                properties:
+                  quarantined:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/QuarantinedMapping"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  "/v1/principals:reconcile":
+    post:
+      operationId: reconcilePrincipals
+      summary: Pending recovery and the Principal sweep, now. No key is required (a sweep).
+      tags: [principals]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/principals:reconcile"
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyIgnored"
+      responses:
+        "200":
+          description: What the sweep found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PrincipalSweepResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/principals:search":
+    get:
+      operationId: searchPrincipals
+      summary: A prefix lookup on the username or email this service holds; never a listing.
+      description: Every served read is recorded in identity.privileged_access.
+      tags: [investigation]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/principals:search"
+      parameters:
+        - name: q
+          in: query
+          required: true
+          description: At least IDENTITY_ADMIN_SEARCH_MIN_LENGTH characters that are not wildcards; a wildcard is literal.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: At most IDENTITY_ADMIN_SEARCH_PAGE_SIZE matches.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [principals]
+                properties:
+                  principals:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/PrincipalSummary"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  "/v1/principals/{principal_id}":
+    get:
+      operationId: getPrincipal
+      summary: One Principal, with the security_version its containment commands name.
+      tags: [investigation]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/principals/{principal_id}"
+      parameters:
+        - $ref: "#/components/parameters/PrincipalID"
+      responses:
+        "200":
+          description: The Principal.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InvestigatedPrincipal"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  "/v1/principals/{principal_id}/sessions":
+    get:
+      operationId: listPrincipalSessions
+      summary: The Principal's kernel sessions, with no IP address and no kernel identifier.
+      tags: [investigation]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/principals/{principal_id}/sessions"
+      parameters:
+        - $ref: "#/components/parameters/PrincipalID"
+      responses:
+        "200":
+          description: The sessions.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sessions]
+                properties:
+                  sessions:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Session"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/principals/{principal_id}/sessions:terminate-all":
+    post:
+      operationId: terminatePrincipalSessions
+      summary: End every session of another Principal.
+      tags: [containment]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/principals/{principal_id}/sessions:terminate-all"
+      parameters:
+        - $ref: "#/components/parameters/PrincipalID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      requestBody:
+        $ref: "#/components/requestBodies/SecurityCommand"
+      responses:
+        "200":
+          $ref: "#/components/responses/OperationFinal"
+        "202":
+          $ref: "#/components/responses/OperationAccepted"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  "/v1/principals/{principal_id}/authenticators":
+    get:
+      operationId: listPrincipalAuthenticators
+      summary: The Principal's authenticators' metadata, each with a security_ref sealed for revocation.
+      tags: [investigation]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/principals/{principal_id}/authenticators"
+      parameters:
+        - $ref: "#/components/parameters/PrincipalID"
+      responses:
+        "200":
+          description: The authenticators.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [authenticators]
+                properties:
+                  authenticators:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Authenticator"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/principals/{principal_id}/authenticators/{security_ref}:revoke":
+    post:
+      operationId: revokePrincipalAuthenticator
+      summary: Revoke one authenticator of another Principal. The last first factor is refused (last_authenticator).
+      tags: [containment]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/principals/{principal_id}/authenticators/{authenticator_action}"
+      parameters:
+        - $ref: "#/components/parameters/PrincipalID"
+        - $ref: "#/components/parameters/SecurityRef"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      requestBody:
+        $ref: "#/components/requestBodies/SecurityCommand"
+      responses:
+        "200":
+          $ref: "#/components/responses/OperationFinal"
+        "202":
+          $ref: "#/components/responses/OperationAccepted"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  "/v1/principals/{principal_id}/federation-links":
+    get:
+      operationId: listPrincipalFederationLinks
+      summary: The Principal's federation links.
+      tags: [investigation]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/principals/{principal_id}/federation-links"
+      parameters:
+        - $ref: "#/components/parameters/PrincipalID"
+      responses:
+        "200":
+          description: The links.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [federation_links]
+                properties:
+                  federation_links:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/FederationLink"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/principals/{principal_id}/findings":
+    get:
+      operationId: listPrincipalFindings
+      summary: The reconciler's findings about the Principal.
+      tags: [investigation]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/principals/{principal_id}/findings"
+      parameters:
+        - $ref: "#/components/parameters/PrincipalID"
+      responses:
+        "200":
+          description: The findings.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [findings]
+                properties:
+                  findings:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/PrincipalFinding"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  "/v1/principals/{principal_id}/events":
+    get:
+      operationId: listPrincipalEvents
+      summary: The hundred most recent kernel events naming the Principal, newest first (TDD-identity-control-005 2.9.0).
+      tags: [investigation]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/principals/{principal_id}/events"
+      parameters:
+        - $ref: "#/components/parameters/PrincipalID"
+      responses:
+        "200":
+          description: The events.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [events]
+                properties:
+                  events:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/PrincipalEvent"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  "/v1/principals/{principal_id}/notification-addresses":
+    get:
+      operationId: listPrincipalNotificationAddresses
+      summary: The Principal's notification addresses (TDD-identity-control-008).
+      tags: [investigation]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/principals/{principal_id}/notification-addresses"
+      parameters:
+        - $ref: "#/components/parameters/PrincipalID"
+      responses:
+        "200":
+          description: The addresses.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [notification_addresses]
+                properties:
+                  notification_addresses:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/InvestigatedAddress"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  "/v1/principals/{principal_id}/security-notifications":
+    get:
+      operationId: listPrincipalSecurityNotifications
+      summary: The account security notifications requested for the Principal (TDD-identity-control-008).
+      tags: [investigation]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/principals/{principal_id}/security-notifications"
+      parameters:
+        - $ref: "#/components/parameters/PrincipalID"
+      responses:
+        "200":
+          description: The notifications.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [security_notifications]
+                properties:
+                  security_notifications:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/SecurityNotification"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  "/v1/principals/{principal_id}/identifiers:match":
+    post:
+      operationId: matchIdentifier
+      summary: Whether an active human holds the address, active and proven (TDD-identity-control-008 1.7.0).
+      description: |
+        Organization Control's question at an invitation's acceptance. Only the workload
+        IDENTITY_DELIVERY_PRINCIPAL_ID names is admitted. One answer shape for every case; no address in
+        a response or a log. A read carried in a body: no key is required.
+      tags: [organization]
+      x-route-class: workload
+      x-mux-pattern: "POST /v1/principals/{principal_id}/identifiers:match"
+      security:
+        - workloadBearer: []
+      parameters:
+        - $ref: "#/components/parameters/PrincipalID"
+        - $ref: "#/components/parameters/IdempotencyKeyIgnored"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [address]
+              properties:
+                address:
+                  type: string
+                  maxLength: 254
+      responses:
+        "200":
+          description: The answer.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [match]
+                properties:
+                  match:
+                    type: boolean
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  "/v1/kernel-events:sweep":
+    post:
+      operationId: sweepKernelEvents
+      summary: Copy the kernel's user and admin events into the record, now (TDD-identity-control-007).
+      tags: [kernel-events]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/kernel-events:sweep"
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyIgnored"
+      responses:
+        "200":
+          description: What each kind read and recorded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KernelEventSweep"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  "/v1/projections/tenant-context/report":
+    get:
+      operationId: getTenantContextReport
+      summary: The consumer report an operator posts to Organization Control's reconcile route (TDD-identity-control-002 2.2.0).
+      tags: [projections]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/projections/tenant-context/report"
+      responses:
+        "200":
+          description: The report.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantContextReport"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  "/v1/projections/tenant-context:unconverged":
+    get:
+      operationId: listUnconvergedTenants
+      summary: Tenants whose convergence is owed or unresolved (TDD-identity-control-002 2.5.0).
+      tags: [projections]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/projections/tenant-context:unconverged"
+      responses:
+        "200":
+          description: The Tenants.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tenants]
+                properties:
+                  tenants:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/UnconvergedTenant"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  "/v1/projections/tenant-context:findings":
+    get:
+      operationId: listProjectionFindings
+      summary: The Tenant context sweep's findings, newest first.
+      tags: [projections]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/projections/tenant-context:findings"
+      parameters:
+        - name: class
+          in: query
+          required: false
+          description: One finding class.
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+      responses:
+        "200":
+          description: The findings.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [findings]
+                properties:
+                  findings:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ProjectionFinding"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  "/v1/projections/tenant-context/tenants/{tenant_id}:redrive":
+    post:
+      operationId: redriveTenant
+      summary: Mark one Tenant to converge again. Level-driven, so no key is required.
+      tags: [projections]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/projections/tenant-context/tenants/{tenant_action}"
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/UUID"
+        - $ref: "#/components/parameters/AdministrativeReason"
+        - $ref: "#/components/parameters/IdempotencyKeyIgnored"
+      responses:
+        "202":
+          description: The Tenant is marked.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tenant_id, state]
+                properties:
+                  tenant_id:
+                    $ref: "#/components/schemas/UUID"
+                  state:
+                    type: string
+                    const: pending
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  "/v1/projections/tenant-context:sweep":
+    post:
+      operationId: sweepTenantContext
+      summary: The scheduled Tenant context sweep, now. No key is required (a sweep).
+      tags: [projections]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/projections/tenant-context:sweep"
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyIgnored"
+      responses:
+        "200":
+          description: The sweep's run.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TenantSweep"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/provider-grants:emergency-validation":
+    get:
+      operationId: getEmergencyValidation
+      summary: Each projected emergency grant with its last use, the oldest due first (ADR-ORG-002 §5.2).
+      tags: [projections]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/provider-grants:emergency-validation"
+      responses:
+        "200":
+          description: The report.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [scope, validation_period_days, grants]
+                properties:
+                  scope:
+                    type: string
+                  validation_period_days:
+                    type: integer
+                  grants:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/EmergencyValidation"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  "/v1/me/sessions":
+    get:
+      operationId: listMySessions
+      summary: The caller's sessions; current marks the one the request came from.
+      tags: [self]
+      x-route-class: self
+      x-mux-pattern: "GET /v1/me/sessions"
+      responses:
+        "200":
+          description: The sessions.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sessions]
+                properties:
+                  sessions:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/MySession"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/me/sessions/{security_ref}:terminate":
+    post:
+      operationId: terminateMySession
+      summary: End one of the caller's sessions.
+      tags: [self]
+      x-route-class: self
+      x-mux-pattern: "POST /v1/me/sessions/{session_action}"
+      parameters:
+        - $ref: "#/components/parameters/SecurityRef"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          $ref: "#/components/responses/MyOperationFinal"
+        "202":
+          $ref: "#/components/responses/MyOperationAccepted"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  "/v1/me/sessions:terminate-all":
+    post:
+      operationId: terminateAllMySessions
+      summary: End every session of the caller, the one the request came from included.
+      tags: [self]
+      x-route-class: self
+      x-mux-pattern: "POST /v1/me/sessions:terminate-all"
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          $ref: "#/components/responses/MyOperationFinal"
+        "202":
+          $ref: "#/components/responses/MyOperationAccepted"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  "/v1/me/authenticators":
+    get:
+      operationId: listMyAuthenticators
+      summary: The caller's authenticators' metadata.
+      tags: [self]
+      x-route-class: self
+      x-mux-pattern: "GET /v1/me/authenticators"
+      responses:
+        "200":
+          description: The authenticators.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [authenticators]
+                properties:
+                  authenticators:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/MyAuthenticator"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/me/authenticators/{security_ref}:remove":
+    post:
+      operationId: removeMyAuthenticator
+      summary: Remove one of the caller's authenticators, at a recent aal2. The last first factor stays.
+      tags: [self]
+      x-route-class: self
+      x-mux-pattern: "POST /v1/me/authenticators/{authenticator_action}"
+      parameters:
+        - $ref: "#/components/parameters/SecurityRef"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          $ref: "#/components/responses/MyOperationFinal"
+        "202":
+          $ref: "#/components/responses/MyOperationAccepted"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  "/v1/me/authenticators:enroll":
+    post:
+      operationId: enrollMyAuthenticator
+      summary: Authorize enrolling an authenticator; answers the kernel action the BFF drives as kc_action.
+      description: A read carried in a body; no key is required. The level is aal2 once the person holds a second factor, aal1 before, and recent.
+      tags: [self]
+      x-route-class: self
+      x-mux-pattern: "POST /v1/me/authenticators:enroll"
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyIgnored"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [type]
+              properties:
+                type:
+                  type: string
+                  enum: [totp, webauthn, recovery-codes]
+      responses:
+        "200":
+          description: The kernel action.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [action]
+                properties:
+                  action:
+                    type: string
+                    examples: [CONFIGURE_TOTP, webauthn-register, CONFIGURE_RECOVERY_AUTHN_CODES]
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  "/v1/me/security-operations/{operation_id}":
+    get:
+      operationId: getMySecurityOperation
+      summary: One of the caller's own security operations.
+      tags: [self]
+      x-route-class: self
+      x-mux-pattern: "GET /v1/me/security-operations/{operation_id}"
+      parameters:
+        - $ref: "#/components/parameters/OperationID"
+      responses:
+        "200":
+          description: The operation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SecurityOperation"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  "/v1/me/consents":
+    get:
+      operationId: listMyConsents
+      summary: The caller's consents to external clients (TDD-identity-control-005 slice 3b).
+      tags: [self]
+      x-route-class: self
+      x-mux-pattern: "GET /v1/me/consents"
+      responses:
+        "200":
+          description: The consents.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [consents]
+                properties:
+                  consents:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/MyConsent"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/me/consents/{security_ref}:withdraw":
+    post:
+      operationId: withdrawMyConsent
+      summary: Withdraw one consent; the refresh tokens issued on it stop refreshing.
+      description: An access token already issued lives until it expires; the listing names that bound.
+      tags: [self]
+      x-route-class: self
+      x-mux-pattern: "POST /v1/me/consents/{consent_action}"
+      parameters:
+        - $ref: "#/components/parameters/SecurityRef"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          $ref: "#/components/responses/MyOperationFinal"
+        "202":
+          $ref: "#/components/responses/MyOperationAccepted"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  "/v1/me/notification-addresses":
+    get:
+      operationId: listMyNotificationAddresses
+      summary: The caller's notification addresses (TDD-identity-control-008 1.2.0).
+      tags: [self]
+      x-route-class: self
+      x-mux-pattern: "GET /v1/me/notification-addresses"
+      responses:
+        "200":
+          description: The addresses.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [notification_addresses]
+                properties:
+                  notification_addresses:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/NotificationAddress"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      operationId: addMyNotificationAddress
+      summary: Add an address, at a recent aal2. It is proven by an 8-digit code sent to it alone.
+      tags: [self]
+      x-route-class: self
+      x-mux-pattern: "POST /v1/me/notification-addresses"
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [address]
+              properties:
+                address:
+                  type: string
+      responses:
+        "201":
+          description: The address, not yet proven.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotificationAddressAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  "/v1/me/notification-addresses/{address_id}:verify":
+    post:
+      operationId: verifyMyNotificationAddress
+      summary: Prove an address with the code sent to it.
+      tags: [self]
+      x-route-class: self
+      x-mux-pattern: "POST /v1/me/notification-addresses/{address_action}"
+      parameters:
+        - $ref: "#/components/parameters/AddressID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code:
+                  type: string
+      responses:
+        "204":
+          description: The address is proven.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  "/v1/me/notification-addresses/{address_id}:send-proof":
+    post:
+      operationId: sendMyNotificationAddressProof
+      summary: Send a code to an address the caller holds and has not proven, at any level.
+      tags: [self]
+      x-route-class: self
+      x-mux-pattern: "POST /v1/me/notification-addresses/{address_action}"
+      parameters:
+        - $ref: "#/components/parameters/AddressID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "200":
+          description: The address, with the proof's expiry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotificationAddressAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  "/v1/me/notification-addresses/{address_id}:remove":
+    post:
+      operationId: removeMyNotificationAddress
+      summary: Remove an address, at a recent aal2. The last active address stays.
+      tags: [self]
+      x-route-class: self
+      x-mux-pattern: "POST /v1/me/notification-addresses/{address_action}"
+      parameters:
+        - $ref: "#/components/parameters/AddressID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "204":
+          description: The address is removed.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  "/v1/security-operations/{operation_id}":
+    get:
+      operationId: getSecurityOperation
+      summary: One security operation, the status monitor a 202 points to.
+      tags: [containment]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/security-operations/{operation_id}"
+      parameters:
+        - $ref: "#/components/parameters/OperationID"
+      responses:
+        "200":
+          description: The operation.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SecurityOperation"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  "/v1/security-operations:unresolved":
+    get:
+      operationId: listUnresolvedSecurityOperations
+      summary: The parked operations, oldest first (TDD-identity-control-005 2.5.0).
+      tags: [containment]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/security-operations:unresolved"
+      responses:
+        "200":
+          description: The parked operations.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [operations]
+                properties:
+                  operations:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/ParkedOperation"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  "/v1/security-operations/{operation_id}:redrive":
+    post:
+      operationId: redriveSecurityOperation
+      summary: Give a parked operation a new attempt budget, at a recent aal2.
+      tags: [containment]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/security-operations/{operation_action}"
+      parameters:
+        - $ref: "#/components/parameters/OperationID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      responses:
+        "200":
+          $ref: "#/components/responses/OperationFinal"
+        "202":
+          $ref: "#/components/responses/OperationAccepted"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  "/v1/bootstrap-ceremony":
+    get:
+      operationId: getBootstrapCeremony
+      summary: The bootstrap ceremony's insert-only record and its reviews (ADR-IAM-001 §5.11, STD-IAM-001 §3.10).
+      tags: [ceremony]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/bootstrap-ceremony"
+      responses:
+        "200":
+          description: The record.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BootstrapCeremony"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  "/v1/bootstrap-ceremony:review":
+    post:
+      operationId: reviewBootstrapCeremony
+      summary: Record an independent review of the ceremony record, insert-only. The reason is its statement.
+      tags: [ceremony]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/bootstrap-ceremony:review"
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [reviewer, outcome]
+              properties:
+                reviewer:
+                  type: string
+                  description: The reviewer's name, as the runbook records the ceremony's people.
+                outcome:
+                  type: string
+                  enum: [satisfactory, findings]
+      responses:
+        "201":
+          description: The review.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CeremonyReview"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: The reviewer is the operator, the witness or the first Principal's holder; or a key conflict.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+
+  "/v1/registrations":
+    post:
+      operationId: register
+      summary: Register a protocol client or a protected resource (TDD-identity-control-003).
+      description: A provider registers anything; an application developer registers within its bounds, in non-production, and becomes the first owner.
+      tags: [registrations]
+      x-route-class: creator
+      x-mux-pattern: "POST /v1/registrations"
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterRequest"
+      responses:
+        "201":
+          description: The registration, active.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Registration"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    get:
+      operationId: listRegistrations
+      summary: One page of the realm's registrations in creation order (STD-GLB-001 §Pagination).
+      tags: [registrations]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/registrations"
+      parameters:
+        - name: after
+          in: query
+          required: false
+          description: The last registration_id of the previous page.
+          schema:
+            $ref: "#/components/schemas/UUID"
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+        - name: state
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [pending, active, suspended, retired]
+      responses:
+        "200":
+          description: The page.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [registrations, next]
+                properties:
+                  registrations:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Registration"
+                  next:
+                    type: [string, "null"]
+                    description: The cursor of the next page, or null on the last one.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  "/v1/registrations:mine":
+    get:
+      operationId: listMyRegistrations
+      summary: The registrations the caller owns.
+      tags: [registrations]
+      x-route-class: person
+      x-mux-pattern: "GET /v1/registrations:mine"
+      responses:
+        "200":
+          description: The registrations.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [registrations]
+                properties:
+                  registrations:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Registration"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  "/v1/registrations:standing":
+    get:
+      operationId: getRegistrationStanding
+      summary: What the caller may do beyond what it owns, and the environment.
+      tags: [registrations]
+      x-route-class: person
+      x-mux-pattern: "GET /v1/registrations:standing"
+      responses:
+        "200":
+          description: The standing.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [provider, application_developer, environment]
+                properties:
+                  provider:
+                    type: boolean
+                  application_developer:
+                    type: boolean
+                  environment:
+                    type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  "/v1/registrations/{registration_id}":
+    get:
+      operationId: getRegistration
+      summary: One registration.
+      tags: [registrations]
+      x-route-class: owner
+      x-mux-pattern: "GET /v1/registrations/{registration_id}"
+      parameters:
+        - $ref: "#/components/parameters/RegistrationID"
+      responses:
+        "200":
+          description: The registration.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Registration"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  "/v1/registrations/{registration_id}:suspend":
+    post:
+      operationId: suspendRegistration
+      summary: Disable the client and end the refresh tokens it was issued (ADR-IAM-001 §5.13).
+      tags: [registrations]
+      x-route-class: owner
+      x-mux-pattern: "POST /v1/registrations/{registration_id}"
+      parameters:
+        - $ref: "#/components/parameters/RegistrationID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      responses:
+        "200":
+          $ref: "#/components/responses/RegistrationAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/registrations/{registration_id}:restore":
+    post:
+      operationId: restoreRegistration
+      summary: Write the registered state back and enable the client.
+      tags: [registrations]
+      x-route-class: owner
+      x-mux-pattern: "POST /v1/registrations/{registration_id}"
+      parameters:
+        - $ref: "#/components/parameters/RegistrationID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      responses:
+        "200":
+          $ref: "#/components/responses/RegistrationAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/registrations/{registration_id}:retire":
+    post:
+      operationId: retireRegistration
+      summary: Delete the kernel client after a suspension, keep the record, and free the client_key. A provider's.
+      tags: [registrations]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/registrations/{registration_id}"
+      parameters:
+        - $ref: "#/components/parameters/RegistrationID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      responses:
+        "200":
+          $ref: "#/components/responses/RegistrationAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/registrations/{registration_id}/findings":
+    get:
+      operationId: listRegistrationFindings
+      summary: The client's divergences, newest first, converged ones included.
+      tags: [registrations]
+      x-route-class: owner
+      x-mux-pattern: "GET /v1/registrations/{registration_id}/findings"
+      parameters:
+        - $ref: "#/components/parameters/RegistrationID"
+      responses:
+        "200":
+          description: The findings.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [findings]
+                properties:
+                  findings:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/RegistrationFinding"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  "/v1/registrations:drift":
+    get:
+      operationId: getRegistrationDrift
+      summary: The last sweep and the open findings.
+      tags: [registrations]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/registrations:drift"
+      responses:
+        "200":
+          description: The drift status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DriftStatus"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  "/v1/registrations:expiring-keys":
+    get:
+      operationId: listExpiringKeys
+      summary: Keyed registrations whose active key ends within 14 days (warning) or 3 (critical), or that hold no key the kernel accepts.
+      tags: [registrations]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/registrations:expiring-keys"
+      responses:
+        "200":
+          description: The report.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExpiringKeys"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  "/v1/registrations:reconcile":
+    post:
+      operationId: reconcileRegistrations
+      summary: Sweep now; naming findings, with a reason, applies desired state to them first.
+      description: No key is required (a sweep). X-Administrative-Reason is required when findings are named.
+      tags: [registrations]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/registrations:reconcile"
+      parameters:
+        - $ref: "#/components/parameters/AdministrativeReasonOptional"
+        - $ref: "#/components/parameters/IdempotencyKeyIgnored"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                findings:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/UUID"
+      responses:
+        "200":
+          description: The run, or deferred when another replica is sweeping, and the status.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [run, status]
+                properties:
+                  run:
+                    oneOf:
+                      - $ref: "#/components/schemas/ReconcileRun"
+                      - type: "null"
+                  status:
+                    $ref: "#/components/schemas/DriftStatus"
+                  deferred:
+                    type: boolean
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/registrations:adopt":
+    post:
+      operationId: adoptRegistration
+      summary: Bring a client a bootstrap script created under registration (TDD-identity-control-003 §Adoption).
+      description: Plans first with dry_run, which is a read and needs no key; an adoption requires one. Only a confidential client is adopted.
+      tags: [registrations]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/registrations:adopt"
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyUnlessPlan"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdoptRequest"
+      responses:
+        "200":
+          description: The plan, for a dry run.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdoptResult"
+        "201":
+          description: The plan and the registration.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdoptResult"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/registrations/{registration_id}/drift-exceptions":
+    post:
+      operationId: grantDriftException
+      summary: Permit one console change by one actor for up to 24 hours.
+      tags: [registrations]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/registrations/{registration_id}/drift-exceptions"
+      parameters:
+        - $ref: "#/components/parameters/RegistrationID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [field_class, actor, reason, duration_seconds]
+              properties:
+                field_class:
+                  type: string
+                actor:
+                  type: string
+                  description: The kernel user the exception covers.
+                reason:
+                  type: string
+                duration_seconds:
+                  type: integer
+                  minimum: 1
+                  maximum: 86400
+      responses:
+        "201":
+          description: The exception.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DriftException"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    get:
+      operationId: listDriftExceptions
+      summary: The client's drift exceptions, newest first, expired ones included.
+      tags: [registrations]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/registrations/{registration_id}/drift-exceptions"
+      parameters:
+        - $ref: "#/components/parameters/RegistrationID"
+      responses:
+        "200":
+          description: The exceptions.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [exceptions]
+                properties:
+                  exceptions:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/DriftException"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  "/v1/registrations/{registration_id}/keys":
+    post:
+      operationId: addRegistrationKey
+      summary: Register the next public key, which starts a rotation. 200 when it already is the active key.
+      tags: [registrations]
+      x-route-class: owner
+      x-mux-pattern: "POST /v1/registrations/{registration_id}/keys"
+      parameters:
+        - $ref: "#/components/parameters/RegistrationID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [public_key]
+              properties:
+                public_key:
+                  $ref: "#/components/schemas/PublicJWK"
+      responses:
+        "201":
+          $ref: "#/components/responses/KeysAnswer"
+        "200":
+          $ref: "#/components/responses/KeysAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    get:
+      operationId: listRegistrationKeys
+      summary: The registration's keys.
+      tags: [registrations]
+      x-route-class: owner
+      x-mux-pattern: "GET /v1/registrations/{registration_id}/keys"
+      parameters:
+        - $ref: "#/components/parameters/RegistrationID"
+      responses:
+        "200":
+          $ref: "#/components/responses/KeysAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  "/v1/registrations/{registration_id}/keys/{key_id}:revoke":
+    post:
+      operationId: revokeRegistrationKey
+      summary: Revoke one key; the kernel refuses it on the next request.
+      tags: [registrations]
+      x-route-class: owner
+      x-mux-pattern: "POST /v1/registrations/{registration_id}/keys/{key_action}"
+      parameters:
+        - $ref: "#/components/parameters/RegistrationID"
+        - name: key_id
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/UUID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      responses:
+        "200":
+          $ref: "#/components/responses/KeysAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/registrations/{registration_id}/owners":
+    post:
+      operationId: grantRegistrationOwner
+      summary: Grant ownership to an active human Principal (ADR-IAM-003).
+      tags: [registrations]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/registrations/{registration_id}/owners"
+      parameters:
+        - $ref: "#/components/parameters/RegistrationID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      requestBody:
+        $ref: "#/components/requestBodies/PrincipalReference"
+      responses:
+        "201":
+          $ref: "#/components/responses/OwnersAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+    get:
+      operationId: listRegistrationOwners
+      summary: The registration's owners, revoked ones included.
+      tags: [registrations]
+      x-route-class: owner
+      x-mux-pattern: "GET /v1/registrations/{registration_id}/owners"
+      parameters:
+        - $ref: "#/components/parameters/RegistrationID"
+      responses:
+        "200":
+          $ref: "#/components/responses/OwnersAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  "/v1/registrations/{registration_id}/owners/{principal_id}:revoke":
+    post:
+      operationId: revokeRegistrationOwner
+      summary: Revoke an ownership. In production a registration keeps at least two owners.
+      tags: [registrations]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/registrations/{registration_id}/owners/{owner_action}"
+      parameters:
+        - $ref: "#/components/parameters/RegistrationID"
+        - $ref: "#/components/parameters/PrincipalID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      responses:
+        "200":
+          $ref: "#/components/responses/OwnersAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  "/v1/registrations/{registration_id}/changes":
+    post:
+      operationId: proposeRegistrationChange
+      summary: Propose a change of redirect URIs, audience, lifetime class or back-channel logout URI (ADR-IAM-003 §5.2).
+      description: Applied at once outside production; in production it waits for a provider other than its proposer. 201 when created, 200 when the same proposal is retried.
+      tags: [registrations]
+      x-route-class: owner
+      x-mux-pattern: "POST /v1/registrations/{registration_id}/changes"
+      parameters:
+        - $ref: "#/components/parameters/RegistrationID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProposeChangeRequest"
+      responses:
+        "201":
+          $ref: "#/components/responses/ChangeAnswer"
+        "200":
+          $ref: "#/components/responses/ChangeAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    get:
+      operationId: listRegistrationChanges
+      summary: The registration's changes.
+      tags: [registrations]
+      x-route-class: owner
+      x-mux-pattern: "GET /v1/registrations/{registration_id}/changes"
+      parameters:
+        - $ref: "#/components/parameters/RegistrationID"
+      responses:
+        "200":
+          $ref: "#/components/responses/ChangesAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  "/v1/registrations/{registration_id}/changes/{change_id}:approve":
+    post:
+      operationId: approveRegistrationChange
+      summary: Approve a change; a provider other than its proposer.
+      tags: [registrations]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/registrations/{registration_id}/changes/{change_action}"
+      parameters:
+        - $ref: "#/components/parameters/RegistrationID"
+        - $ref: "#/components/parameters/ChangeID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      responses:
+        "200":
+          $ref: "#/components/responses/ChangeAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/registrations/{registration_id}/changes/{change_id}:reject":
+    post:
+      operationId: rejectRegistrationChange
+      summary: Reject a change.
+      tags: [registrations]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/registrations/{registration_id}/changes/{change_action}"
+      parameters:
+        - $ref: "#/components/parameters/RegistrationID"
+        - $ref: "#/components/parameters/ChangeID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      responses:
+        "200":
+          $ref: "#/components/responses/ChangeAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  "/v1/registrations/{registration_id}/changes/{change_id}:withdraw":
+    post:
+      operationId: withdrawRegistrationChange
+      summary: Withdraw a change; its proposer's.
+      tags: [registrations]
+      x-route-class: owner
+      x-mux-pattern: "POST /v1/registrations/{registration_id}/changes/{change_action}"
+      parameters:
+        - $ref: "#/components/parameters/RegistrationID"
+        - $ref: "#/components/parameters/ChangeID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      responses:
+        "200":
+          $ref: "#/components/responses/ChangeAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  "/v1/registrations:changes":
+    get:
+      operationId: listOpenRegistrationChanges
+      summary: The approval queue.
+      tags: [registrations]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/registrations:changes"
+      responses:
+        "200":
+          $ref: "#/components/responses/ChangesAnswer"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  "/v1/application-developers":
+    get:
+      operationId: listApplicationDevelopers
+      summary: The application developer standings, revoked ones included (ADR-IAM-003 §5.3).
+      tags: [application-developers]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/application-developers"
+      responses:
+        "200":
+          $ref: "#/components/responses/DevelopersAnswer"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      operationId: grantApplicationDeveloper
+      summary: Grant the standing to an active human Principal.
+      tags: [application-developers]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/application-developers"
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      requestBody:
+        $ref: "#/components/requestBodies/PrincipalReference"
+      responses:
+        "201":
+          $ref: "#/components/responses/DevelopersAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  "/v1/application-developers/{principal_id}:revoke":
+    post:
+      operationId: revokeApplicationDeveloper
+      summary: Revoke the standing.
+      tags: [application-developers]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/application-developers/{developer_action}"
+      parameters:
+        - $ref: "#/components/parameters/PrincipalID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      responses:
+        "200":
+          $ref: "#/components/responses/DevelopersAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  "/v1/registration-requests":
+    post:
+      operationId: proposeRegistrationRequest
+      summary: Request a production registration, naming at least two owners (ADR-IAM-003 §5.3).
+      description: 201 when created, 200 when the same request is retried.
+      tags: [registration-requests]
+      x-route-class: creator
+      x-mux-pattern: "POST /v1/registration-requests"
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/RegisterRequest"
+                - type: object
+                  required: [owners]
+                  properties:
+                    owners:
+                      type: array
+                      minItems: 2
+                      items:
+                        $ref: "#/components/schemas/UUID"
+      responses:
+        "201":
+          $ref: "#/components/responses/RegistrationRequestAnswer"
+        "200":
+          $ref: "#/components/responses/RegistrationRequestAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+    get:
+      operationId: listRegistrationRequests
+      summary: The approval queue.
+      tags: [registration-requests]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/registration-requests"
+      responses:
+        "200":
+          $ref: "#/components/responses/RegistrationRequestsAnswer"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  "/v1/registration-requests:mine":
+    get:
+      operationId: listMyRegistrationRequests
+      summary: The caller's own requests.
+      tags: [registration-requests]
+      x-route-class: creator
+      x-mux-pattern: "GET /v1/registration-requests:mine"
+      responses:
+        "200":
+          $ref: "#/components/responses/RegistrationRequestsAnswer"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  "/v1/registration-requests/{request_id}:approve":
+    post:
+      operationId: approveRegistrationRequest
+      summary: Approve a request; a provider other than its proposer. It registers the document as the proposer's.
+      tags: [registration-requests]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/registration-requests/{request_action}"
+      parameters:
+        - $ref: "#/components/parameters/RequestID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      responses:
+        "200":
+          $ref: "#/components/responses/RegistrationRequestAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  "/v1/registration-requests/{request_id}:reject":
+    post:
+      operationId: rejectRegistrationRequest
+      summary: Reject a request.
+      tags: [registration-requests]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/registration-requests/{request_action}"
+      parameters:
+        - $ref: "#/components/parameters/RequestID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      responses:
+        "200":
+          $ref: "#/components/responses/RegistrationRequestAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  "/v1/registration-requests/{request_id}:withdraw":
+    post:
+      operationId: withdrawRegistrationRequest
+      summary: Withdraw a request; its proposer's.
+      tags: [registration-requests]
+      x-route-class: creator
+      x-mux-pattern: "POST /v1/registration-requests/{request_action}"
+      parameters:
+        - $ref: "#/components/parameters/RequestID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      responses:
+        "200":
+          $ref: "#/components/responses/RegistrationRequestAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  "/v1/workloads":
+    post:
+      operationId: createWorkload
+      summary: Create a workload Principal bound to its client's service account (TDD-identity-control-004).
+      tags: [workloads]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/workloads"
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateWorkloadRequest"
+      responses:
+        "201":
+          $ref: "#/components/responses/WorkloadAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/workloads/{principal_id}":
+    get:
+      operationId: getWorkload
+      summary: One workload; any for a provider, its own for an owner.
+      tags: [workloads]
+      x-route-class: owner
+      x-mux-pattern: "GET /v1/workloads/{target}"
+      parameters:
+        - $ref: "#/components/parameters/PrincipalID"
+      responses:
+        "200":
+          $ref: "#/components/responses/WorkloadAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  "/v1/workloads/{principal_id}:reassign":
+    post:
+      operationId: reassignWorkload
+      summary: Move the workload to another accountable owner, an active human Principal.
+      tags: [workloads]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/workloads/{target}"
+      parameters:
+        - $ref: "#/components/parameters/PrincipalID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [owner_principal_id]
+              properties:
+                owner_principal_id:
+                  $ref: "#/components/schemas/UUID"
+      responses:
+        "200":
+          $ref: "#/components/responses/WorkloadAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  "/v1/workloads/{principal_id}:review":
+    post:
+      operationId: reviewWorkload
+      summary: The owner's attestation; the reason is its statement (CIS 5.5, NIST AC-2(j)).
+      tags: [workloads]
+      x-route-class: owner
+      x-mux-pattern: "POST /v1/workloads/{target}"
+      parameters:
+        - $ref: "#/components/parameters/PrincipalID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      responses:
+        "200":
+          $ref: "#/components/responses/WorkloadAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  "/v1/workloads/{principal_id}:suspend":
+    post:
+      operationId: suspendWorkload
+      summary: Stop the workload's client and Principal together.
+      tags: [workloads]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/workloads/{target}"
+      parameters:
+        - $ref: "#/components/parameters/PrincipalID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      responses:
+        "200":
+          $ref: "#/components/responses/WorkloadAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/workloads/{principal_id}:restore":
+    post:
+      operationId: restoreWorkload
+      summary: Return a suspended workload to service; refused while its owner is not an active human.
+      tags: [workloads]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/workloads/{target}"
+      parameters:
+        - $ref: "#/components/parameters/PrincipalID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      responses:
+        "200":
+          $ref: "#/components/responses/WorkloadAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/workloads/{principal_id}:retire":
+    post:
+      operationId: retireWorkload
+      summary: After a suspension, delete the client, revoke its keys and retire the mapping.
+      tags: [workloads]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/workloads/{target}"
+      parameters:
+        - $ref: "#/components/parameters/PrincipalID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      responses:
+        "200":
+          $ref: "#/components/responses/WorkloadAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/workloads/{principal_id}:rebuild":
+    post:
+      operationId: rebuildWorkload
+      summary: Recreate a deleted workload client from desired state under the same principal_id.
+      tags: [workloads]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/workloads/{target}"
+      parameters:
+        - $ref: "#/components/parameters/PrincipalID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      responses:
+        "200":
+          $ref: "#/components/responses/WorkloadAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/workloads:mine":
+    get:
+      operationId: listMyWorkloads
+      summary: The workloads the caller owns.
+      tags: [workloads]
+      x-route-class: self
+      x-mux-pattern: "GET /v1/workloads:mine"
+      responses:
+        "200":
+          description: The workloads.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [workloads]
+                properties:
+                  workloads:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Workload"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  "/v1/workloads:sweep":
+    post:
+      operationId: sweepWorkloads
+      summary: The workload sweep now (orphans, unused workloads, overdue reviews). No key is required.
+      tags: [workloads]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/workloads:sweep"
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyIgnored"
+      responses:
+        "200":
+          description: What the sweep did.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkloadSweepResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/workloads:orphaned":
+    get:
+      operationId: listOrphanedWorkloads
+      summary: Workloads whose owner is no longer an active human, with their stage.
+      tags: [workloads]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/workloads:orphaned"
+      responses:
+        "200":
+          $ref: "#/components/responses/WorkloadConditionsAnswer"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  "/v1/workloads:unused":
+    get:
+      operationId: listUnusedWorkloads
+      summary: Workloads unseen for 90 days.
+      tags: [workloads]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/workloads:unused"
+      responses:
+        "200":
+          $ref: "#/components/responses/WorkloadConditionsAnswer"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  "/v1/workloads:reviews-overdue":
+    get:
+      operationId: listWorkloadReviewsOverdue
+      summary: Workloads whose owner's review is overdue.
+      tags: [workloads]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/workloads:reviews-overdue"
+      responses:
+        "200":
+          $ref: "#/components/responses/WorkloadConditionsAnswer"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  "/v1/deliveries":
+    post:
+      operationId: acceptDelivery
+      summary: Organization Control's dispatcher posts one CloudEvents envelope (TDD-identity-control-002, -006).
+      description: |
+        Only the delivering workload is admitted. Each event's id passes the inbox guard, so a repeat is
+        acknowledged and applied once: no key is required. The application receipt header is set only
+        when this consumer holds the event's effect (ADR-GLB-016 §5.4).
+      tags: [organization]
+      x-route-class: workload
+      x-mux-pattern: "POST /v1/deliveries"
+      security:
+        - workloadBearer: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyIgnored"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CloudEvent"
+      responses:
+        "202":
+          description: Accepted, applied or discarded.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [duplicate, superseded]
+                properties:
+                  duplicate:
+                    type: boolean
+                  superseded:
+                    type: boolean
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        A person's access token, typed at+jwt (RFC 9068), PS256, naming identity-control-api in aud and
+        carrying principal_id, acr and auth_time, and no tenant_id or provider_scope (STD-IAM-002 §3.1,
+        §3.5). A workload's token is refused on these routes.
+    workloadBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Organization Control's workload token, subject_type workload, the principal_id IDENTITY_DELIVERY_PRINCIPAL_ID names.
+
+  headers:
+    NoStore:
+      description: Never cached.
+      schema:
+        type: string
+        const: no-store
+    Location:
+      description: The operation's status monitor (RFC 9110 §15.3.3).
+      schema:
+        type: string
+
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: A value unique to this command, sent again unchanged when it is retried (STD-GLB-001 1.4.0).
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 255
+    IdempotencyKeyUnlessPlan:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: Required unless the body sets dry_run.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 255
+    IdempotencyKeyIgnored:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: Not required; a repeat cannot act twice (commands.go keyOptional names the reason). Ignored.
+      schema:
+        type: string
+        maxLength: 255
+    AdministrativeReason:
+      name: X-Administrative-Reason
+      in: header
+      required: true
+      description: Why, recorded with the action. Visible US-ASCII (RFC 9110 §5.5).
+      schema:
+        type: string
+        minLength: 1
+        pattern: "^[\\t\\x20-\\x7e]+$"
+    AdministrativeReasonOptional:
+      name: X-Administrative-Reason
+      in: header
+      required: false
+      description: Visible US-ASCII; required when the body names findings.
+      schema:
+        type: string
+        pattern: "^[\\t\\x20-\\x7e]+$"
+    PrincipalID:
+      name: principal_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/UUID"
+    RegistrationID:
+      name: registration_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/UUID"
+    ChangeID:
+      name: change_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/UUID"
+    RequestID:
+      name: request_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/UUID"
+    OperationID:
+      name: operation_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/UUID"
+    AddressID:
+      name: address_id
+      in: path
+      required: true
+      schema:
+        $ref: "#/components/schemas/UUID"
+    SecurityRef:
+      name: security_ref
+      in: path
+      required: true
+      description: An opaque, sealed reference from a listing, bound to its kind, subject and purpose.
+      schema:
+        type: string
+
+  requestBodies:
+    SecurityCommand:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [expected_version]
+            properties:
+              expected_version:
+                type: integer
+                format: int64
+                minimum: 1
+                description: The Principal's security_version, as GET /v1/principals/{principal_id} serves it.
+    PrincipalReference:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [principal_id]
+            properties:
+              principal_id:
+                $ref: "#/components/schemas/UUID"
+
+  responses:
+    BadRequest:
+      description: The request is invalid, or a command carries no Idempotency-Key.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    Unauthorized:
+      description: No valid token, or a step-up is needed (RFC 9470 challenge in WWW-Authenticate).
+      headers:
+        WWW-Authenticate:
+          schema:
+            type: string
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    Forbidden:
+      description: The caller's route class does not admit it, or a provider acts on its own Principal.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    NotFound:
+      description: No such resource, or one the caller may not see.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    Conflict:
+      description: A refused transition, a version conflict, an idempotency key conflict, or a request in progress.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    Unavailable:
+      description: A dependency is unavailable; retry with the same Idempotency-Key.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    OperationFinal:
+      description: The operation reached a final state inside the request budget.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/SecurityOperation"
+    OperationAccepted:
+      description: Accepted; the executor finishes it. Location names /v1/security-operations/{operation_id}.
+      headers:
+        Location:
+          $ref: "#/components/headers/Location"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/SecurityOperation"
+    MyOperationFinal:
+      description: The operation reached a final state inside the request budget.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/SecurityOperation"
+    MyOperationAccepted:
+      description: Accepted; the executor finishes it. Location names /v1/me/security-operations/{operation_id}.
+      headers:
+        Location:
+          $ref: "#/components/headers/Location"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/SecurityOperation"
+    RegistrationAnswer:
+      description: The registration as it now stands.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Registration"
+    KeysAnswer:
+      description: The registration's keys as they now stand.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [keys]
+            properties:
+              keys:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ClientKey"
+    OwnersAnswer:
+      description: The registration's owners as they now stand.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [owners]
+            properties:
+              owners:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Owner"
+    ChangeAnswer:
+      description: The change.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/RegistrationChange"
+    ChangesAnswer:
+      description: The changes.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [changes]
+            properties:
+              changes:
+                type: array
+                items:
+                  $ref: "#/components/schemas/RegistrationChange"
+    DevelopersAnswer:
+      description: The standings as they now stand.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [developers]
+            properties:
+              developers:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ApplicationDeveloper"
+    RegistrationRequestAnswer:
+      description: The request.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/RegistrationRequest"
+    RegistrationRequestsAnswer:
+      description: The requests.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [requests]
+            properties:
+              requests:
+                type: array
+                items:
+                  $ref: "#/components/schemas/RegistrationRequest"
+    WorkloadAnswer:
+      description: The workload.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Workload"
+    WorkloadConditionsAnswer:
+      description: The workloads in the condition, with when it began.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [workloads]
+            properties:
+              workloads:
+                type: array
+                items:
+                  $ref: "#/components/schemas/WorkloadCondition"
+
+  schemas:
+    UUID:
+      type: string
+      format: uuid
+    Timestamp:
+      type: string
+      format: date-time
+    NullableTimestamp:
+      type: [string, "null"]
+      format: date-time
+    NullableUUID:
+      type: [string, "null"]
+      format: uuid
+    Problem:
+      type: object
+      description: RFC 9457 problem details, from foundation-platform's closed registry.
+      required: [type, title, status, instance]
+      properties:
+        type:
+          type: string
+          format: uri
+          enum:
+            - https://problems.scnehaux.com/validation-failed
+            - https://problems.scnehaux.com/authentication-required
+            - https://problems.scnehaux.com/forbidden
+            - https://problems.scnehaux.com/not-found
+            - https://problems.scnehaux.com/version-conflict
+            - https://problems.scnehaux.com/idempotency-key-conflict
+            - https://problems.scnehaux.com/state-transition-refused
+            - https://problems.scnehaux.com/request-in-progress
+            - https://problems.scnehaux.com/precondition-unmet
+            - https://problems.scnehaux.com/rate-limited
+            - https://problems.scnehaux.com/overloaded
+            - https://problems.scnehaux.com/dependency-unavailable
+            - https://problems.scnehaux.com/internal
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+          description: For a person to read. A client never parses it.
+        instance:
+          type: string
+        correlation_id:
+          type: string
+
+    CreatePrincipalRequest:
+      type: object
+      additionalProperties: false
+      required: [username, subject_type]
+      properties:
+        username:
+          type: string
+        email:
+          type: string
+        subject_type:
+          type: string
+          enum: [human]
+          description: A workload is created through POST /v1/workloads.
+        workload_owner:
+          $ref: "#/components/schemas/UUID"
+    PrincipalCreated:
+      type: object
+      required: [principal_id, subject_type, realm]
+      properties:
+        principal_id:
+          $ref: "#/components/schemas/UUID"
+        subject_type:
+          type: string
+        realm:
+          type: string
+    PrincipalState:
+      type: object
+      required: [principal_id, state]
+      properties:
+        principal_id:
+          $ref: "#/components/schemas/UUID"
+        state:
+          type: string
+          enum: [pending, active, suspended, quarantined, retired]
+    PrincipalAdoption:
+      type: object
+      required: [principal_id, adoptable, checks, adopted]
+      properties:
+        principal_id:
+          $ref: "#/components/schemas/UUID"
+        adoptable:
+          type: boolean
+        refusal:
+          type: string
+        checks:
+          type: array
+          items:
+            type: object
+            required: [check, holds, detail]
+            properties:
+              check:
+                type: string
+                enum: [orphan_finding, one_kernel_user, newer_than_backup, creation_on_record]
+              holds:
+                type: boolean
+              detail:
+                type: string
+        adopted:
+          type: boolean
+        state:
+          type: string
+          const: suspended
+          description: Present once the identifier is adopted.
+    DanglingFinding:
+      type: object
+      required: [principal_id, detected_at]
+      properties:
+        principal_id:
+          $ref: "#/components/schemas/UUID"
+        detected_at:
+          $ref: "#/components/schemas/Timestamp"
+    UserFinding:
+      type: object
+      required: [finding_id, finding_class, user_disabled, detected_at]
+      properties:
+        finding_id:
+          $ref: "#/components/schemas/UUID"
+        finding_class:
+          type: string
+          enum: [unmapped, orphan, duplicate]
+        principal_id:
+          $ref: "#/components/schemas/UUID"
+        claimed_principal_id:
+          type: string
+        username:
+          type: string
+        user_disabled:
+          type: boolean
+        detected_at:
+          $ref: "#/components/schemas/Timestamp"
+    PendingMapping:
+      type: object
+      required: [principal_id, subject_type, username, created_at, overdue]
+      properties:
+        principal_id:
+          $ref: "#/components/schemas/UUID"
+        subject_type:
+          type: string
+        username:
+          type: string
+        created_at:
+          $ref: "#/components/schemas/Timestamp"
+        overdue:
+          type: boolean
+    QuarantinedMapping:
+      type: object
+      required: [principal_id, subject_type, username, quarantined_at, quarantine_reason, linked]
+      properties:
+        principal_id:
+          $ref: "#/components/schemas/UUID"
+        subject_type:
+          type: string
+        username:
+          type: string
+        quarantined_at:
+          $ref: "#/components/schemas/NullableTimestamp"
+        quarantine_reason:
+          type: string
+        linked:
+          type: boolean
+    PrincipalSweepResult:
+      type: object
+      required: [recovered, dangling, unmapped, orphan, duplicate]
+      properties:
+        recovered:
+          type: integer
+        dangling:
+          type: integer
+        unmapped:
+          type: integer
+        orphan:
+          type: integer
+        duplicate:
+          type: integer
+    PrincipalSummary:
+      type: object
+      required: [principal_id, username, subject_type, state]
+      properties:
+        principal_id:
+          $ref: "#/components/schemas/UUID"
+        username:
+          type: string
+        email:
+          type: string
+        subject_type:
+          type: string
+        state:
+          type: string
+    InvestigatedPrincipal:
+      allOf:
+        - $ref: "#/components/schemas/PrincipalSummary"
+        - type: object
+          required: [realm, created_at, activated_at, quarantined_at, version, security_version]
+          properties:
+            realm:
+              type: string
+            workload_owner:
+              $ref: "#/components/schemas/UUID"
+            created_at:
+              $ref: "#/components/schemas/Timestamp"
+            activated_at:
+              $ref: "#/components/schemas/NullableTimestamp"
+            quarantined_at:
+              $ref: "#/components/schemas/NullableTimestamp"
+            quarantine_reason:
+              type: string
+            version:
+              type: integer
+              format: int64
+            security_version:
+              type: integer
+              format: int64
+              description: The expected_version a containment command names.
+    Session:
+      type: object
+      required: [started, last_access, clients]
+      properties:
+        started:
+          $ref: "#/components/schemas/Timestamp"
+        last_access:
+          $ref: "#/components/schemas/Timestamp"
+        clients:
+          type: array
+          items:
+            type: string
+    MySession:
+      allOf:
+        - $ref: "#/components/schemas/Session"
+        - type: object
+          required: [security_ref, current]
+          properties:
+            security_ref:
+              type: string
+            current:
+              type: boolean
+    Authenticator:
+      type: object
+      required: [type, created]
+      properties:
+        security_ref:
+          type: string
+        type:
+          type: string
+        label:
+          type: string
+        created:
+          $ref: "#/components/schemas/Timestamp"
+        remaining_codes:
+          type: integer
+        total_codes:
+          type: integer
+    MyAuthenticator:
+      allOf:
+        - $ref: "#/components/schemas/Authenticator"
+        - type: object
+          required: [security_ref]
+    MyConsent:
+      type: object
+      required: [security_ref, client, scopes, granted_at, access_token_lifetime_seconds]
+      properties:
+        security_ref:
+          type: string
+        client:
+          type: string
+          description: The client's client_key.
+        scopes:
+          type: array
+          items:
+            type: string
+        granted_at:
+          $ref: "#/components/schemas/Timestamp"
+        updated_at:
+          $ref: "#/components/schemas/NullableTimestamp"
+        access_token_lifetime_seconds:
+          type: [integer, "null"]
+          description: The registered access token lifetime, the bound an already-issued token lives after a withdrawal; null for a client no registration describes.
+    FederationLink:
+      type: object
+      required: [provider, user_name]
+      properties:
+        provider:
+          type: string
+        user_name:
+          type: string
+    PrincipalFinding:
+      type: object
+      required: [finding_id, class, detected_at, resolved_at]
+      properties:
+        finding_id:
+          $ref: "#/components/schemas/UUID"
+        class:
+          type: string
+        detected_at:
+          $ref: "#/components/schemas/Timestamp"
+        resolved_at:
+          $ref: "#/components/schemas/NullableTimestamp"
+        resolution:
+          type: string
+    PrincipalEvent:
+      type: object
+      required: [occurred_at, kind, role, type, outcome]
+      properties:
+        occurred_at:
+          $ref: "#/components/schemas/Timestamp"
+        kind:
+          type: string
+          enum: [user, admin]
+        role:
+          type: string
+          enum: [subject, actor]
+        type:
+          type: string
+        outcome:
+          type: string
+        error:
+          type: string
+        client_id:
+          type: string
+        resource_type:
+          type: string
+    NotificationAddress:
+      type: object
+      required: [address_id, channel, address, origin, state, added_at]
+      properties:
+        address_id:
+          $ref: "#/components/schemas/UUID"
+        channel:
+          type: string
+        address:
+          type: string
+        origin:
+          type: string
+        state:
+          type: string
+        added_at:
+          $ref: "#/components/schemas/Timestamp"
+        verified_at:
+          $ref: "#/components/schemas/Timestamp"
+        proof_expires_at:
+          $ref: "#/components/schemas/Timestamp"
+    NotificationAddressAnswer:
+      type: object
+      required: [notification_address]
+      properties:
+        notification_address:
+          $ref: "#/components/schemas/NotificationAddress"
+    InvestigatedAddress:
+      type: object
+      required: [address_id, channel, address, origin, state, added_at]
+      properties:
+        address_id:
+          $ref: "#/components/schemas/UUID"
+        channel:
+          type: string
+        address:
+          type: string
+        origin:
+          type: string
+        state:
+          type: string
+        added_at:
+          $ref: "#/components/schemas/Timestamp"
+        verified_at:
+          $ref: "#/components/schemas/Timestamp"
+        removed_at:
+          $ref: "#/components/schemas/Timestamp"
+    SecurityNotification:
+      type: object
+      required: [notification_id, event, occurred_at, details, recipients, state, attempts, requested_at]
+      properties:
+        notification_id:
+          $ref: "#/components/schemas/UUID"
+        event:
+          type: string
+        occurred_at:
+          $ref: "#/components/schemas/Timestamp"
+        details:
+          type: object
+          additionalProperties:
+            type: string
+        recipients:
+          type: integer
+        state:
+          type: string
+        attempts:
+          type: integer
+        requested_at:
+          $ref: "#/components/schemas/Timestamp"
+        submitted_at:
+          $ref: "#/components/schemas/Timestamp"
+    TemporaryPasswordAnswer:
+      type: object
+      required: [temporary_password]
+      properties:
+        temporary_password:
+          type: object
+          required: [issuance_id, principal_id, issued_by, issued_at, lapses_at]
+          properties:
+            issuance_id:
+              $ref: "#/components/schemas/UUID"
+            principal_id:
+              $ref: "#/components/schemas/UUID"
+            issued_by:
+              $ref: "#/components/schemas/UUID"
+            issued_at:
+              $ref: "#/components/schemas/Timestamp"
+            lapses_at:
+              $ref: "#/components/schemas/Timestamp"
+            value:
+              type: string
+              description: Present in the first answer alone.
+    SecurityOperation:
+      type: object
+      required: [operation_id, principal_id, operation_type, state, attempts, created_at]
+      properties:
+        operation_id:
+          $ref: "#/components/schemas/UUID"
+        principal_id:
+          $ref: "#/components/schemas/UUID"
+        operation_type:
+          type: string
+          examples: [suspend, restore, sessions.terminate-all, authenticator.revoke, session.terminate, authenticator.remove]
+        state:
+          type: string
+          enum: [pending, retrying, applied, refused, unresolved]
+        attempts:
+          type: integer
+        result_code:
+          type: string
+          examples: [last_authenticator, assurance_floor]
+        created_at:
+          $ref: "#/components/schemas/Timestamp"
+        applied_at:
+          $ref: "#/components/schemas/Timestamp"
+    ParkedOperation:
+      type: object
+      required: [operation_id, principal_id, operation_type, attempts, created_at]
+      properties:
+        operation_id:
+          $ref: "#/components/schemas/UUID"
+        principal_id:
+          $ref: "#/components/schemas/UUID"
+        operation_type:
+          type: string
+        attempts:
+          type: integer
+        last_error_class:
+          type: string
+        created_at:
+          $ref: "#/components/schemas/Timestamp"
+    KernelEventSweep:
+      type: object
+      required: [kinds]
+      properties:
+        kinds:
+          type: array
+          items:
+            type: object
+            required: [kind, read, recorded, read_through, truncated]
+            properties:
+              kind:
+                type: string
+                enum: [user, admin]
+              read:
+                type: integer
+              recorded:
+                type: integer
+              read_through:
+                $ref: "#/components/schemas/Timestamp"
+              truncated:
+                type: boolean
+    TenantContextReport:
+      type: object
+      required: [consumer_id, mark, rows]
+      properties:
+        consumer_id:
+          type: string
+        mark:
+          type: integer
+          format: int64
+        rows:
+          type: array
+          items:
+            type: object
+            required: [membership_id, membership_version]
+            properties:
+              membership_id:
+                $ref: "#/components/schemas/UUID"
+              membership_version:
+                type: integer
+                format: int64
+    UnconvergedTenant:
+      type: object
+      required: [tenant_id, state, priority, sweep, attempts, marked_at, delivered_at, next_attempt_at]
+      properties:
+        tenant_id:
+          $ref: "#/components/schemas/UUID"
+        state:
+          type: string
+        priority:
+          type: boolean
+        sweep:
+          type: boolean
+        attempts:
+          type: integer
+        last_error_class:
+          type: string
+        marked_at:
+          $ref: "#/components/schemas/Timestamp"
+        delivered_at:
+          $ref: "#/components/schemas/NullableTimestamp"
+        next_attempt_at:
+          $ref: "#/components/schemas/Timestamp"
+    ProjectionFinding:
+      type: object
+      required: [finding_id, finding_class, tenant_id, principal_id, detail, detected_at]
+      properties:
+        finding_id:
+          $ref: "#/components/schemas/UUID"
+        finding_class:
+          type: string
+        tenant_id:
+          $ref: "#/components/schemas/NullableUUID"
+        principal_id:
+          $ref: "#/components/schemas/NullableUUID"
+        detail: {}
+        detected_at:
+          $ref: "#/components/schemas/Timestamp"
+    TenantSweep:
+      type: object
+      required: [run_id, outcome, mark, snapshot_rows, snapshot_read, unknown_organizations, tenants_marked]
+      properties:
+        run_id:
+          $ref: "#/components/schemas/UUID"
+        outcome:
+          type: string
+          enum: [converged, drift, unresolved]
+        mark:
+          type: integer
+          format: int64
+        snapshot_rows:
+          type: integer
+        snapshot_read:
+          type: boolean
+        unknown_organizations:
+          type: integer
+        tenants_marked:
+          type: integer
+    EmergencyValidation:
+      type: object
+      required: [grant_id, principal_id, held_since, last_used_at, uses, due_at, overdue]
+      properties:
+        grant_id:
+          $ref: "#/components/schemas/UUID"
+        principal_id:
+          $ref: "#/components/schemas/UUID"
+        held_since:
+          $ref: "#/components/schemas/Timestamp"
+        last_used_at:
+          $ref: "#/components/schemas/NullableTimestamp"
+        uses:
+          type: integer
+          format: int64
+        due_at:
+          $ref: "#/components/schemas/Timestamp"
+        overdue:
+          type: boolean
+    BootstrapCeremony:
+      type: object
+      required: [operator, witness, reason, principal_id, requested_at, reviewed, reviews]
+      properties:
+        operator:
+          type: string
+        witness:
+          type: string
+          description: Never the operator. A ceremony recorded before the witness existed reads "not recorded".
+        reviewed:
+          type: boolean
+        reason:
+          type: string
+        principal_id:
+          $ref: "#/components/schemas/NullableUUID"
+        requested_at:
+          $ref: "#/components/schemas/Timestamp"
+        reviews:
+          type: array
+          items:
+            $ref: "#/components/schemas/CeremonyReview"
+    CeremonyReview:
+      type: object
+      required: [review_id, reviewer, reviewer_principal_id, outcome, statement, reviewed_at]
+      properties:
+        review_id:
+          $ref: "#/components/schemas/UUID"
+        reviewer:
+          type: string
+        reviewer_principal_id:
+          $ref: "#/components/schemas/UUID"
+        outcome:
+          type: string
+          enum: [satisfactory, findings]
+        statement:
+          type: string
+        reviewed_at:
+          $ref: "#/components/schemas/Timestamp"
+
+    PublicJWK:
+      type: object
+      description: One RSA public key of at least 3072 bits, as a JWK. A private member is refused.
+      required: [kty, n, e]
+      properties:
+        kty:
+          type: string
+          const: RSA
+        kid:
+          type: string
+        n:
+          type: string
+        e:
+          type: string
+    RegisterRequest:
+      type: object
+      required: [client_key, profile, audience_class, application_ref]
+      properties:
+        client_key:
+          type: string
+        profile:
+          type: string
+          enum: [public, confidential, workload, resource]
+        audience_class:
+          type: string
+          enum: [internal, privileged, workload, external]
+        privileged_form:
+          type: string
+          enum: [provider-scope, tenant-scoped, per-sign-in]
+          description: Named for the privileged class alone.
+        application_ref:
+          type: string
+        lifetime_class:
+          type: string
+          enum: [L0, L1, L2, L3]
+          description: A resource's lifetime class.
+        audience:
+          type: array
+          items:
+            type: string
+        redirect_uris:
+          type: array
+          items:
+            type: string
+            format: uri
+        public_key:
+          $ref: "#/components/schemas/PublicJWK"
+        backchannel_logout_uri:
+          type: string
+          format: uri
+          description: A confidential client's back-channel logout URI (ADR-IAM-009).
+    Registration:
+      type: object
+      required: [registration_id, realm, client_key, profile, audience_class, application_authority, application_ref,
+        registered_by, signing_algorithm, audience, redirect_uris, state, version, created_at, consent_required]
+      properties:
+        registration_id:
+          $ref: "#/components/schemas/UUID"
+        realm:
+          type: string
+        client_key:
+          type: string
+        consent_required:
+          type: boolean
+          description: Whether the client asks a person's consent at sign-in, derived from its audience class and never set (STD-IAM-002 1.9.0 §3.6).
+        profile:
+          type: string
+          enum: [public, confidential, workload, resource]
+        audience_class:
+          type: string
+          enum: [internal, privileged, workload, external]
+        privileged_form:
+          type: string
+        application_authority:
+          type: string
+        application_ref:
+          type: string
+        registered_by:
+          $ref: "#/components/schemas/UUID"
+        signing_algorithm:
+          type: string
+        lifetime_class:
+          type: string
+        audience:
+          type: array
+          items:
+            type: string
+        redirect_uris:
+          type: array
+          items:
+            type: string
+        access_token_lifespan:
+          type: integer
+          description: Seconds, derived from the audience's lifetime classes.
+        backchannel_logout_uri:
+          type: string
+        state:
+          type: string
+          enum: [pending, active, suspended, retired]
+        version:
+          type: integer
+          format: int64
+        created_at:
+          $ref: "#/components/schemas/Timestamp"
+    AdoptRequest:
+      type: object
+      additionalProperties: false
+      required: [client_key, profile, audience_class, application_ref, public_keys]
+      properties:
+        client_key:
+          type: string
+        profile:
+          type: string
+          const: confidential
+        audience_class:
+          type: string
+        privileged_form:
+          type: string
+        application_ref:
+          type: string
+        lifetime_class:
+          type: string
+        audience:
+          type: array
+          items:
+            type: string
+        redirect_uris:
+          type: array
+          items:
+            type: string
+        public_keys:
+          type: array
+          minItems: 1
+          maxItems: 2
+          description: The keys the client holds now, the active one first.
+          items:
+            $ref: "#/components/schemas/PublicJWK"
+        dry_run:
+          type: boolean
+        converge:
+          type: array
+          items:
+            type: string
+            enum: [token_lifespan, audience_scope, enabled, token_format, logout]
+        backchannel_logout_uri:
+          type: string
+    AdoptResult:
+      type: object
+      required: [plan]
+      properties:
+        plan:
+          type: object
+          required: [client_key, adoptable, differences]
+          properties:
+            client_key:
+              type: string
+            adoptable:
+              type: boolean
+            refusal:
+              type: string
+            differences:
+              type: array
+              items:
+                type: object
+                required: [field_class, policy, desired, observed, differs]
+                properties:
+                  field_class:
+                    type: string
+                  policy:
+                    type: string
+                  desired: {}
+                  observed: {}
+                  differs:
+                    type: boolean
+        registration:
+          $ref: "#/components/schemas/Registration"
+    ReconcileRun:
+      type: object
+      required: [run_id, started_at, finished_at, attribution, findings]
+      properties:
+        run_id:
+          $ref: "#/components/schemas/UUID"
+        started_at:
+          $ref: "#/components/schemas/Timestamp"
+        finished_at:
+          $ref: "#/components/schemas/NullableTimestamp"
+        outcome:
+          type: string
+          enum: [converged, drift, unresolved]
+        attribution:
+          type: [boolean, "null"]
+        findings:
+          type: integer
+    RegistrationFinding:
+      type: object
+      required: [finding_id, registration_id, client_key, finding_class, desired, observed, changed_at, detected_at,
+        converged_at]
+      properties:
+        finding_id:
+          $ref: "#/components/schemas/UUID"
+        registration_id:
+          $ref: "#/components/schemas/NullableUUID"
+        client_key:
+          type: string
+        field_class:
+          type: string
+        finding_class:
+          type: string
+          enum: [repaired, blocked, sanctioned, unattributed, missing, recreated, unmanaged]
+        desired: {}
+        observed: {}
+        actor:
+          type: string
+        changed_at:
+          $ref: "#/components/schemas/NullableTimestamp"
+        detected_at:
+          $ref: "#/components/schemas/Timestamp"
+        converged_at:
+          $ref: "#/components/schemas/NullableTimestamp"
+    DriftStatus:
+      type: object
+      required: [last_run, last_run_findings, findings]
+      properties:
+        last_run:
+          oneOf:
+            - $ref: "#/components/schemas/ReconcileRun"
+            - type: "null"
+        last_run_findings:
+          type: array
+          items:
+            $ref: "#/components/schemas/RegistrationFinding"
+        findings:
+          type: array
+          items:
+            $ref: "#/components/schemas/RegistrationFinding"
+    ExpiringKeys:
+      type: object
+      required: [warning_days, critical_days, registrations]
+      properties:
+        warning_days:
+          type: integer
+        critical_days:
+          type: integer
+        registrations:
+          type: array
+          items:
+            type: object
+            required: [registration_id, client_key, profile, severity, key_id, expires_at]
+            properties:
+              registration_id:
+                $ref: "#/components/schemas/UUID"
+              client_key:
+                type: string
+              profile:
+                type: string
+              severity:
+                type: string
+                enum: [warning, critical, no_key]
+              key_id:
+                $ref: "#/components/schemas/NullableUUID"
+              kid:
+                type: string
+              expires_at:
+                $ref: "#/components/schemas/NullableTimestamp"
+    DriftException:
+      type: object
+      required: [exception_id, registration_id, field_class, actor, reason, granted_by, granted_at, expires_at]
+      properties:
+        exception_id:
+          $ref: "#/components/schemas/UUID"
+        registration_id:
+          $ref: "#/components/schemas/UUID"
+        field_class:
+          type: string
+        actor:
+          type: string
+        reason:
+          type: string
+        granted_by:
+          $ref: "#/components/schemas/UUID"
+        granted_at:
+          $ref: "#/components/schemas/Timestamp"
+        expires_at:
+          $ref: "#/components/schemas/Timestamp"
+    ClientKey:
+      type: object
+      required: [key_id, registration_id, kid, thumbprint, public_jwk, state, registered_by, registered_at, expires_at,
+        retiring_at, revoked_at, revoked_by]
+      properties:
+        key_id:
+          $ref: "#/components/schemas/UUID"
+        registration_id:
+          $ref: "#/components/schemas/UUID"
+        kid:
+          type: string
+        thumbprint:
+          type: string
+          description: The RFC 7638 thumbprint.
+        public_jwk:
+          $ref: "#/components/schemas/PublicJWK"
+        state:
+          type: string
+          enum: [active, retiring, revoked]
+        registered_by:
+          $ref: "#/components/schemas/UUID"
+        registered_at:
+          $ref: "#/components/schemas/Timestamp"
+        expires_at:
+          $ref: "#/components/schemas/Timestamp"
+        retiring_at:
+          $ref: "#/components/schemas/NullableTimestamp"
+        revoked_at:
+          $ref: "#/components/schemas/NullableTimestamp"
+        revoked_by:
+          $ref: "#/components/schemas/NullableUUID"
+        revocation_reason:
+          type: string
+    Owner:
+      type: object
+      required: [ownership_id, registration_id, principal_id, granted_by, grant_reason, granted_at, revoked_at, revoked_by,
+        active]
+      properties:
+        ownership_id:
+          $ref: "#/components/schemas/UUID"
+        registration_id:
+          $ref: "#/components/schemas/UUID"
+        principal_id:
+          $ref: "#/components/schemas/UUID"
+        granted_by:
+          $ref: "#/components/schemas/UUID"
+        grant_reason:
+          type: string
+        granted_at:
+          $ref: "#/components/schemas/Timestamp"
+        revoked_at:
+          $ref: "#/components/schemas/NullableTimestamp"
+        revoked_by:
+          $ref: "#/components/schemas/NullableUUID"
+        revoke_reason:
+          type: string
+        active:
+          type: boolean
+    ApplicationDeveloper:
+      type: object
+      required: [grant_id, principal_id, granted_by, grant_reason, granted_at, revoked_at, revoked_by, active]
+      properties:
+        grant_id:
+          $ref: "#/components/schemas/UUID"
+        principal_id:
+          $ref: "#/components/schemas/UUID"
+        granted_by:
+          $ref: "#/components/schemas/UUID"
+        grant_reason:
+          type: string
+        granted_at:
+          $ref: "#/components/schemas/Timestamp"
+        revoked_at:
+          $ref: "#/components/schemas/NullableTimestamp"
+        revoked_by:
+          $ref: "#/components/schemas/NullableUUID"
+        revoke_reason:
+          type: string
+        active:
+          type: boolean
+    ProposeChangeRequest:
+      type: object
+      additionalProperties: false
+      required: [expected_version]
+      description: Exactly one kind of change; a URI change names the whole new set.
+      properties:
+        redirect_uris:
+          type: array
+          items:
+            type: string
+        audience:
+          type: array
+          items:
+            type: string
+        lifetime_class:
+          type: string
+          enum: [L0, L1, L2, L3]
+        backchannel_logout_uri:
+          type: string
+          description: '"" removes it.'
+        expected_version:
+          type: integer
+          format: int64
+          description: The registration version the change was read at.
+    RegistrationChange:
+      type: object
+      required: [change_id, registration_id, client_key, base_version, kind, approval_required, proposed_by,
+        proposal_reason, proposed_at, state, decided_by, decided_at]
+      properties:
+        change_id:
+          $ref: "#/components/schemas/UUID"
+        registration_id:
+          $ref: "#/components/schemas/UUID"
+        client_key:
+          type: string
+        base_version:
+          type: integer
+          format: int64
+        kind:
+          type: string
+          enum: [redirect_uris, audience, lifetime_class, backchannel_logout_uri]
+        previous_redirect_uris:
+          type: [array, "null"]
+          items:
+            type: string
+        redirect_uris:
+          type: [array, "null"]
+          items:
+            type: string
+        previous_audience:
+          type: [array, "null"]
+          items:
+            type: string
+        audience:
+          type: [array, "null"]
+          items:
+            type: string
+        previous_lifetime_class:
+          type: [string, "null"]
+        lifetime_class:
+          type: [string, "null"]
+        previous_backchannel_logout_uri:
+          type: [string, "null"]
+        backchannel_logout_uri:
+          type: [string, "null"]
+        approval_required:
+          type: boolean
+        proposed_by:
+          $ref: "#/components/schemas/UUID"
+        proposal_reason:
+          type: string
+        proposed_at:
+          $ref: "#/components/schemas/Timestamp"
+        state:
+          type: string
+        decided_by:
+          $ref: "#/components/schemas/NullableUUID"
+        decision_reason:
+          type: string
+        decided_at:
+          $ref: "#/components/schemas/NullableTimestamp"
+    RegistrationRequest:
+      type: object
+      required: [request_id, client_key, request, owners, proposed_by, proposal_reason, proposed_at, state, decided_by,
+        decided_at, registration_id]
+      properties:
+        request_id:
+          $ref: "#/components/schemas/UUID"
+        client_key:
+          type: string
+        request:
+          type: object
+          description: The requested registration document, its public key's public members only.
+        owners:
+          type: array
+          items:
+            $ref: "#/components/schemas/UUID"
+        proposed_by:
+          $ref: "#/components/schemas/UUID"
+        proposal_reason:
+          type: string
+        proposed_at:
+          $ref: "#/components/schemas/Timestamp"
+        state:
+          type: string
+        decided_by:
+          $ref: "#/components/schemas/NullableUUID"
+        decision_reason:
+          type: string
+        decided_at:
+          $ref: "#/components/schemas/NullableTimestamp"
+        registration_id:
+          $ref: "#/components/schemas/NullableUUID"
+
+    CreateWorkloadRequest:
+      type: object
+      additionalProperties: false
+      required: [display_name, purpose, workload_type, owner_principal_id, client_key, application_ref, public_key]
+      properties:
+        display_name:
+          type: string
+        purpose:
+          type: string
+        workload_type:
+          type: string
+        owner_principal_id:
+          $ref: "#/components/schemas/UUID"
+        team_reference:
+          type: string
+        client_key:
+          type: string
+        application_ref:
+          type: string
+        audience:
+          type: array
+          items:
+            type: string
+        public_key:
+          $ref: "#/components/schemas/PublicJWK"
+    Workload:
+      type: object
+      required: [principal_id, registration_id, client_key, display_name, purpose, workload_type, owner_principal_id,
+        owner_recorded_at, state, orphaned_at, last_seen_at, created_by, created_at, activated_at, last_reviewed_at]
+      properties:
+        principal_id:
+          $ref: "#/components/schemas/UUID"
+        registration_id:
+          $ref: "#/components/schemas/UUID"
+        client_key:
+          type: string
+        display_name:
+          type: string
+        purpose:
+          type: string
+        workload_type:
+          type: string
+        owner_principal_id:
+          $ref: "#/components/schemas/UUID"
+        team_reference:
+          type: string
+        owner_recorded_at:
+          $ref: "#/components/schemas/Timestamp"
+        state:
+          type: string
+        orphaned_at:
+          $ref: "#/components/schemas/NullableTimestamp"
+        last_seen_at:
+          $ref: "#/components/schemas/NullableTimestamp"
+        created_by:
+          $ref: "#/components/schemas/UUID"
+        created_at:
+          $ref: "#/components/schemas/Timestamp"
+        activated_at:
+          $ref: "#/components/schemas/NullableTimestamp"
+        last_reviewed_at:
+          $ref: "#/components/schemas/NullableTimestamp"
+        review_due_at:
+          $ref: "#/components/schemas/Timestamp"
+    WorkloadSweepResult:
+      type: object
+      required: [orphaned, reclaimed, suspended, unused, reviews_overdue]
+      properties:
+        orphaned:
+          type: integer
+        reclaimed:
+          type: integer
+        suspended:
+          type: integer
+        unused:
+          type: integer
+        reviews_overdue:
+          type: integer
+    WorkloadCondition:
+      type: object
+      required: [principal_id, client_key, display_name, owner_principal_id, state, since]
+      properties:
+        principal_id:
+          $ref: "#/components/schemas/UUID"
+        client_key:
+          type: string
+        display_name:
+          type: string
+        owner_principal_id:
+          $ref: "#/components/schemas/UUID"
+        state:
+          type: string
+        since:
+          $ref: "#/components/schemas/Timestamp"
+        stage:
+          type: string
+        last_seen_at:
+          $ref: "#/components/schemas/Timestamp"
+    CloudEvent:
+      type: object
+      description: A CloudEvents 1.0 envelope from foundation-platform's event package.
+      required: [specversion, id, source, type, time, datacontenttype, data]
+      properties:
+        specversion:
+          type: string
+          const: "1.0"
+        id:
+          $ref: "#/components/schemas/UUID"
+        source:
+          type: string
+        type:
+          type: string
+          examples: [com.scnehaux.organization.membership.granted]
+        time:
+          type: string
+        datacontenttype:
+          type: string
+        dataschema:
+          type: string
+        streamposition:
+          type: integer
+          format: int64
+        data: {}

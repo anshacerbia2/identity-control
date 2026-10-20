@@ -208,6 +208,12 @@ func (s *Service) attempt(ctx context.Context, c claimed) outcome {
 		if err == nil && refused != "" {
 			return outcome{state: StateRefused, resultCode: refused}
 		}
+	case TypeConsentWithdraw:
+		var refused string
+		refused, err = s.withdrawConsent(ctx, c)
+		if err == nil && refused != "" {
+			return outcome{state: StateRefused, resultCode: refused}
+		}
 	default:
 		return outcome{state: StateUnresolved, errorClass: "unknown_operation"}
 	}
@@ -443,6 +449,36 @@ func (s *Service) terminateOne(ctx context.Context, c claimed) (string, error) {
 	for _, session := range sessions {
 		if session.ID == ref.KernelID {
 			return "", fmt.Errorf("%w: the session is still listed", errReadBack)
+		}
+	}
+	return "", nil
+}
+
+// withdrawConsent withdraws the person's consent to one client, named by its sealed reference. A
+// consent already gone counts as withdrawn once the listing agrees.
+func (s *Service) withdrawConsent(ctx context.Context, c claimed) (string, error) {
+	kind, purpose := refBinding(c.opType)
+	ref, err := s.refs.OpenAccepted(c.ref, kind, c.subject, purpose)
+	if err != nil {
+		return "reference", nil
+	}
+	err = s.call(ctx, func(ctx context.Context) error {
+		return s.kernel.RevokeConsent(ctx, s.cfg.Realm, c.kernelUser, ref.KernelID)
+	})
+	if err != nil && !errors.Is(err, keycloak.ErrNotFound) {
+		return "", err
+	}
+	var consents []keycloak.Consent
+	if err := s.call(ctx, func(ctx context.Context) error {
+		var err error
+		consents, err = s.kernel.UserConsents(ctx, s.cfg.Realm, c.kernelUser)
+		return err
+	}); err != nil {
+		return "", err
+	}
+	for _, consent := range consents {
+		if consent.ClientID == ref.KernelID {
+			return "", fmt.Errorf("%w: the consent is still listed", errReadBack)
 		}
 	}
 	return "", nil

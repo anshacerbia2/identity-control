@@ -165,3 +165,48 @@ func (c *Client) setSecurityLocked(userID keycloak.UserID, s Security) {
 }
 
 var _ keycloak.Containment = (*Client)(nil)
+
+// SetConsents records a user's consents, as the kernel's consent page would.
+func (c *Client) SetConsents(userID keycloak.UserID, consents []keycloak.Consent) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.consents == nil {
+		c.consents = map[keycloak.UserID][]keycloak.Consent{}
+	}
+	c.consents[userID] = append([]keycloak.Consent{}, consents...)
+}
+
+// UserConsents lists a user's consents.
+func (c *Client) UserConsents(ctx context.Context, realm keycloak.Realm, userID keycloak.UserID) ([]keycloak.Consent, error) {
+	if _, err := c.readSecurity(ctx, realm, userID); err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]keycloak.Consent{}, c.consents[userID]...), nil
+}
+
+// RevokeConsent withdraws one consent, ErrNotFound when it is gone already.
+func (c *Client) RevokeConsent(ctx context.Context, realm keycloak.Realm, userID keycloak.UserID, clientID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.FailContainment != nil {
+		return c.FailContainment
+	}
+	entry, ok := c.users[userID]
+	if !ok || entry.realm != realm {
+		return keycloak.ErrNotFound
+	}
+	held := c.consents[userID]
+	for i, consent := range held {
+		if consent.ClientID == clientID {
+			c.consents[userID] = append(append([]keycloak.Consent{}, held[:i]...), held[i+1:]...)
+			c.Calls.RevokeConsent++
+			return nil
+		}
+	}
+	return keycloak.ErrNotFound
+}

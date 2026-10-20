@@ -156,3 +156,72 @@ func decodeKernelEvents(kind string, body []byte) ([]KernelEvent, error) {
 var ErrNoEventID = errors.New("keycloak: a kernel event carries no id")
 
 var _ EventStore = (*Admin)(nil)
+
+// UserCreation is one admin event that created a user: when, by which kernel user (the
+// service account of the client whose credential made the call), and the principal_id the
+// representation sent carried (ADR-IAM-001 §5.11 check 4, amended 2026-10-20).
+type UserCreation struct {
+	EventID            string
+	Time               time.Time
+	ActorUserID        string
+	ClaimedPrincipalID string
+}
+
+// CreationJournal reads the kernel's record of a user's creation. *Admin implements it with a
+// credential that holds view-events, the registration credential's (TDD-identity-control-007).
+type CreationJournal interface {
+	// UserCreations returns every admin event CREATE on the user, newest first. A user whose
+	// creation left the kernel's event retention returns none.
+	UserCreations(ctx context.Context, realm Realm, user UserID) ([]UserCreation, error)
+}
+
+// UserCreations reads the admin events that created the user. The kernel's admin event query takes
+// operationTypes, resourceTypes and resourcePath filters (Admin REST API, "Get admin events"), and
+// "The Include Representation switch includes JSON documents sent through the admin REST API", which
+// is where the principal_id the creation carried is read.
+func (a *Admin) UserCreations(ctx context.Context, realm Realm, user UserID) ([]UserCreation, error) {
+	if user == "" {
+		return nil, errors.New("keycloak: a user identifier is required")
+	}
+	query := url.Values{}
+	query.Set("operationTypes", "CREATE")
+	query.Set("resourceTypes", "USER")
+	query.Set("resourcePath", "users/"+string(user))
+	query.Set("max", strconv.Itoa(kernelEventPage))
+	path := fmt.Sprintf("/admin/realms/%s/admin-events", url.PathEscape(string(realm)))
+	response, err := a.do(ctx, http.MethodGet, path, query, nil, false)
+	if err != nil {
+		return nil, err
+	}
+	events, err := decodeKernelEvents(KindAdminEvent, response.body)
+	response.Close()
+	if err != nil {
+		return nil, err
+	}
+	return UserCreationsOf(events, user), nil
+}
+
+// UserCreationsOf keeps the admin events that created the user, and reads the principal_id each
+// one's representation carried. The kernel's filters are applied again here, so a kernel that
+// ignored one is not trusted with the answer.
+func UserCreationsOf(events []KernelEvent, user UserID) []UserCreation {
+	out := []UserCreation{}
+	for _, event := range events {
+		if event.Kind != KindAdminEvent || event.Type != "CREATE" || event.ResourceType != "USER" ||
+			event.ResourcePath != "users/"+string(user) || event.Error != "" {
+			continue
+		}
+		var representation struct {
+			Attributes map[string][]string `json:"attributes"`
+		}
+		claimed := ""
+		if json.Unmarshal([]byte(event.Representation), &representation) == nil {
+			claimed = firstAttribute(representation.Attributes, AttrPrincipalID)
+		}
+		out = append(out, UserCreation{EventID: event.ID, Time: event.Time, ActorUserID: event.UserID,
+			ClaimedPrincipalID: claimed})
+	}
+	return out
+}
+
+var _ CreationJournal = (*Admin)(nil)

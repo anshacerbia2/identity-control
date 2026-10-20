@@ -708,7 +708,8 @@ func spec(r Registration, keys []keycloak.JWK) keycloak.ClientSpec {
 		return keycloak.ClientSpec{ClientID: r.ClientKey, Resource: true}
 	}
 	out := keycloak.ClientSpec{ClientID: r.ClientKey, RedirectURIs: r.RedirectURIs,
-		AccessTokenLifespan: r.AccessTokenLifespan, Audience: r.Audience, BackChannelLogoutURL: r.BackChannelLogoutURI}
+		AccessTokenLifespan: r.AccessTokenLifespan, Audience: r.Audience, BackChannelLogoutURL: r.BackChannelLogoutURI,
+		ConsentRequired: ConsentRequired(r.Profile, r.AudienceClass)}
 	switch r.Profile {
 	case ProfilePublic:
 		out.Public = true

@@ -16,6 +16,7 @@ import (
 // Principal credential, which holds manage-users and view-users.
 type Containment interface {
 	SecurityReader
+	Consents
 	GetUser(ctx context.Context, realm Realm, userID UserID) (User, error)
 	DisableUser(ctx context.Context, realm Realm, userID UserID) error
 	EnableUser(ctx context.Context, realm Realm, userID UserID) error

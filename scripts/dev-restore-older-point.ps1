@@ -21,8 +21,11 @@
 #                                          extra member; Organization Control's repair restores it,
 #                                          delivered here as its dispatcher would (the Tenant proof's
 #                                          delivering workload stands in, as scripts/dev-tenant-proof.ps1)
-#   a Principal created after it           an orphan, recorded and left enabled in report; no route binds
-#                                          its identifier again, which the evidence records as a gap
+#   a Principal created after it           an orphan, recorded and left enabled in report; :adopt
+#                                          re-adopts its identifier after its four checks, to suspended,
+#                                          and :restore returns it to service (ADR-IAM-001 §5.11)
+#   a user the console made after it       an orphan whose creation this service never made: :adopt
+#                                          refuses it on creation_on_record, and triage decides
 #
 # The reconcile phase writes older-point-evidence.json beside the state file. It changes a kernel that
 # lives for one CI job, never a shared server.
@@ -120,6 +123,12 @@ function Kc([string] $path) {
     $r = Send "GET" "$kcAdmin/admin/realms/$realm$path" $null $script:adminToken $null
     if ($r.code -ne 200) { throw "the kernel answered $($r.code) to GET $path" }
     return $r.json
+}
+
+# KcPost writes to the kernel as its console administrator, as a person in the Admin Console would.
+function KcPost([string] $path, $body) {
+    [void](Kc "/users?max=1")   # renews the administrator's token
+    return Send "POST" "$kcAdmin/admin/realms/$realm$path" ($body | ConvertTo-Json -Compress -Depth 5) $script:adminToken $null
 }
 
 function Client-Of([string] $clientKey) { return @(Kc "/clients?clientId=$clientKey&search=false")[0] }
@@ -252,7 +261,15 @@ if ($Phase -eq "after-backup") {
     Expect "a Membership granted" $r.code 202
     Expect "the kernel made the member" (Wait-Until { (Members-Of $s.tenant) -contains $operatorUser }) $true
 
+    # A user the console administrator makes, carrying an identifier this service never issued: its
+    # creation event names the administrator, not this service's Admin API client.
+    $forged = New-UuidV7
+    $r = KcPost "/users" @{ username = "rd.console.$($s.run)"; enabled = $true; firstName = "Restore"; lastName = "Drill"
+        email = "rd.console.$($s.run)@scnehaux.local"; attributes = @{ scnehaux_principal_id = @($forged) } }
+    Expect "a user made in the console" $r.code 201
+
     $s | Add-Member -NotePropertyName after -NotePropertyValue $after -Force
+    $s | Add-Member -NotePropertyName forged -NotePropertyValue $forged -Force
     $s | Add-Member -NotePropertyName membership -NotePropertyValue $membership -Force
     $s | Add-Member -NotePropertyName after_key -NotePropertyValue $keyFile -Force
     $s | Add-Member -NotePropertyName after_jwk -NotePropertyValue $jwk -Force
@@ -352,9 +369,44 @@ $first = $orphan | Select-Object -First 1
 Expect "recorded as an orphan" (Get-Prop $first "finding_class") "orphan"
 Expect "left enabled in report mode" (Get-Prop $first "user_disabled") $false
 Expect "carrying the identifier the API issued" (Get-Prop $first "claimed_principal_id") $s.after
+$why = Reason "the Principal was created after the backup"
+$plan = Api "POST" "/v1/principals/$($s.after):adopt" '{"dry_run":true}' $why
+$holding = @((Get-Prop $plan.json "checks") | Where-Object { $_.holds }).Count
+Expect "its adoption plan holds all four checks" "$($plan.code) $(Get-Prop $plan.json 'adoptable') $holding" "200 True 4"
+$adopted = Api "POST" "/v1/principals/$($s.after):adopt" '{"dry_run":false}' $why
+Expect "adopted to suspended" "$($adopted.code) $(Get-Prop $adopted.json 'adopted') $(Get-Prop $adopted.json 'state')" "200 True suspended"
+$person = @(Kc "/users?username=rd.after.$($s.run)&exact=true")[0]
+Expect "its user is held disabled until a restore" $person.enabled $false
+$read = Api "GET" "/v1/principals/$($s.after)" $null $null
+Expect "the Principal reads suspended, under the identifier the API issued" "$($read.code) $(Get-Prop $read.json 'state')" "200 suspended"
+$r = Api "POST" "/v1/principals/$($s.after):restore" "{`"expected_version`":$(Get-Prop $read.json 'security_version')}" (Reason "the adoption was reviewed; return it to service")
+$restored = Operation-Applied $r
+Expect "an operator's restore returns it to service" $restored "applied"
+$active = Get-Prop (Api "GET" "/v1/principals/$($s.after)" $null $null).json "state"
+$enabled = @(Kc "/users?username=rd.after.$($s.run)&exact=true")[0].enabled
+Expect "active, with its user enabled" "$active $enabled" "active True"
+[void](Api "POST" "/v1/principals:reconcile" $null $null)
+$still = @((Api "GET" "/v1/principals:unmapped" $null $null).json.unmapped | Where-Object { (Get-Prop $_ "username") -eq "rd.after.$($s.run)" })
+Expect "no finding names it" $still.Count 0
 Case "Principal created after the backup" "orphan: a kernel user carrying an identifier no mapping holds; enabled (report)" `
-    "none built: no route binds an orphan's identifier to a mapping again" `
-    "gap: the principal_id stays unknown here; under disable the user would be disabled" ($orphan.Count -eq 1)
+    ":adopt after its four checks, to suspended; :restore by an operator" `
+    "the same principal_id active on the same user; no open finding. Signing in and its Memberships are proven in organization-control's wiring job" `
+    ($orphan.Count -eq 1 -and (Get-Prop $adopted.json 'state') -eq "suspended" -and $restored -eq "applied" -and $active -eq "active" -and $still.Count -eq 0)
+
+Write-Host "6. a user the console made after the backup"
+$forgedOrphan = @((Api "GET" "/v1/principals:unmapped" $null $null).json.unmapped | Where-Object { (Get-Prop $_ "username") -eq "rd.console.$($s.run)" })
+Expect "recorded as an orphan" (Get-Prop ($forgedOrphan | Select-Object -First 1) "finding_class") "orphan"
+$plan = Api "POST" "/v1/principals/$($s.forged):adopt" '{"dry_run":true}' (Reason "a user the console made")
+$refusal = "$(Get-Prop $plan.json 'refusal')"
+Write-Host "        refusal: $refusal"
+Expect "its plan is refused on its creation" "$($plan.code) $(Get-Prop $plan.json 'adoptable') $($refusal.StartsWith('creation_on_record'))" "200 False True"
+$r = Api "POST" "/v1/principals/$($s.forged):adopt" '{"dry_run":false}' (Reason "a user the console made")
+Expect "and the adoption refused" $r.code 409
+$none = (Api "GET" "/v1/principals/$($s.forged)" $null $null).code
+Expect "no mapping holds it" $none 404
+Case "user made in the console after the backup" "orphan whose creation event names the console administrator" `
+    ":adopt refused on creation_on_record; triage decides" "no mapping; the identifier stays an orphan" `
+    ($r.code -eq 409 -and $none -eq 404)
 
 Remove-Item -Force -ErrorAction SilentlyContinue $s.after_key
 $evidence = @{ standard = "STD-GLB-002 §Restore Evidence"; runbook = "docs/runbooks/control-database-restore.md §After a restore to an older point"

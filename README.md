@@ -83,6 +83,7 @@ existing SAD document. Root artifacts never link downward into this repository.
 | `internal/controldb/` | Roles, grants, and the privilege assertions |
 | `internal/config/` | Environment configuration, read once at startup |
 | `docs/designs/` | Technical Design Documents |
+| `api/` | `openapi.yaml`, the published HTTP contract (ADR-GLB-010 §5.1), and its lint configuration |
 
 Not built yet, and designed: the rest of the registration drift classes and the unmanaged-client
 branch (TDD-003), the Membership projection and session removal (TDD-002), and the rest of the
@@ -106,7 +107,7 @@ this machine's values; every credential in `.env.example` is a placeholder.
 | `make test-unit` | nothing |
 | `make migrate` | PostgreSQL and Atlas: roles, platform schema, migrations, privileges |
 | `make run` | the above and a Keycloak with the realm `identity-kernel` applies |
-| `make bootstrap OPERATOR=... REASON=... USERNAME=...` | a running stack: the one-time ceremony |
+| `make bootstrap OPERATOR=... WITNESS=... REASON=... USERNAME=...` | a running stack: the one-time ceremony |
 | `make provider-bootstrap` | Organization Control with this service registered as its consumer: builds the provider authority projection (TDD-identity-control-006) |
 
 The service still reads only its process environment and refuses a wrong value by name, so the

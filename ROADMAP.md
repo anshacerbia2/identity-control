@@ -35,7 +35,11 @@ envelope, idempotency, and problem-details packages from day one, and reimplemen
 any of them here would produce a second revocation enforcement interval while both
 services reported compliance.
 
-Pinned at `v0.4.0` (`go.mod`). Two earlier pins are kept here for their reasons: `v0.2.0` shipped a
+Pinned at `v0.5.0` (`go.mod`, 2026-10-21): it adds `idempotency.PurgeCompleted` and
+`platform.purge_idempotency_keys`, which the 7-day key retention calls (TDD-003 1.39.0 §Key Retention),
+`Withhold`/`CompleteWithheld`, and the `invitation-not-acceptable` problem type, which this service does
+not answer. The first credential keeps its own path, which already records its issuance without the
+value; moving it to `CompleteWithheld` is not needed. Two earlier pins are kept here for their reasons: `v0.2.0` shipped a
 platform migration set that could only be applied once — see the findings table under Week 2½ — and
 `v0.2.2` added the `request-in-progress` problem type this service needed.
 
@@ -85,7 +89,7 @@ dump, a hand-run `GRANT`, a role that predates these files.
 | :-- | :-- |
 | Atlas in database scope planned `DROP SCHEMA "public" CASCADE`, and would have planned the same for `platform` | Both urls carry `search_path=identity`. The `identity` schema object is created by `identity-migrate -stage=pre`, because a schema-scoped plan may not modify the schema it is scoped to |
 | `GRANT ... ON ALL TABLES IN SCHEMA` over an empty schema is a no-op, not an error | `grants.sql` opens with a guard that raises when its objects are absent. Without it the stage reported success and granted nothing, and the failure surfaced as a runtime that could not read its own tables |
-| `atlas migrate lint` is Atlas Pro only since v0.38 | ADR-GLB-004 names it as the destructive gate, so the mandated mechanism cannot run on the free CLI. CI runs `atlas migrate validate`, which is free and checks directory integrity, plus a text-level destructive gate standing in for the analyzer. **This is debt.** Resolving it means an Atlas Pro login with a CI token, or amending ADR-GLB-004 |
+| **RLS outside HCL (Pro only).** Recorded first as "`atlas migrate lint` is Atlas Pro only since v0.38", retitled 2026-10-20 | The lint half was never debt, and is not a waiver. ADR-GLB-004 §5.1 (amended 2026-08-18 and 2026-10-20) states the gate as a property, met by `atlas migrate validate`, a destructive-statement gate and the synchronisation check: "A pipeline that implements items 1 and 2 meets this gate. It is not a waiver". CI runs all three. The destructive gate is squawk v2.70.0, pinned by version and checksum, over every migration after `20261019142657_first_credential` (`.squawk.toml`), and the reviewed text match stays over the migrations before it, whose `atlas:destructive-approved` lines cannot be edited. CI pins the Atlas CLI to v1.3.4, the migrate image's release (§5.4). What stays Pro-only is the title: Atlas models RLS policies in HCL only for Atlas Pro users (ADR-GLB-002 §6, amended 2026-10-20). It does not reach this repository today, which declares no RLS policy: its tables hold no Tenant's rows, and the runtime role is `NOBYPASSRLS` all the same (`roles.sql`). Buying Atlas Pro stays ADR-GLB-004's preferred upgrade, for `atlas migrate lint` (§5.1 item 4), whose configuration `atlas.hcl` keeps |
 | `TDD-identity-control-001` specifies both `keycloak_user_id UNIQUE` and a partial unique index on `(realm, keycloak_user_id)` | The first is strictly stronger, so the second adds nothing. ✅ Resolved 2026-10-09: TDD-001 1.18.0 removes the index and migration `20261009110000_drop_redundant_principal_index` drops it. No statement named it. The repository's text gate flags `DROP INDEX`, so the line carries the reviewed `atlas:destructive-approved` annotation; Atlas's own destructive analyzers name schemas, tables and columns, not indexes, and an index holds no data |
 | Atlas requires the target schema to exist on the dev server before any schema-scoped command | CI creates it on the throwaway dev container before Atlas runs. Absent, the first Atlas step fails with `schema "identity" was not found`, which reads like a broken migration |
 
@@ -610,7 +614,10 @@ Built in the order TDD-005 §Build Order states, one PR per slice:
     - Each carries an Idempotency-Key and no reason or version. It records and advances the subject's `security_version`, and shares one sequence with administrative commands.
     - Only an `active` Principal may command. `:remove` needs step-up and keeps the last first factor.
     - Each final state is evidenced with the actor equal to the subject.
-- **3b · Consents.** `GET /v1/me/consents` and `:withdraw` wait for a registered client that asks for consent, with a scope shown on the consent screen (TDD-005 2.9.2). identity-kernel's compat proof of the listing and withdrawal is answered (run 37607165522): the Admin API lists them, and a withdrawal ends the refresh tokens issued on it.
+- ✅ **3b · Consents** (TDD-005 2.13.0, STD-IAM-002 1.9.0 §3.6, ADR-IAM-003 §5.11).
+  - Which clients ask is decided: an `external` registration requires consent and no other class does, derived from the class at registration, adoption, recovery and recreation, never a field. The sweep holds it as the `consent` field class, repaired when attributed, and a registration reports `consent_required` (TDD-003 1.39.0).
+  - `GET /v1/me/consents` lists a person's consents, each with its client, its granted scopes and the access token lifetime its registration bounds. `POST /v1/me/consents/{security_ref}:withdraw` is a self security operation, `consent.withdraw`, read back against the kernel's listing. identity-kernel's compat proof of both is run 37607165522.
+  - `deploy-dev`'s smoke lists the bootstrap operator's consents. A consent page needs identity-kernel to mark the scopes an `external` client releases "display on consent screen": that is identity-kernel's change, and until it lands the listing is empty.
 - ✅ **Provider routes at two factors** (ADR-IAM-004; TDD-005 2.4.0 §Step-Up).
   - Every `providerOnly` route requires `acr` `aal2`, reads included, under NIST SP 800-53 IA-2(1). `/v1/me/authenticators/{ref}:remove` requires `aal2` and freshness.
   - A shortfall is answered with RFC 9470's challenge carrying `acr_values="aal2"`, plus `max_age` for a command.
@@ -780,6 +787,23 @@ slice:
      (identity-kernel #70); against a kernel without it the step warns, and `deploy-dev` is run by hand
      with `kernel_ref` naming that branch.
 
+13. ✅ **The consumer reconciles itself, and a restore's version bump is applied** (`TDD-identity-control-002`
+   2.6.0, `TDD-identity-control-006` 1.4.0; ADR-ORG-001 §5.7 and ADR-ORG-003 §5.5, amended 2026-10-20).
+   - Every `IDENTITY_ORGANIZATION_RECONCILE_INTERVAL` (15m) one replica sends this consumer's report to
+     Organization Control's `POST /v1/projections/reconcile` as its workload, and records the run in
+     `identity.reconcile_run` (`organization_reconcile`: `converged`, `drift`, `unresolved`), with the
+     gauge `identity.tenant_projection.organization_reconcile_age`. The repair arrives as before, as
+     `projection.repair.reconciled` (`internal/tenantcontext/selfreconcile.go`).
+   - **Waits on organization-control:** its reconcile route admits a provider only, so it answers this
+     workload `403`, logged at `WARN` each interval and retried; and its consumer registration does not
+     accept `reconciliation_interval` yet. Until both land, the runbook's operator run is the one that
+     reaches it.
+   - A Tenant is ordered by (`tenant_security_version`, `tenant_version`): the restore bumps only the
+     security version, and `tenant_version` restarts from the backup, so ordering by `tenant_version`
+     alone would discard the republished withdrawal. Ordinary operation orders exactly as before.
+     Grants already apply any greater version. Integration tests prove a 10^9 jump applied, the next
+     version after it, a late pre-restore one discarded, and every version column a `bigint`.
+
 ## Waiting on the Keycloak proof-of-concept
 
 Each item names the question that unblocks it. All of them are adapters, which is why
@@ -878,6 +902,39 @@ Two decisions are recorded here:
 
   The scripts and `deploy-dev` send a key on every command.
 
+  Since then (2026-10-20, TDD-001 1.23.0, TDD-005 2.13.0) the tables hold ten service-keyed commands,
+  `POST /v1/me/consents/{consent_action}` the tenth; seventeen replayed routes,
+  `POST /v1/bootstrap-ceremony:review` the seventeenth; and nine routes that need none.
+  `:adopt` is replayed inside `POST /v1/principals/{target}`'s dispatch, as `:relink` is.
+
+- ✅ **One registration per developer device** (STD-GLB-009 1.10.0 rule 15, ADR-IAM-001 §5.12 as amended
+  2026-10-20). `deploy/dev/README.md` §Several developer devices registers a second device's BFF as its
+  own client with its own key, and both `.env.example` files say so. The two-key adoption in
+  `scripts/dev-adopt-bff.ps1` stays, for a client caught in the middle of a rotation.
+
+## API specification (ADR-GLB-010 §5.1)
+
+✅ `api/openapi.yaml` is this service's published HTTP contract, an OpenAPI 3.1 document kept by hand
+beside `internal/httpapi/routes.go`. ADR-GLB-010 §5.1, accepted 2026-10-20, asks that "Each served API
+SHALL publish its specification (OpenAPI for HTTP) as a versioned artifact".
+
+- **Published as a versioned artifact in this repository.** A consumer pins it by commit, as event
+  contracts are pinned in foundation-platform's `contracts/events/registry.json`. It is not served by
+  the deployable: nothing reads it at run time, and serving it would add an unauthenticated route.
+- **`info.version`** follows ADR-GLB-006: major for a change that breaks a client, minor for an
+  addition, patch for a correction of the text. It is bumped in the commit that changes the routes.
+- **Each action is its own path.** The Go mux matches whole segments, so `:relink` and `:suspend` share
+  `POST /v1/principals/{target}` there. Each operation names that pattern in `x-mux-pattern`.
+- **Checked in CI, twice.** `internal/httpapi/openapi_test.go` fails when routes.go registers a route
+  no operation names, or an operation names a route routes.go does not register or a path that route
+  does not serve. The verify job's step "the API specification lints" runs Redocly CLI 2.55.0, pinned
+  by digest, with every rule of its recommended set an error (`api/redocly.yaml`).
+- **Not checked yet: the schemas against the handlers.** The request and response schemas are read
+  from the handlers' types by hand. A contract test that sends each documented body to the handler is
+  a later item.
+- **The BFFs' clients are identity-experience's.** ADR-GLB-010 §5.1 has a hand-written client
+  contract-tested in CI against this document; that test lives in identity-experience.
+
 ## Not this service
 
 Recorded so scope creep is visible rather than convenient:
@@ -927,7 +984,9 @@ Where each stands (2026-10-08):
     until the operator applies the restored state and repeats the change; a suspension's record is
     gone while the user stays disabled, and is repeated; a Membership granted after it is removed by
     the first sweep as `extra_member` and put back by Organization Control's repair; a Principal
-    created after it is an `orphan` that no route binds again, recorded as a gap. The record is
+    created after it is an `orphan`, re-adopted through `:adopt` to `suspended` and restored by an
+    operator (TDD-001 1.23.0, ADR-IAM-001 §5.11); and a user the console made after it is an `orphan`
+    whose adoption is refused on `creation_on_record` (STD-GLB-002 3.3.0). The record is
     `older-point-evidence.json` in the `restore-evidence` artifact. First passing run: deploy-dev run
     37918842749, 2026-10-09, all five cases as above, the switches returned and the service ready; the
     same run restored 47 tables and 581 rows in 2.1 s, and recovered to the verified read in 28.9 s.
@@ -975,9 +1034,19 @@ Where each stands (2026-10-08):
     read (TDD-001 1.22.0, NIST SP 800-53 AC-5), as `:suspend` and `:restore` already do (TDD-005).
     Proven by `TestAReleaseOfTheCallersOwnPrincipalIsForbidden` and, against PostgreSQL,
     `TestAnOperatorCannotReleaseTheirOwnPrincipal`.
-  - Still not built, recorded in the runbooks: a human `:retire`; a route binding an orphan's
-    identifier again after a restore; a route ending a quarantined Principal's sessions before its
-    release; a route reading the ceremony record.
+  - ✅ Two of the four the runbooks named are built (TDD-001 1.23.0): `POST /v1/principals/{id}:adopt`
+    binds an orphan's identifier again after a restore, after the four checks of ADR-IAM-001 §5.11, to
+    `suspended`, recorded insert-only in `identity.principal_adoption`; and `GET /v1/bootstrap-ceremony`
+    reads the ceremony record. Still not built: a human `:retire`; a route ending a quarantined
+    Principal's sessions before its release.
+  - ✅ **Audit records are kept 7 years** (STD-GLB-007 1.1.0, TDD-001 1.23.0 §Audit Retention). Checked
+    2026-10-20: no audit table is purged at any age; the runtime holds no `DELETE` or `TRUNCATE` on any,
+    and no migration or production source deletes from one. `TestNoAuditRecordIsPurgedBeforeSevenYears`
+    and `TestNoSourceDeletesAnAuditRecord` assert it on every build. A purge past 7 years is not needed
+    before 2033 and is not built.
+  - ✅ **Idempotency-Keys are kept 7 days** (STD-GLB-001 1.7.0, TDD-003 1.39.0 §Key Retention): the
+    scheduled sweep purges completed keys past the published window through foundation-platform
+    v0.5.0's `PurgeCompleted`; an uncompleted key is never purged.
   - ✅ One gap they found is fixed: recovery now completes the creating request's
     `Idempotency-Key` (TDD-001 1.14.0, migration `20261008065047_principal_creation_claim`). Before,
     a Principal recovered after a failed create answered its caller's retry with `409`
@@ -1000,6 +1069,11 @@ out-of-band `INSERT` that `ADR-ORG-001` prohibits. What remains for the producti
 operational rather than architectural: the ceremony needs a runbook naming who is authorized to
 perform it and where the record is reviewed, since the evidence is worthless if nobody reads it.
 ✅ `docs/runbooks/bootstrap-ceremony.md` is written from the code: preconditions, the command, resume,
-every refusal, verification. **Owner decision pending:** who may perform it, and where, by whom and when
-the record is reviewed, are explicit placeholders in its §Who performs it, and remain open until the
-owner decides (NIST SP 800-53 AU-6's assignments).
+every refusal, verification. ✅ **Two people and an independent review** (STD-IAM-001 2.9.0 §3.10,
+ADR-IAM-001 §5.11 requirement 3, TDD-001 1.23.0): the ceremony records a witness who is never the
+operator, `GET /v1/bootstrap-ceremony` serves the record, and `POST /v1/bootstrap-ceremony:review`
+records an insert-only review that the route and the database refuse from the operator, the witness or
+the first Principal. **Owner decision pending:** the names of the ceremony role and of the reviewer, and
+the review deadline, are explicit placeholders in the runbook's §Who performs it, and remain open until
+the owner decides (NIST SP 800-53 AU-6's assignments). The runbook also asks the owner to confirm that
+the reviewer's own Principal is the one the realm serves before the review.

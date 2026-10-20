@@ -360,6 +360,28 @@ if ($PSVersionTable.PSEdition -ne 'Core') {
 }
 
 Write-Host ""
+Write-Host "12. the ceremony's record, its review, and a person's consents"
+# STD-IAM-001 2.9.0 §3.10: the record names the operator and the witness bootstrap.sh recorded, and the
+# first Principal cannot review its own ceremony. TDD-identity-control-005 2.13.0: the consent listing
+# is served; it is empty until a client that asks consent has been signed in to.
+$token = Get-ScnehauxToken -Username "bootstrap-operator" `
+    -Password $env:IDENTITY_CALLER_PASSWORD -KeyFile $env:IDENTITY_CALLER_KEY_FILE @operatorTotp
+$r = Send-Json "GET" "/v1/bootstrap-ceremony" $null $token $null
+Expect "the ceremony record is served" $r.code 200
+$ceremony = $r.body | ConvertFrom-Json
+Expect "naming two different people" ($ceremony.operator -ne $ceremony.witness -and $ceremony.witness -ne "") $true
+$request = New-Object System.Net.Http.HttpRequestMessage("POST", "$api/v1/bootstrap-ceremony:review")
+$request.Headers.Authorization = New-Object System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", $token)
+$request.Headers.Add("Idempotency-Key", [Guid]::NewGuid().ToString())
+$request.Headers.Add("X-Administrative-Reason", "smoke: the first Principal tries to review its own ceremony")
+$request.Content = New-Object System.Net.Http.StringContent('{"reviewer":"smoke reviewer","outcome":"satisfactory"}',
+    [System.Text.Encoding]::UTF8, "application/json")
+Expect "the first Principal cannot review its own ceremony" ([int]$client.SendAsync($request).Result.StatusCode) 409
+$r = Send-Json "GET" "/v1/me/consents" $null $token $null
+$listed = $r.code -eq 200 -and (($r.body | ConvertFrom-Json).PSObject.Properties.Name -contains "consents")
+Expect "a person's consents are listed" "$($r.code) $listed" "200 True"
+
+Write-Host ""
 if ($failures -gt 0) {
     Write-Host "$failures case(s) failed."
     exit 1

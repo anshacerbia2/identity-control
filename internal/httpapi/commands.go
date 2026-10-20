@@ -26,6 +26,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/anshacerbia2/foundation-platform/db"
 	"github.com/anshacerbia2/foundation-platform/httpapi"
@@ -44,12 +45,13 @@ const missingKey = "This route changes state and requires an " + IdempotencyHead
 // it. The route checks only that the key is present.
 var serviceKeyed = map[string]string{
 	"POST /v1/principals":                                                      "provisioning claims it with the pending mapping (TDD-identity-control-001)",
-	"POST /v1/principals/{target}":                                             ":suspend and :restore are security operations keyed per actor (TDD-identity-control-005); :issue-temporary-password is claimed by the first-credential path in the transaction that checks the Principal and completed without the value (TDD-identity-control-005 2.12.0); :relink and :release (TDD-identity-control-001 1.18.0) are replayed here",
+	"POST /v1/principals/{target}":                                             ":suspend and :restore are security operations keyed per actor (TDD-identity-control-005); :issue-temporary-password is claimed by the first-credential path in the transaction that checks the Principal and completed without the value (TDD-identity-control-005 2.12.0); :relink, :release (TDD-identity-control-001 1.18.0) and :adopt (1.23.0, ADR-IAM-001 §5.11) are replayed here",
 	"POST /v1/registrations":                                                   "registration claims it with the pending registration (TDD-identity-control-003)",
 	"POST /v1/workloads":                                                       "the workload path claims it with the pending workload (TDD-identity-control-004)",
 	"POST /v1/me/sessions/{session_action}":                                    "a security operation, keyed per actor (TDD-identity-control-005)",
 	"POST /v1/me/sessions:terminate-all":                                       "a security operation, keyed per actor",
 	"POST /v1/me/authenticators/{authenticator_action}":                        "a security operation, keyed per actor",
+	"POST /v1/me/consents/{consent_action}":                                    "a consent withdrawal, a security operation keyed per actor (TDD-identity-control-005 2.13.0)",
 	"POST /v1/principals/{principal_id}/sessions:terminate-all":                "a security operation, keyed per actor",
 	"POST /v1/principals/{principal_id}/authenticators/{authenticator_action}": "a security operation, keyed per actor",
 }
@@ -73,6 +75,7 @@ var replayedKey = map[string]string{
 	"POST /v1/security-operations/{operation_action}":                  "a re-drive",
 	"POST /v1/me/notification-addresses":                               "an address added",
 	"POST /v1/me/notification-addresses/{address_action}":              "an address verified, removed, or sent a proof code",
+	"POST /v1/bootstrap-ceremony:review":                               "a review of the bootstrap ceremony's record (STD-IAM-001 2.9.0 §3.10)",
 }
 
 // adoptKey is POST /v1/registrations:adopt: the adoption requires the key and the service claims it;
@@ -103,6 +106,27 @@ var keyOptional = map[string]string{
 		"the inbox guard, so a repeat is acknowledged and applied once (TDD-identity-control-006)",
 	"POST /v1/principals/{principal_id}/identifiers:match": "a read carried in a body: it answers whether " +
 		"the Principal holds the address, proven, and changes nothing (TDD-identity-control-008 1.7.0)",
+}
+
+// KeyRetention is how long a completed command's Idempotency-Key, and the answer recorded with it,
+// is kept: 7 days, the window the owner approved on 2026-10-21 and TDD-identity-control-003 §Key
+// Retention publishes, as STD-GLB-001 1.7.0 requires. The IETF draft: "The resource MAY require time
+// based idempotency keys to be able to purge or delete a key upon its expiry. The resource SHOULD
+// define such expiration policy and publish it in the documentation" (§2.3). Adyen: "Idempotency keys
+// are valid for a period of 7 to 14 days after first submission". A retry after it is a new command,
+// as Stripe says of its own pruning. An uncompleted key is never purged.
+const KeyRetention = 7 * 24 * time.Hour
+
+// PurgeKeys deletes the completed keys older than KeyRetention, every scope's, and reports how many.
+// The scheduled sweep calls it (cmd/identity-control).
+func PurgeKeys(ctx context.Context, store KeyStore) (int64, error) {
+	var purged int64
+	err := store.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		var err error
+		purged, err = idempotency.PurgeCompleted(ctx, tx, KeyRetention)
+		return err
+	})
+	return purged, err
 }
 
 // KeyStore opens the transaction a claim is made and completed in. The pool satisfies it.

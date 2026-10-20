@@ -89,6 +89,10 @@ type Client struct {
 	// Logout is how the kernel tells the client a session ended (the logout field class,
 	// TDD-identity-control-003 1.37.0).
 	Logout Logout
+
+	// ConsentRequired is the client's "Consent required — If enabled, users have to consent to client
+	// access" setting (the consent field class, TDD-identity-control-003 1.39.0).
+	ConsentRequired bool
 }
 
 // Logout is a client's logout configuration as the kernel holds it (ADR-IAM-009): whether it uses
@@ -179,6 +183,9 @@ type ClientPatch struct {
 	// BackChannelLogoutURL makes the client's logout configuration DesiredLogout of this URL: front
 	// channel off, session required, and this back-channel URL, removed when it is "".
 	BackChannelLogoutURL *string
+
+	// ConsentRequired sets whether a person consents to the client at sign-in.
+	ConsentRequired *bool
 }
 
 // JWK is one public key a confidential or workload client authenticates with: RSA, for signatures,
@@ -344,6 +351,11 @@ type ClientSpec struct {
 	// BackChannelLogoutURL is where the kernel posts a confidential client's logout tokens, or ""
 	// for none (ADR-IAM-009 §5.1).
 	BackChannelLogoutURL string
+
+	// ConsentRequired is whether a person consents to the client at sign-in: derived from its
+	// audience class, never chosen (STD-IAM-002 1.9.0 §3.6, ADR-IAM-003 §5.11). Written explicitly
+	// for every client, a resource included, because the sweep compares it.
+	ConsentRequired bool
 }
 
 // MaxClientKeys is how many keys a client holds at once: the active one, and during a rotation the
@@ -376,6 +388,8 @@ func (s ClientSpec) Validate() error {
 		return errors.New("keycloak: only a confidential or workload client holds keys")
 	case !s.Confidential && s.BackChannelLogoutURL != "":
 		return errors.New("keycloak: only a confidential client has a back-channel logout URL")
+	case s.ConsentRequired && (s.Workload || s.Resource):
+		return errors.New("keycloak: only a client a person signs in to asks for consent")
 	}
 	return nil
 }
@@ -388,6 +402,7 @@ func (s ClientSpec) representation() map[string]any {
 		"implicitFlowEnabled":       false,
 		"directAccessGrantsEnabled": false,
 		"serviceAccountsEnabled":    false,
+		"consentRequired":           s.ConsentRequired,
 	}
 	if s.Resource {
 		representation["publicClient"] = false
@@ -532,6 +547,9 @@ func (a *Admin) PatchClient(ctx context.Context, realm Realm, client ClientUUID,
 	}
 	if patch.NotBefore != nil {
 		representation["notBefore"] = *patch.NotBefore
+	}
+	if patch.ConsentRequired != nil {
+		representation["consentRequired"] = *patch.ConsentRequired
 	}
 	if patch.BackChannelLogoutURL != nil {
 		if public, _ := representation["publicClient"].(bool); public && *patch.BackChannelLogoutURL != "" {
@@ -775,6 +793,7 @@ func clientFrom(representation map[string]any) (Client, error) {
 	client.Logout.FrontChannel, _ = representation["frontchannelLogout"].(bool)
 	client.Logout.BackChannelURL, _ = attributes[AttrBackChannelLogoutURL].(string)
 	client.Logout.SessionRequired = attributes[AttrBackChannelLogoutSessionRequired] == "true"
+	client.ConsentRequired, _ = representation["consentRequired"].(bool)
 	for _, mapper := range listOfMaps(representation["protocolMappers"]) {
 		if stringField(mapper, "name") == ClientIDMapper {
 			client.ClientIDClaim = clientIDValue(mapper)

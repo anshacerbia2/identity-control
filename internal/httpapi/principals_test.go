@@ -36,6 +36,8 @@ type stubProvisioner struct {
 	last        provisioning.CreateRequest
 	relinked    *provisioning.RelinkRequest
 	released    *provisioning.ReleaseRequest
+	adopted     *provisioning.AdoptRequest
+	plan        provisioning.AdoptPlan
 	pending     []provisioning.PendingMapping
 	quarantined []provisioning.QuarantinedMapping
 	dangling    []provisioning.DanglingFinding
@@ -58,6 +60,14 @@ func (s *stubProvisioner) Release(_ context.Context, req provisioning.ReleaseReq
 	s.calls++
 	s.released = &req
 	return provisioning.ReleaseResult{PrincipalID: req.PrincipalID, State: "suspended"}, s.err
+}
+
+func (s *stubProvisioner) Adopt(_ context.Context, req provisioning.AdoptRequest) (provisioning.AdoptPlan, error) {
+	s.calls++
+	s.adopted = &req
+	plan := s.plan
+	plan.PrincipalID = req.PrincipalID
+	return plan, s.err
 }
 
 func (s *stubProvisioner) Pending(context.Context) ([]provisioning.PendingMapping, error) {

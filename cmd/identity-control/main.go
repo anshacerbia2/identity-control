@@ -185,6 +185,10 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("registration service: %w", err)
 	}
+	// :adopt's provenance check reads the kernel's admin events with the registration credential, which
+	// holds view-events, and names this service's Principal credential as the creator it requires
+	// (ADR-IAM-001 §5.11 check 4, TDD-identity-control-001 1.23.0).
+	provisioner.UseCreationJournal(registry, kernel.ServiceAccountUserID)
 
 	// The service's own Admin API clients are exempt from the unmanaged rule beside the kernel's
 	// built-in ones: a controller's credentials are bootstrapped outside what it controls
@@ -294,6 +298,10 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("self-service handler: %w", err)
 	}
+	// A person's own consents (TDD-identity-control-005 2.13.0, slice 3b), each with the access token
+	// lifetime its client's registration bounds.
+	securityCommands.UseLifetimes(registrar)
+	meHandler.UseConsents(securityCommands)
 	// A person's own notification addresses, each proven with a code sealed under the same key ring
 	// as every other handle, for its lifetime (TDD-identity-control-008 1.2.0).
 	addresses, err := securitynotify.NewAddresses(pool, refs, cfg.SecurityRefTTL)
@@ -366,6 +374,7 @@ func run() error {
 		Investigation: investigationHandler,
 		Security:      securityHandler,
 		Me:            meHandler,
+		Ceremony:      provisioner,
 
 		TemporaryPasswords: temporaryPasswords,
 		Assurance:          httpapi.AssurancePolicy{Report: cfg.ReportAssurance, Logger: logger},
@@ -462,6 +471,25 @@ func run() error {
 	}
 	routesConfig.TenantOperator = tenantSweep
 
+	// The consumer reconciles itself on the interval its registration declares (ADR-ORG-001 §5.7,
+	// TDD-identity-control-002 2.6.0): its report to Organization Control's reconcile route, as this
+	// service's workload. Without Organization Control there is nobody to compare with.
+	var selfReconciler *tenantcontext.SelfReconciler
+	if frontier != nil {
+		if selfReconciler, err = tenantcontext.NewSelfReconciler(desired, pool, frontier,
+			cfg.OrganizationReconcileInterval, logger); err != nil {
+			return fmt.Errorf("the consumer's reconciliation: %w", err)
+		}
+		if exported != nil {
+			if err := selfReconciler.Instrument(exported.MeterProvider.Meter(
+				"github.com/anshacerbia2/identity-control/internal/tenantcontext")); err != nil {
+				return fmt.Errorf("the consumer's reconciliation metrics: %w", err)
+			}
+		}
+	} else {
+		logger.Warn("IDENTITY_ORGANIZATION_BASE_URL is unset; this consumer never reconciles itself with Organization Control")
+	}
+
 	surface, err := httpapi.Routes(routesConfig)
 	if err != nil {
 		return fmt.Errorf("routes: %w", err)
@@ -557,6 +585,9 @@ func run() error {
 	}
 	go converger.Run(ctx)
 	go scheduleTenantSweeps(ctx, tenantSweep, cfg.ProjectionReconcileInterval, logger)
+	if selfReconciler != nil {
+		go scheduleSelfReconcile(ctx, selfReconciler, cfg.OrganizationReconcileInterval, logger)
+	}
 	go scheduleKernelEventSweeps(ctx, kernelEvents, cfg.KernelEventInterval, logger)
 	go scheduleWorkloadSweeps(ctx, workloads, cfg.WorkloadSweepInterval, logger)
 	// The dispatcher hands requested notifications to the delivery adapter. With none configured the
@@ -583,7 +614,7 @@ func run() error {
 		go scheduleNotificationDispatch(ctx, dispatcher, logger)
 	}
 	go scheduleTemporaryPasswordSweeps(ctx, firstCredentials, cfg.TemporaryPasswordSweepInterval, logger)
-	go scheduleSweeps(ctx, provisioner, registrar, workloads, reconciler, providers, cfg.RegistrationReconcileInterval, logger)
+	go scheduleSweeps(ctx, provisioner, registrar, workloads, reconciler, providers, pool, cfg.RegistrationReconcileInterval, logger)
 	if freshness != nil {
 		go freshness.Poll(ctx, projection, frontier, providerauthority.PollInterval, logger)
 	}
@@ -614,7 +645,8 @@ func run() error {
 // meant to look, and it stops blocking the next one after two intervals.
 func scheduleSweeps(ctx context.Context, provisioner *provisioning.Provisioner, registrar *registration.Service,
 	workloads *workload.Service,
-	reconciler *reconcile.Reconciler, providers *providerauthority.Decider, interval time.Duration, logger *slog.Logger) {
+	reconciler *reconcile.Reconciler, providers *providerauthority.Decider, keys httpapi.KeyStore, interval time.Duration,
+	logger *slog.Logger) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -667,6 +699,14 @@ func scheduleSweeps(ctx context.Context, provisioner *provisioning.Provisioner, 
 				}
 				logger.LogAttrs(ctx, level, message, attrs...)
 			}
+		}
+		// Completed Idempotency-Keys past the published window are purged (TDD-identity-control-003
+		// 1.39.0 §Key Retention, STD-GLB-001 1.7.0): 7 days, the owner's window.
+		if purged, err := httpapi.PurgeKeys(ctx, keys); err != nil {
+			logger.Error("expired idempotency keys could not be purged", slog.String("error", err.Error()))
+		} else if purged > 0 {
+			logger.Info("expired idempotency keys purged", slog.Int64("keys", purged),
+				slog.Duration("retention", httpapi.KeyRetention))
 		}
 		// Changes waiting for a provider's approval (TDD-identity-control-003 §Operational Notes):
 		// a warning past three days, an error past seven, so an approval backlog alerts.
@@ -789,6 +829,45 @@ func scheduleTenantSweeps(ctx context.Context, sweep *tenantcontext.Reconciler, 
 	for {
 		if _, err := sweep.Sweep(ctx); err != nil && ctx.Err() == nil {
 			logger.Error("tenant context sweep failed", slog.String("error", err.Error()))
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// scheduleSelfReconcile sends this consumer's report to Organization Control every interval, the first
+// at once (ADR-ORG-001 §5.7). A run another replica made within half an interval is skipped. A refusal
+// is logged and retried at the next interval: Organization Control answers 403 until it admits a
+// consumer on the route for its own consumer_id, and the projection drift runbook's operator run stays
+// the manual path meanwhile.
+func scheduleSelfReconcile(ctx context.Context, self *tenantcontext.SelfReconciler, interval time.Duration,
+	logger *slog.Logger) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		run, err := self.Run(ctx)
+		switch {
+		case errors.Is(err, tenantcontext.ErrNotDue):
+			logger.Debug("the consumer's reconciliation skipped; another replica sent it within half an interval")
+		case errors.Is(err, organization.ErrRefused):
+			logger.Warn("Organization Control refused this consumer's reconciliation report (403); it is sent again at "+
+				"the next interval, and an operator can reconcile by hand (docs/runbooks/projection-drift-repair.md)",
+				slog.String("run_id", run.RunID.String()), slog.String("error", err.Error()))
+		case err != nil && ctx.Err() == nil:
+			logger.Error("the consumer's reconciliation failed", slog.String("run_id", run.RunID.String()),
+				slog.String("error", err.Error()))
+		case err == nil:
+			attrs := []slog.Attr{slog.String("run_id", run.RunID.String()), slog.String("outcome", run.Outcome),
+				slog.Int64("mark", run.Mark), slog.Int("rows", run.Rows), slog.Int("findings", run.Findings),
+				slog.Int("extra", run.Extra)}
+			level := slog.LevelInfo
+			if run.Findings > 0 {
+				level = slog.LevelWarn
+			}
+			logger.LogAttrs(ctx, level, "the consumer reconciled itself with Organization Control", attrs...)
 		}
 		select {
 		case <-ctx.Done():
