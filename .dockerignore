@@ -17,9 +17,16 @@ cov-src
 *.pem
 **/*.pem
 
+# A host's Compose override holds that host's values; a local token file holds a credential.
+**/compose.override.yaml
+.token
+
 # The sibling repositories deploy-dev checks out into this workspace (identity-kernel as .kernel,
 # identity-experience as .experience), and the image scan's working directory. None is built here,
 # and the kernel's checkout holds its signing keystore readable by its owner alone.
 .kernel/
 .experience/
 .image-scan/
+
+# The scratch build context of scripts/check-dockerignore.sh.
+.dockerignore-check.*
