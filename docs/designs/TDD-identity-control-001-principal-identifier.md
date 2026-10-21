@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-001
   title: Canonical Principal Identifier and Creation Path
   owner: Core Platform Team
-  version: 1.25.0
+  version: 1.26.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -141,10 +141,11 @@ Prohibited paths are closed by realm configuration rather than by policy alone. 
 reconciler treats any Principal that appears without a mapping as evidence that a
 prohibited path is open, and quarantines it.
 
-#### Enrolment From an Invitation (planned)
+#### Enrolment From an Invitation (resolve client built; the rest planned)
 
 1.24.0, `ADR-IAM-011` (accepted 2026-10-20) §5.1 to §5.6. **Planned, not built** (`ROADMAP.md` item
-17). A person invited to a Tenant who holds no account creates one from the invitation, after proving
+17), except the resolve client, built in 1.26.0. The routes, the table, the code and the temporary
+password wait on the three open questions at the end of this section. A person invited to a Tenant who holds no account creates one from the invitation, after proving
 the invited address. It is a third authorized creation path, beside the ceremony and
 `POST /v1/principals`, and it creates the Principal through the ordinary path's code, so the mapping,
 recovery and the sweep are the same.
@@ -166,7 +167,7 @@ recovery and the sweep are the same.
 - **The enrolment record**: the invitation, the address's hash, the Principal created and when. The
   first password binding is notified (`ADR-IAM-007 §5.1`). Nothing else is granted: the person accepts
   the invitation afterwards, signed in, as `ADR-ORG-007 §5.1` decides (§5.4).
-- **The resolve client (1.25.0, `ADR-IAM-011` §5.7 as amended 2026-10-21).** This service reaches
+- **The resolve client (1.25.0, `ADR-IAM-011` §5.7 as amended 2026-10-21; built in 1.26.0).** This service reaches
   the route as a registered workload, admitted from a registry row, not from a scope or a `client_id`.
   Organization Control's reporter registry gains an `invitation:resolve` entry for this workload's
   `principal_id`, and that entry reaches the resolve route alone. It is not this service's consumer
@@ -177,7 +178,46 @@ recovery and the sweep are the same.
   forwards it, so its own answer stays the `202` above. Each call is recorded by Organization Control
   with the entry's purpose, `invitation:resolve` (NIST AU-3). The client's own limits per invitation and
   per client address bound the calls (§5.2).
-- **Waits on**: organization-control's resolve route (ROADMAP item 56 there), identity-experience's enrolment page, and in
+- **The resolve call, as built (1.26.0, §5.7 (a) and (b)).** `internal/organization`
+  `ResolveInvitation` sends `POST {IDENTITY_ORGANIZATION_BASE_URL}/v1/invitations/resolve` with this
+  service's workload token (the clientauth source the consumer routes use, `identity-control-workload`,
+  audience `organization-control-api`) and `{"token":"..."}` as the JSON body. The token is never in
+  the path or the query. It sends no `Idempotency-Key`: the call changes nothing. Neither the token nor
+  the address is logged or put in an error. It has four outcomes:
+  - `200` with `invitation_id` (a UUID, not nil) and `target_identifier` (not empty): the invitation.
+    Any other `200` body is an error.
+  - `404` with the problem type `invitation-not-acceptable`, and `400` with `validation-failed` (a
+    malformed token): "nothing", with no error. To the enrolment command a malformed token is an
+    unknown one, and its answer is the `202` of §5.1 either way. A `404` or `400` with any other type
+    is an error: a missing route is not an unknown invitation.
+  - `403`: this workload holds no active `invitation:resolve` entry there. An error, `ErrRefused`, a
+    misconfiguration.
+  - `401`, `5xx` or a transport failure: an error, since unknown is not no. A `401` drops the cached
+    token, so the next call presents a fresh one, as on the consumer routes; it does not retry.
+  The `invitation:resolve` entry is registered in organization-control, not here: its
+  `scripts/dev-wire.ps1` registers it in development (`ADR-ORG-001` §5.11).
+- **Open questions (2026-10-21).** `ADR-IAM-011` leaves three points undecided, so the routes, the
+  table, the code and the temporary password are not built until the architecture decides them:
+  - **Q1, §5.2 "rate-limited per invitation and per client address".** No limits or windows are
+    given. This service cannot see the client address: identity-experience's BFF sets
+    `trustProxy: false` and drops `x-forwarded-for` from every upstream request (identity-experience `bff/src/server.ts`,
+    `bff/src/api/proxy.ts`), and the route is
+    anonymous, so a forwarded address from an unauthenticated caller could not be trusted. Needs the
+    limit values and windows, and how the client address reaches this service (for example an
+    authenticated BFF that forwards it, RFC 7239).
+  - **Q2, §5.1 and §5.3.** §5.1 covers only "an address a Principal already holds proven". An address
+    held but not proven is undecided: a provider-created Principal's creation address, which is the
+    kernel user's email. The realm sets `duplicateEmailsAllowed: false` (identity-kernel
+    `realm/scnehaux.json`), so the kernel would refuse the
+    new user at `:verify` after the code was proven, and leave a pending mapping that recovery cannot
+    complete. The same holds for a kernel username already equal to the lower-cased address. Needs:
+    whether any held address, proven or not, and any existing kernel username or email gets the "sign
+    in instead" answer, or something else.
+  - **Q3, `STD-IAM-001` §3.1 (2.8.0).** Its one exception covers a temporary password "shown once to
+    a provider". §5.6 and §7 of the ADR say the standard gains the enrolling person as a second
+    recipient, but that amendment is not on scnehaux-architecture main yet. Until it is, `:verify`
+    showing the password to the person is not covered by the standard.
+- **Waits on**: Q1 to Q3 above, organization-control's resolve route (ROADMAP item 56 there), identity-experience's enrolment page, and in
   production the Notification Platform (§5.5, §5.6). The route classes, the table and the problem
   types are designed when it is built.
 
@@ -1666,7 +1706,8 @@ not pulled.
 | Conforms to | ADR-IAM-011 §5.7 (amended 2026-10-21) — the resolve client is a registered workload with an `invitation:resolve` entry (§Enrolment From an Invitation) |
 | Conforms to | ADR-GLB-004 §5.1 items 1 to 3 — integrity, the destructive-statement gate (squawk after the cutover, the text match before it and for `TRUNCATE`) and synchronisation (1.24.0) |
 | Conforms to | STD-IAM-001 2.10.0 §3.10, ADR-IAM-001 §5.11 as amended 2026-10-20 — the reviewer is the one person served before the bootstrap review; every orphan adopted or triaged before a new Principal (1.24.0) |
-| Plans | ADR-IAM-011 §5.1 to §5.6 — enrolment from an invitation, a third creation path, not built (1.24.0) |
+| Conforms to | ADR-IAM-011 §5.7 (a) and (b) — the resolve client is built: the token in the body, the one `404` read as "nothing" (1.26.0) |
+| Plans | ADR-IAM-011 §5.1 to §5.6 — enrolment from an invitation, a third creation path, not built (1.24.0); waits on open questions Q1 to Q3 (1.26.0) |
 
 ### Open Proof-of-Concept Questions
 

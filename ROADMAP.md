@@ -845,6 +845,20 @@ from; an open one says what it waits on.
       entry in organization-control (its ROADMAP item 56), signed in with its own key in development
       too, never by its consumer registration. It treats the route's one `404` as "nothing" and never
       forwards it. Registering the workload is part of this item.
+    - ✅ **Resolve client built 2026-10-21** (TDD-001 1.26.0 §Enrolment From an Invitation, ADR-IAM-011
+      §5.7 (a)(b)): `internal/organization` `ResolveInvitation` sends the token in the JSON body as this
+      service's workload, reads `200` as the invitation, `404` invitation-not-acceptable and `400`
+      validation-failed as "nothing", `403` as `ErrRefused`, and anything else as an error. The
+      `invitation:resolve` entry is registered by organization-control (its `scripts/dev-wire.ps1` in
+      development).
+    - ⏳ **Open questions, recorded 2026-10-21.** The two routes, the enrolment table, the code and the
+      temporary password are not built until the architecture decides:
+      - Q1, ADR-IAM-011 §5.2: the rate-limit values and windows, and how the client address reaches
+        this service (identity-experience's BFF drops `x-forwarded-for`, and the route is anonymous).
+      - Q2, ADR-IAM-011 §5.1 and §5.3: what an address held but not proven, or an existing kernel
+        username or email, answers (the realm refuses duplicate emails at `:verify`).
+      - Q3, STD-IAM-001 §3.1 (2.8.0): the temporary password shown to the enrolling person needs the
+        amendment ADR-IAM-011 §5.6 and §7 name, not on scnehaux-architecture main yet.
 18. ⏳ **3b in `deploy-dev`: an `external` test registration and a live consent withdrawal**
     (STD-IAM-002 1.9.0 §3.6, ADR-IAM-003 §5.11, TDD-005 2.13.0). Recorded 2026-10-20. Today the smoke
     lists the bootstrap operator's consents, and the list is empty. Waits on identity-kernel marking

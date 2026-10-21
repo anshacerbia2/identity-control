@@ -1,9 +1,11 @@
 // Package organization is this service's client of Organization Control, as the projection consumer
 // of its provider:identity-control grants (TDD-identity-control-006).
 //
-// It calls the consumer routes only -- the provider authority snapshot, the bootstrap mark, progress
-// and the frontier -- as this service's workload, with an access token from foundation-platform's
-// clientauth. It is the one declared cross-domain call this repository makes (arch.json).
+// It calls the consumer routes -- the provider authority snapshot, the bootstrap mark, progress, the
+// frontier and reconcile -- and the invitation resolve route (ADR-IAM-011 §5.7,
+// TDD-identity-control-001 1.26.0 §Enrolment From an Invitation), as this service's workload, with an
+// access token from foundation-platform's clientauth. It is the one declared cross-domain call this
+// repository makes (arch.json).
 package organization
 
 import (
@@ -19,6 +21,7 @@ import (
 	"time"
 
 	"github.com/anshacerbia2/foundation-platform/clientauth"
+	"github.com/anshacerbia2/foundation-platform/id"
 
 	"github.com/anshacerbia2/identity-control/internal/providerauthority"
 	"github.com/anshacerbia2/identity-control/internal/tenantcontext"
@@ -97,21 +100,40 @@ const maxResponse = 8 << 20
 // call sends one request as this service's workload and decodes a 2xx body into out. A 401 drops
 // the cached token, so the next call presents a fresh one.
 func (c *Client) call(ctx context.Context, method, path string, body, out any) error {
+	status, raw, err := c.exchange(ctx, method, path, body)
+	if err != nil {
+		return err
+	}
+	if err := refusal(method, path, status); err != nil {
+		return err
+	}
+	if out == nil {
+		return nil
+	}
+	if err := json.Unmarshal(raw, out); err != nil {
+		return fmt.Errorf("organization: decoding %s %s: %w", method, path, err)
+	}
+	return nil
+}
+
+// exchange sends one request as this service's workload and returns the status and the bounded
+// body. A 401 drops the cached token, so the next call presents a fresh one.
+func (c *Client) exchange(ctx context.Context, method, path string, body any) (int, []byte, error) {
 	var encoded io.Reader
 	if body != nil {
 		raw, err := json.Marshal(body)
 		if err != nil {
-			return fmt.Errorf("organization: encoding the request: %w", err)
+			return 0, nil, fmt.Errorf("organization: encoding the request: %w", err)
 		}
 		encoded = bytes.NewReader(raw)
 	}
 	token, err := c.tokens.Token(ctx)
 	if err != nil {
-		return fmt.Errorf("organization: obtaining the workload token: %w", err)
+		return 0, nil, fmt.Errorf("organization: obtaining the workload token: %w", err)
 	}
 	request, err := http.NewRequestWithContext(ctx, method, c.base+path, encoded)
 	if err != nil {
-		return fmt.Errorf("organization: building the request: %w", err)
+		return 0, nil, fmt.Errorf("organization: building the request: %w", err)
 	}
 	request.Header.Set("Authorization", "Bearer "+token)
 	request.Header.Set("Accept", "application/json")
@@ -120,29 +142,28 @@ func (c *Client) call(ctx context.Context, method, path string, body, out any) e
 	}
 	response, err := c.http.Do(request)
 	if err != nil {
-		return fmt.Errorf("organization: %s %s: %w", method, path, err)
+		return 0, nil, fmt.Errorf("organization: %s %s: %w", method, path, err)
 	}
 	defer func() { _ = response.Body.Close() }()
 	raw, err := io.ReadAll(io.LimitReader(response.Body, maxResponse))
 	if err != nil {
-		return fmt.Errorf("organization: reading %s %s: %w", method, path, err)
+		return 0, nil, fmt.Errorf("organization: reading %s %s: %w", method, path, err)
 	}
 	if response.StatusCode == http.StatusUnauthorized {
 		c.tokens.Invalidate()
 	}
-	if response.StatusCode == http.StatusForbidden {
+	return response.StatusCode, raw, nil
+}
+
+// refusal is the error a status other than 2xx is: ErrRefused for a 403, the status otherwise.
+func refusal(method, path string, status int) error {
+	if status == http.StatusForbidden {
 		return fmt.Errorf("organization: %s %s answered 403: %w", method, path, ErrRefused)
 	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
+	if status < 200 || status >= 300 {
 		// The body is a problem document from Organization Control, naming no secret; its title is
 		// enough for an operator, and the status says which way to look.
-		return fmt.Errorf("organization: %s %s answered %d", method, path, response.StatusCode)
-	}
-	if out == nil {
-		return nil
-	}
-	if err := json.Unmarshal(raw, out); err != nil {
-		return fmt.Errorf("organization: decoding %s %s: %w", method, path, err)
+		return fmt.Errorf("organization: %s %s answered %d", method, path, status)
 	}
 	return nil
 }
@@ -284,4 +305,79 @@ func (c *Client) Reconcile(ctx context.Context, report tenantcontext.Report) (te
 		return tenantcontext.ReconcileResult{}, err
 	}
 	return result, nil
+}
+
+// Invitation is what Organization Control's resolve route answers for one pending, unexpired
+// invitation: its identifier and the address it was sent to. It names no Tenant (ADR-IAM-011 §5.7).
+type Invitation struct {
+	ID      id.UUID
+	Address string
+}
+
+const resolvePath = "/v1/invitations/resolve"
+
+// The problem types the resolve route answers when there is no invitation to give
+// (TDD-identity-control-001 1.26.0 §Enrolment From an Invitation).
+const (
+	problemNotAcceptable    = "https://problems.scnehaux.com/invitation-not-acceptable"
+	problemValidationFailed = "https://problems.scnehaux.com/validation-failed"
+)
+
+type resolveRequest struct {
+	Token string `json:"token"`
+}
+
+type resolveResponse struct {
+	InvitationID     string `json:"invitation_id"`
+	TargetIdentifier string `json:"target_identifier"`
+}
+
+type problem struct {
+	Type string `json:"type"`
+}
+
+// ResolveInvitation asks Organization Control, as this service's workload, which invitation a token
+// names (ADR-IAM-011 §5.7 (a) and (b)). The token travels in the JSON body only, never in the path or
+// the query, and neither it nor the address is put in an error. The call changes nothing, so it sends
+// no Idempotency-Key.
+//
+// found is false with no error for the route's one 404 (an unknown, expired, revoked or accepted
+// token) and for its 400 (a malformed token): to the enrolment command both are an unknown token. A
+// 404 or 400 of any other problem type is an error, since a missing route is not an unknown
+// invitation. A 403 is ErrRefused: this workload holds no active invitation:resolve entry there. A
+// 401 drops the cached token, as on the consumer routes, and is an error; so is any other status.
+func (c *Client) ResolveInvitation(ctx context.Context, token string) (Invitation, bool, error) {
+	status, raw, err := c.exchange(ctx, http.MethodPost, resolvePath, resolveRequest{Token: token})
+	if err != nil {
+		return Invitation{}, false, err
+	}
+	switch status {
+	case http.StatusNotFound, http.StatusBadRequest:
+		var got problem
+		_ = json.Unmarshal(raw, &got)
+		if (status == http.StatusNotFound && got.Type == problemNotAcceptable) ||
+			(status == http.StatusBadRequest && got.Type == problemValidationFailed) {
+			return Invitation{}, false, nil
+		}
+		return Invitation{}, false, fmt.Errorf("organization: POST %s answered %d without its problem type", resolvePath, status)
+	case http.StatusOK:
+	default:
+		if err := refusal(http.MethodPost, resolvePath, status); err != nil {
+			return Invitation{}, false, err
+		}
+		// Only a 200 carries an invitation; another 2xx is not the contract.
+		return Invitation{}, false, fmt.Errorf("organization: POST %s answered %d", resolvePath, status)
+	}
+	var got resolveResponse
+	if err := json.Unmarshal(raw, &got); err != nil {
+		return Invitation{}, false, fmt.Errorf("organization: decoding POST %s: %w", resolvePath, err)
+	}
+	invitation, err := id.Parse(got.InvitationID)
+	if err != nil || invitation.IsNil() {
+		return Invitation{}, false, fmt.Errorf("organization: POST %s answered no invitation_id", resolvePath)
+	}
+	if strings.TrimSpace(got.TargetIdentifier) == "" {
+		return Invitation{}, false, fmt.Errorf("organization: POST %s answered no target_identifier", resolvePath)
+	}
+	return Invitation{ID: invitation, Address: got.TargetIdentifier}, true, nil
 }

@@ -38,6 +38,8 @@ func (t *tokens) Invalidate() {
 // request is what the stand-in received.
 type request struct {
 	method, path, authorization string
+	query, idempotencyKey       string
+	contentType                 string
 	body                        map[string]any
 }
 
@@ -49,7 +51,8 @@ type standIn struct {
 
 func (s *standIn) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	raw, _ := io.ReadAll(r.Body)
-	got := request{method: r.Method, path: r.URL.Path, authorization: r.Header.Get("Authorization")}
+	got := request{method: r.Method, path: r.URL.Path, authorization: r.Header.Get("Authorization"),
+		query: r.URL.RawQuery, idempotencyKey: r.Header.Get("Idempotency-Key"), contentType: r.Header.Get("Content-Type")}
 	if len(raw) > 0 {
 		_ = json.Unmarshal(raw, &got.body)
 	}
@@ -321,5 +324,139 @@ func TestReconcileSendsTheReportAsThisConsumer(t *testing.T) {
 	other.ConsumerID = "foundation-reference"
 	if _, err := c.Reconcile(context.Background(), other); err == nil || len(s.received) != 1 {
 		t.Errorf("a report for another consumer: %v, %d requests sent", err, len(s.received))
+	}
+}
+
+const invitationToken = "inv-token-0123456789abcdef"
+
+func problemAnswer(status int, kind string) func(w http.ResponseWriter, r request) {
+	return func(w http.ResponseWriter, r request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(`{"type":"` + kind + `","title":"t","status":0}`))
+	}
+}
+
+// A pending invitation is read from a 200, and the token travels in the body only, as this service's
+// workload, with no Idempotency-Key (ADR-IAM-011 §5.7, TDD-identity-control-001 1.26.0).
+func TestResolveInvitationSendsTheTokenInTheBody(t *testing.T) {
+	invitation := mustID(t)
+	c, s, _ := client(t, func(w http.ResponseWriter, r request) {
+		w.Header().Set("Cache-Control", "no-store")
+		respond(w, map[string]string{"invitation_id": invitation.String(), "target_identifier": "invitee@example.test"})
+	})
+	got, found, err := c.ResolveInvitation(context.Background(), invitationToken)
+	if err != nil || !found {
+		t.Fatalf("a pending invitation read as found=%v, %v", found, err)
+	}
+	if got.ID != invitation || got.Address != "invitee@example.test" {
+		t.Errorf("read %+v", got)
+	}
+	if len(s.received) != 1 {
+		t.Fatalf("%d requests; want 1", len(s.received))
+	}
+	r := s.received[0]
+	if r.method != http.MethodPost || r.path != "/v1/invitations/resolve" {
+		t.Errorf("resolved with %s %s", r.method, r.path)
+	}
+	if r.body["token"] != invitationToken || len(r.body) != 1 {
+		t.Errorf("the body was %v", r.body)
+	}
+	if strings.Contains(r.path, invitationToken) || strings.Contains(r.query, invitationToken) || r.query != "" {
+		t.Errorf("the token reached the URL: path %q query %q", r.path, r.query)
+	}
+	if r.authorization != "Bearer workload-token" {
+		t.Errorf("authorization was %q", r.authorization)
+	}
+	if r.contentType != "application/json" {
+		t.Errorf("content type was %q", r.contentType)
+	}
+	if r.idempotencyKey != "" {
+		t.Errorf("an Idempotency-Key %q was sent; the call changes nothing", r.idempotencyKey)
+	}
+}
+
+// The route's one 404 and its 400 are "nothing", with no error.
+func TestResolveInvitationReadsNotAcceptableAndMalformedAsNothing(t *testing.T) {
+	for _, answer := range []struct {
+		status int
+		kind   string
+	}{
+		{http.StatusNotFound, "https://problems.scnehaux.com/invitation-not-acceptable"},
+		{http.StatusBadRequest, "https://problems.scnehaux.com/validation-failed"},
+	} {
+		c, _, _ := client(t, problemAnswer(answer.status, answer.kind))
+		got, found, err := c.ResolveInvitation(context.Background(), invitationToken)
+		if err != nil || found || got != (organization.Invitation{}) {
+			t.Errorf("a %d read as %+v, found=%v, %v", answer.status, got, found, err)
+		}
+	}
+}
+
+// Unknown is not no: every other answer is an error, and none names the token or the address.
+func TestResolveInvitationErrors(t *testing.T) {
+	for name, answer := range map[string]func(w http.ResponseWriter, r request){
+		"a 404 of another type": problemAnswer(http.StatusNotFound, "https://problems.scnehaux.com/not-found"),
+		"a bare 404":            func(w http.ResponseWriter, r request) { w.WriteHeader(http.StatusNotFound) },
+		"a 400 of another type": problemAnswer(http.StatusBadRequest, "https://problems.scnehaux.com/internal"),
+		"a 500":                 problemAnswer(http.StatusInternalServerError, "https://problems.scnehaux.com/internal"),
+		"a 204":                 func(w http.ResponseWriter, r request) { w.WriteHeader(http.StatusNoContent) },
+		"a body that is not JSON": func(w http.ResponseWriter, r request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte("invitee@example.test"))
+		},
+		"no invitation_id": func(w http.ResponseWriter, r request) {
+			respond(w, map[string]string{"target_identifier": "invitee@example.test"})
+		},
+		"a nil invitation_id": func(w http.ResponseWriter, r request) {
+			respond(w, map[string]string{"invitation_id": "00000000-0000-0000-0000-000000000000", "target_identifier": "invitee@example.test"})
+		},
+		"an invitation_id that is not a UUID": func(w http.ResponseWriter, r request) {
+			respond(w, map[string]string{"invitation_id": "invitee@example.test", "target_identifier": "invitee@example.test"})
+		},
+		"no target_identifier": func(w http.ResponseWriter, r request) {
+			respond(w, map[string]string{"invitation_id": mustID(t).String(), "target_identifier": " "})
+		},
+	} {
+		c, _, _ := client(t, answer)
+		_, found, err := c.ResolveInvitation(context.Background(), invitationToken)
+		if err == nil || found {
+			t.Errorf("%s read as found=%v, %v", name, found, err)
+			continue
+		}
+		if errors.Is(err, organization.ErrRefused) {
+			t.Errorf("%s read as a refusal", name)
+		}
+		if strings.Contains(err.Error(), invitationToken) || strings.Contains(err.Error(), "invitee@example.test") {
+			t.Errorf("%s put the token or the address in %q", name, err)
+		}
+	}
+}
+
+// A 403 is the workload's missing invitation:resolve entry, ErrRefused; a 401 drops the cached token
+// and is an error, as on the consumer routes, with no retry.
+func TestResolveInvitationRefusalAnd401(t *testing.T) {
+	status := http.StatusForbidden
+	c, s, tk := client(t, func(w http.ResponseWriter, r request) {
+		problemAnswer(status, "https://problems.scnehaux.com/forbidden")(w, r)
+	})
+	ctx := context.Background()
+	if _, found, err := c.ResolveInvitation(ctx, invitationToken); found || !errors.Is(err, organization.ErrRefused) {
+		t.Errorf("a 403 read as found=%v, %v", found, err)
+	}
+	if tk.invalidated != 0 {
+		t.Error("a 403 invalidated the token")
+	}
+
+	status = http.StatusUnauthorized
+	_, found, err := c.ResolveInvitation(ctx, invitationToken)
+	if found || err == nil || errors.Is(err, organization.ErrRefused) || !strings.Contains(err.Error(), "401") {
+		t.Errorf("a 401 read as found=%v, %v", found, err)
+	}
+	if tk.invalidated != 1 {
+		t.Errorf("a 401 invalidated the token %d times; want 1", tk.invalidated)
+	}
+	if len(s.received) != 2 {
+		t.Errorf("%d requests for two calls; a 401 is not retried", len(s.received))
 	}
 }
