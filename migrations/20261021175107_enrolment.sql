@@ -18,6 +18,29 @@ CREATE TABLE "enrolment_count" (
 CREATE INDEX "enrolment_count_window" ON "enrolment_count" ("window_ends_at");
 -- Set comment to table: "enrolment_count"
 COMMENT ON TABLE "enrolment_count" IS 'Enrolment rate-limit counts by keyed hash and rule, deleted when their window ends. ADR-IAM-011 §5.8.';
+-- Create "enrolment_message" table
+CREATE TABLE "enrolment_message" (
+  "message_id" uuid NOT NULL,
+  "enrolment_id" uuid NULL,
+  "kind" text NOT NULL,
+  "address" text NULL,
+  "sealed_secret" text NULL,
+  "state" text NOT NULL DEFAULT 'requested',
+  "attempts" integer NOT NULL DEFAULT 0,
+  "next_attempt_at" timestamptz NOT NULL DEFAULT now(),
+  "platform_ref" text NULL,
+  "last_error" text NULL,
+  "requested_at" timestamptz NOT NULL DEFAULT now(),
+  "submitted_at" timestamptz NULL,
+  PRIMARY KEY ("message_id"),
+  CONSTRAINT "enrolment_message_held_check" CHECK ((state = 'requested'::text) = (address IS NOT NULL)),
+  CONSTRAINT "enrolment_message_kind_check" CHECK (((kind = 'code'::text) AND (enrolment_id IS NOT NULL)) OR ((kind = 'account_exists'::text) AND (enrolment_id IS NULL))),
+  CONSTRAINT "enrolment_message_state_check" CHECK (state = ANY (ARRAY['requested'::text, 'submitted'::text, 'failed'::text]))
+);
+-- Create index "enrolment_message_due" to table: "enrolment_message"
+CREATE INDEX "enrolment_message_due" ON "enrolment_message" ("next_attempt_at") WHERE (state = 'requested'::text);
+-- Set comment to table: "enrolment_message"
+COMMENT ON TABLE "enrolment_message" IS 'Each enrolment message to an invited address, until handed over. ADR-IAM-011, TDD-identity-control-001 1.27.0.';
 -- Create "enrolment" table
 CREATE TABLE "enrolment" (
   "enrolment_id" uuid NOT NULL,
@@ -35,7 +58,6 @@ CREATE TABLE "enrolment" (
   "created_at" timestamptz NOT NULL DEFAULT now(),
   "closed_at" timestamptz NULL,
   PRIMARY KEY ("enrolment_id"),
-  CONSTRAINT "enrolment_issuance_id_fkey" FOREIGN KEY ("issuance_id") REFERENCES "temporary_password_issuance" ("issuance_id") ON UPDATE NO ACTION ON DELETE NO ACTION,
   CONSTRAINT "enrolment_principal_id_fkey" FOREIGN KEY ("principal_id") REFERENCES "principal_mapping" ("principal_id") ON UPDATE NO ACTION ON DELETE NO ACTION,
   CONSTRAINT "enrolment_attempts_check" CHECK ((attempts >= 0) AND (attempts <= 5)),
   CONSTRAINT "enrolment_completed_names_principal" CHECK ((state = 'completed'::text) = ((principal_id IS NOT NULL) AND (issuance_id IS NOT NULL))),
@@ -63,30 +85,6 @@ CREATE TABLE "enrolment_caller" (
 );
 -- Set comment to table: "enrolment_caller"
 COMMENT ON TABLE "enrolment_caller" IS 'Workloads admitted to POST /v1/enrolments and :verify. ADR-IAM-011 §5.8, TDD-identity-control-001 1.27.0.';
--- Create "enrolment_message" table
-CREATE TABLE "enrolment_message" (
-  "message_id" uuid NOT NULL,
-  "enrolment_id" uuid NULL,
-  "kind" text NOT NULL,
-  "address" text NULL,
-  "sealed_secret" text NULL,
-  "state" text NOT NULL DEFAULT 'requested',
-  "attempts" integer NOT NULL DEFAULT 0,
-  "next_attempt_at" timestamptz NOT NULL DEFAULT now(),
-  "platform_ref" text NULL,
-  "last_error" text NULL,
-  "requested_at" timestamptz NOT NULL DEFAULT now(),
-  "submitted_at" timestamptz NULL,
-  PRIMARY KEY ("message_id"),
-  CONSTRAINT "enrolment_message_enrolment_id_fkey" FOREIGN KEY ("enrolment_id") REFERENCES "enrolment" ("enrolment_id") ON UPDATE NO ACTION ON DELETE NO ACTION,
-  CONSTRAINT "enrolment_message_held_check" CHECK ((state = 'requested'::text) = (address IS NOT NULL)),
-  CONSTRAINT "enrolment_message_kind_check" CHECK (((kind = 'code'::text) AND (enrolment_id IS NOT NULL)) OR ((kind = 'account_exists'::text) AND (enrolment_id IS NULL))),
-  CONSTRAINT "enrolment_message_state_check" CHECK (state = ANY (ARRAY['requested'::text, 'submitted'::text, 'failed'::text]))
-);
--- Create index "enrolment_message_due" to table: "enrolment_message"
-CREATE INDEX "enrolment_message_due" ON "enrolment_message" ("next_attempt_at") WHERE (state = 'requested'::text);
--- Set comment to table: "enrolment_message"
-COMMENT ON TABLE "enrolment_message" IS 'Each enrolment message to an invited address, until handed over. ADR-IAM-011, TDD-identity-control-001 1.27.0.';
 
 -- The three evidence tables keep their rows for 7 years, as every audit table does (STD-GLB-007 1.3.0
 -- §Data Retention Lifecycle, migration 20261020200000). enrolment_count is not evidence: its rows are

@@ -3466,12 +3466,9 @@ table "enrolment" {
     on_update   = NO_ACTION
     on_delete   = NO_ACTION
   }
-  foreign_key "enrolment_issuance_id_fkey" {
-    columns     = [column.issuance_id]
-    ref_columns = [table.temporary_password_issuance.column.issuance_id]
-    on_update   = NO_ACTION
-    on_delete   = NO_ACTION
-  }
+  // issuance_id and the messages' enrolment_id name evidence rows without a foreign key: each table is
+  // kept and purged on its own retention, and a reference would make one table's TRUNCATE refusal reach
+  // into another's (the retention test truncates every audit table, CASCADE).
   // The open enrolments of one invitation: one at a time is the rule (§5.2), read under a lock.
   index "enrolment_invitation" {
     columns = [column.invitation_id, column.created_at]
@@ -3553,12 +3550,6 @@ table "enrolment_message" {
 
   primary_key {
     columns = [column.message_id]
-  }
-  foreign_key "enrolment_message_enrolment_id_fkey" {
-    columns     = [column.enrolment_id]
-    ref_columns = [table.enrolment.column.enrolment_id]
-    on_update   = NO_ACTION
-    on_delete   = NO_ACTION
   }
   index "enrolment_message_due" {
     columns = [column.next_attempt_at]

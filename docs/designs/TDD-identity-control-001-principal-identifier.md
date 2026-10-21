@@ -1405,7 +1405,7 @@ and its reviews, `ceremony_grant_retirement`, `principal_relink`, `principal_rel
 `workload_owner_change`, `workload_review`, `security_operation` and its attempts,
 `temporary_password_issuance` and `temporary_password_outcome`, `security_notification`, and, from
 1.27.0, `enrolment_caller`, `enrolment` and `enrolment_message` (`controldb.AuditTables`; their
-triggers are migration `20261021172637_enrolment`). An open enrolment, a message not handed over and a
+triggers are migration `20261021175107_enrolment`). An open enrolment, a message not handed over and a
 caller not retired are in force; `enrolment_count` is not evidence and is deleted when its window
 ends (§Enrolment From an Invitation). It holds no Tenant's data, so the Tenant decommissioning purge has nothing
 to delete here.
