@@ -47,6 +47,11 @@ func newPortability(t *testing.T) *portability {
 	}
 	t.Cleanup(pool.Close)
 	if err := pool.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		// The audit tables refuse a young record's delete to every role; a test's own rows are
+		// removed with the triggers off, a superuser's setting for this transaction alone.
+		if _, err := tx.Exec(ctx, `SET LOCAL session_replication_role = replica`); err != nil {
+			return err
+		}
 		for _, statement := range []string{
 			`DELETE FROM identity.principal_adoption WHERE realm = $1`,
 			`DELETE FROM identity.principal_finding WHERE realm = $1`,

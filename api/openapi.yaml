@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Identity Control API
-  version: 1.0.0
+  version: 1.1.0
   summary: The control plane of the Scnehaux Identity Runtime (SAD-001).
   description: |
     The HTTP contract of identity-control, published as a versioned artifact under ADR-GLB-010
@@ -39,6 +39,13 @@ info:
     classified in `internal/httpapi/commands.go`; a command without an `Idempotency-Key` is answered
     `400`. A retry with the same key and body answers the first answer. An administrative command
     also carries `X-Administrative-Reason`, visible US-ASCII (STD-GLB-001 §Request Header Values).
+
+    **Key retention** (STD-GLB-001 1.8.0, TDD-identity-control-003 §Key Retention). A completed
+    command's key, and the answer recorded with it, is kept 7 days from completion, then purged. A
+    retry after that is a new command. A key whose command has not completed is never purged. A
+    command that answers a secret, the temporary password of
+    `POST /v1/principals/{principal_id}:issue-temporary-password`, records its answer without the
+    secret, so a retry answers the issuance without the value (STD-GLB-001 1.7.0).
 
     **Errors** are RFC 9457 problem details from foundation-platform's closed registry. A client
     branches on `type`, never on `detail`.
@@ -2890,7 +2897,7 @@ components:
       name: Idempotency-Key
       in: header
       required: true
-      description: A value unique to this command, sent again unchanged when it is retried (STD-GLB-001 1.4.0).
+      description: A value unique to this command, sent again unchanged when it is retried. Kept 7 days from completion, then purged; a retry after that is a new command (STD-GLB-001 1.8.0).
       schema:
         type: string
         minLength: 1
@@ -3783,14 +3790,26 @@ components:
 
     PublicJWK:
       type: object
-      description: One RSA public key of at least 3072 bits, as a JWK. A private member is refused.
+      description: |
+        One RSA public key of at least 3072 bits, as a JWK. A private member is refused, and so is any
+        member but these six (internal/registration/publickey.go). `use` and `alg` are optional; an
+        empty value is read as absent.
       required: [kty, n, e]
+      additionalProperties: false
       properties:
         kty:
           type: string
           const: RSA
         kid:
           type: string
+        use:
+          type: string
+          const: sig
+          description: For signatures, if the key names a use.
+        alg:
+          type: string
+          const: PS256
+          description: PS256, if the key names an algorithm (STD-IAM-001 §3.2).
         n:
           type: string
         e:

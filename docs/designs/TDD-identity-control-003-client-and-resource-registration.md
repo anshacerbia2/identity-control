@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-003
   title: Protocol Client and Protected-Resource Registration
   owner: Core Platform Team
-  version: 1.39.0
+  version: 1.40.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -429,6 +429,15 @@ A confidential or workload client authenticates with `private_key_jwt` (`ADR-IAM
 `STD-IAM-001 §3.2`). The client generates its key pair and keeps the private key. This
 table records the public keys registered for it:
 
+**One registration per device (1.40.0).** `ADR-IAM-001 §5.12`, amended 2026-10-20: "A registration
+holds one active key, and a second only while a rotation overlaps. Concurrent instances that do not
+share custody, such as two developer devices, are separate registrations, each with its own single
+active key". `STD-GLB-009` 1.10.0 rule 15 applies it to a laptop-run BFF. The schema already holds
+one `active` key and at most one `retiring` key per registration; nothing here changes. A second
+device registers its own client (`deploy/dev/README.md` §Several developer devices). A key submitted
+as a JWK may carry `kty`, `kid`, `use` (`sig`), `alg` (`PS256`), `n` and `e` and nothing else, which
+`api/openapi.yaml`'s `PublicJWK` publishes from 1.1.0.
+
 ```sql
 CREATE TABLE identity.client_key (
     key_id          UUID        PRIMARY KEY,
@@ -693,7 +702,10 @@ The calls this service makes to Organization Control are keyOptional there: the 
 
 **A completed command's `Idempotency-Key`, and the answer recorded with it, is kept 7 days, then
 purged.** This is the window this service publishes, as `STD-GLB-001` 1.7.0 requires of each service;
-the owner approved 7 days on 2026-10-21. It covers every key in `platform.idempotency_key`, the ones a
+the owner approved 7 days on 2026-10-21, and `STD-GLB-001` 1.8.0 records it for the estate: "The
+window is 7 days from completion". 1.40.0 publishes it where a client reads it, `api/openapi.yaml`
+(1.1.0): the `Idempotency-Key` parameter and the description's §Key retention, with the temporary
+password's exception (`STD-GLB-001` 1.7.0, a secret answered once is not in the idempotency record). It covers every key in `platform.idempotency_key`, the ones a
 service claims in the transaction of its effect and the ones `commands.go` replays, every scope.
 
 - **The rule it follows.** "The resource MAY require time based idempotency keys to be able to purge
@@ -2180,6 +2192,8 @@ compromised client key, expired client key recovery, and registration drift repa
 | Conforms to | STD-IAM-002 1.8.0 §3.3 — a lifetime-class change moves every caller's lifespan, approved in production by a second provider (1.37.0) |
 | Conforms to | STD-IAM-001 2.7.0 §3.4 — back-channel logout for a reachable server-side relying party, no front-channel logout (1.37.0) |
 | Conforms to | STD-IAM-002 1.7.0 §3.1.1 — a `privileged` registration names `provider-scope`, `tenant-scoped` or `per-sign-in` (1.32.0) |
+| Conforms to | STD-GLB-001 1.8.0 §Commands Require an `Idempotency-Key` — the 7-day window, published in `api/openapi.yaml` (1.40.0) |
+| Governed by | ADR-IAM-001 §5.12 as amended 2026-10-20, STD-GLB-009 1.10.0 rule 15 — one registration per developer device (1.40.0) |
 
 ### Open Questions
 

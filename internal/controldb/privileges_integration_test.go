@@ -24,6 +24,8 @@ import (
 	"time"
 
 	"github.com/anshacerbia2/foundation-platform/db"
+
+	"github.com/anshacerbia2/identity-control/internal/controldb"
 )
 
 const (
@@ -59,6 +61,29 @@ func queryBool(t *testing.T, pool *db.Pool, ctx context.Context, statement strin
 	var result bool
 	if err := pool.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
 		return tx.QueryRow(ctx, statement, args...).Scan(&result)
+	}); err != nil {
+		t.Fatalf("query %q: %v", statement, err)
+	}
+	return result
+}
+
+func queryStrings(t *testing.T, pool *db.Pool, ctx context.Context, statement string, args ...any) []string {
+	t.Helper()
+	var result []string
+	if err := pool.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		rows, err := tx.Query(ctx, statement, args...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var value string
+			if err := rows.Scan(&value); err != nil {
+				return err
+			}
+			result = append(result, value)
+		}
+		return rows.Err()
 	}); err != nil {
 		t.Fatalf("query %q: %v", statement, err)
 	}
@@ -677,10 +702,11 @@ func TestTheCeremonyReviewAndTheAdoptionAreInsertOnly(t *testing.T) {
 	}
 }
 
-// auditTables are this service's audit records in the sense of STD-GLB-007 1.1.0 §Data Retention:
+// auditTables are this service's audit records in the sense of STD-GLB-007 1.2.1 §Data Retention:
 // "Every audit record, privileged access included: a service's record of privileged access, its
 // reviews and its emergency uses". Each is a decision, an access or an outcome recorded with who
-// made it and why (TDD-identity-control-001 §Audit Retention).
+// made it and why (TDD-identity-control-001 §Audit Retention). TestTheAuditTableListsAgree holds this
+// list and controldb.AuditTables together.
 var auditTables = []string{
 	"identity.privileged_access",
 	"identity.provider_emergency_use",
@@ -707,14 +733,25 @@ var auditTables = []string{
 	"identity.security_notification",
 }
 
-// TestNoAuditRecordIsPurgedBeforeSevenYears is STD-GLB-007 1.1.0 §Compliance item 4 for this service:
-// audit logs are "Retained in immutable storage for `7 years`", and a record younger than 7 years is
-// never purged. This service purges none at all, so the runtime it serves with holds no DELETE and no
-// TRUNCATE on any audit table, asserted against the catalog. No migration and no production source
-// deletes from one either: TestNoSourceDeletesAnAuditRecord reads them. It holds no Tenant's data
-// either, so the Tenant decommissioning purge has nothing here to delete.
+// TestNoAuditRecordIsPurgedBeforeSevenYears is STD-GLB-007 1.2.1 §5 item 4 for this service, read from
+// the catalog: audit logs are "Retained in immutable storage for `7 years`", and a record younger than
+// 7 years is never purged (TDD-identity-control-001 1.24.0 §Audit Retention).
+//
+//   - The runtime holds no DELETE and no TRUNCATE on any audit table, by its own grants or inherited.
+//   - The purge role holds DELETE on exactly the tables the scheduled pass purges, and no INSERT, no
+//     UPDATE and no TRUNCATE anywhere. The runtime may become it and does not inherit it.
+//   - Every audit table carries its two retention triggers, and the schema holds no other trigger and
+//     no rewrite rule that could delete on anyone's behalf.
+//
+// TestAYoungAuditRecordIsNeverDeleted and TestTheAuditPurgeDeletesOnlyExpiredRecords prove the
+// behaviour; TestNoSourceDeletesAnAuditRecord reads the sources.
 func TestNoAuditRecordIsPurgedBeforeSevenYears(t *testing.T) {
 	pool, ctx := openPool(t)
+	const purgeRole = controldb.AuditPurgeRole
+	purged := map[string]bool{}
+	for _, table := range controldb.AuditTables {
+		purged[table.Name] = table.Purged
+	}
 	for _, table := range auditTables {
 		if !queryBool(t, pool, ctx, `SELECT to_regclass($1) IS NOT NULL`, table) {
 			t.Errorf("%s does not exist; the audit table list is stale", table)
@@ -725,13 +762,52 @@ func TestNoAuditRecordIsPurgedBeforeSevenYears(t *testing.T) {
 				t.Errorf("%s holds %s on %s; an audit record could be purged before its 7 years", runtimeRole, privilege, table)
 			}
 		}
+		if got := queryBool(t, pool, ctx, `SELECT has_table_privilege($1, $2, 'DELETE')`, purgeRole, table); got != purged[table] {
+			t.Errorf("%s holds DELETE on %s: %v, want %v (controldb.AuditTables)", purgeRole, table, got, purged[table])
+		}
 	}
-	// A rule or trigger could delete on the runtime's behalf.
+	// Nothing but the purge's deletes, on any table of either schema.
+	for _, privilege := range []string{"INSERT", "UPDATE", "TRUNCATE", "REFERENCES", "TRIGGER"} {
+		if n := queryInt(t, pool, ctx, `SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+			WHERE n.nspname IN ('identity', 'platform') AND c.relkind IN ('r', 'p')
+			  AND has_table_privilege($1, c.oid, $2)`, purgeRole, privilege); n != 0 {
+			t.Errorf("%s holds %s on %d table(s); it is allowed only the purge's delete", purgeRole, privilege, n)
+		}
+	}
+	if n := queryInt(t, pool, ctx, `SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE n.nspname = 'platform' AND c.relkind IN ('r', 'p') AND has_table_privilege($1, c.oid, 'SELECT')`, purgeRole); n != 0 {
+		t.Errorf("%s reads %d platform table(s); it reads only the audit columns it purges by", purgeRole, n)
+	}
+	for _, attribute := range []string{"rolsuper", "rolbypassrls", "rolcreatedb", "rolcreaterole", "rolreplication", "rolcanlogin"} {
+		if queryBool(t, pool, ctx, `SELECT `+attribute+` FROM pg_roles WHERE rolname = $1`, purgeRole) {
+			t.Errorf("%s holds %s", purgeRole, attribute)
+		}
+	}
+	// pg_has_role's MEMBER follows inheritance, SET the right to SET ROLE.
+	if !queryBool(t, pool, ctx, `SELECT pg_has_role($1, $2, 'SET')`, runtimeRole, purgeRole) {
+		t.Errorf("%s cannot SET ROLE %s; the scheduled purge cannot run", runtimeRole, purgeRole)
+	}
+	if queryBool(t, pool, ctx, `SELECT pg_has_role($1, $2, 'USAGE')`, runtimeRole, purgeRole) {
+		t.Errorf("%s inherits %s; it would hold DELETE on the audit tables outside the purge", runtimeRole, purgeRole)
+	}
+	// A rule could delete on the runtime's behalf, and so could a trigger other than the retention ones.
 	if n := queryInt(t, pool, ctx, `SELECT count(*) FROM pg_rules WHERE schemaname = 'identity'`); n != 0 {
 		t.Errorf("the identity schema holds %d rewrite rules; none is expected", n)
 	}
-	if n := queryInt(t, pool, ctx, `SELECT count(*) FROM pg_trigger tg JOIN pg_class c ON c.oid = tg.tgrelid
-		JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'identity' AND NOT tg.tgisinternal`); n != 0 {
-		t.Errorf("the identity schema holds %d triggers; none is expected", n)
+	want := map[string]bool{}
+	for _, table := range auditTables {
+		name := strings.TrimPrefix(table, "identity.")
+		want[name+"_retention"], want[name+"_no_truncate"] = true, true
+	}
+	rows := queryStrings(t, pool, ctx, `SELECT tg.tgname FROM pg_trigger tg JOIN pg_class c ON c.oid = tg.tgrelid
+		JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'identity' AND NOT tg.tgisinternal`)
+	for _, name := range rows {
+		if !want[name] {
+			t.Errorf("the identity schema holds trigger %s; only the audit retention triggers are expected", name)
+		}
+		delete(want, name)
+	}
+	for name := range want {
+		t.Errorf("retention trigger %s is missing", name)
 	}
 }

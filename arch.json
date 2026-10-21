@@ -17,6 +17,7 @@
   "internalEdges": {
     "cmd/identity-control": [
       "internal/config",
+      "internal/controldb",
       "internal/delivery",
       "internal/firstcredential",
       "internal/httpapi",

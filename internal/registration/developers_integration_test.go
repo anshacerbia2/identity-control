@@ -22,6 +22,11 @@ func (h *harness) developer() id.UUID {
 	}
 	h.t.Cleanup(func() {
 		_ = h.pool.InTx(context.Background(), func(ctx context.Context, tx db.Tx) error {
+			// The standing refuses a young delete to every role (STD-GLB-007 1.2.1); off for this
+			// transaction alone.
+			if _, err := tx.Exec(ctx, `SET LOCAL session_replication_role = replica`); err != nil {
+				return err
+			}
 			_, err := tx.Exec(ctx, `DELETE FROM identity.application_developer WHERE principal_id = $1`, person.String())
 			return err
 		})

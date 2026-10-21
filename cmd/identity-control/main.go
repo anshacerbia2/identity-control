@@ -31,6 +31,7 @@ import (
 	"github.com/anshacerbia2/foundation-platform/verify"
 
 	"github.com/anshacerbia2/identity-control/internal/config"
+	"github.com/anshacerbia2/identity-control/internal/controldb"
 	"github.com/anshacerbia2/identity-control/internal/delivery"
 	"github.com/anshacerbia2/identity-control/internal/firstcredential"
 	"github.com/anshacerbia2/identity-control/internal/httpapi"
@@ -614,7 +615,7 @@ func run() error {
 		go scheduleNotificationDispatch(ctx, dispatcher, logger)
 	}
 	go scheduleTemporaryPasswordSweeps(ctx, firstCredentials, cfg.TemporaryPasswordSweepInterval, logger)
-	go scheduleSweeps(ctx, provisioner, registrar, workloads, reconciler, providers, pool, cfg.RegistrationReconcileInterval, logger)
+	go scheduleSweeps(ctx, provisioner, registrar, workloads, reconciler, providers, pool, pool, cfg.RegistrationReconcileInterval, logger)
 	if freshness != nil {
 		go freshness.Poll(ctx, projection, frontier, providerauthority.PollInterval, logger)
 	}
@@ -640,15 +641,19 @@ func run() error {
 	return nil
 }
 
+// auditPurgeEvery is how often the scheduled pass purges audit records past their 7 years.
+const auditPurgeEvery = 24 * time.Hour
+
 // scheduleSweeps runs a registration sweep at start and then every interval, until ctx ends. A
 // sweep cut off by shutdown leaves its run unfinished, which is how a stopped replica's run is
 // meant to look, and it stops blocking the next one after two intervals.
 func scheduleSweeps(ctx context.Context, provisioner *provisioning.Provisioner, registrar *registration.Service,
 	workloads *workload.Service,
-	reconciler *reconcile.Reconciler, providers *providerauthority.Decider, keys httpapi.KeyStore, interval time.Duration,
-	logger *slog.Logger) {
+	reconciler *reconcile.Reconciler, providers *providerauthority.Decider, keys httpapi.KeyStore, audit controldb.Transactor,
+	interval time.Duration, logger *slog.Logger) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	var auditPurgedAt time.Time
 	for {
 		// Principals first: a mapping whose creation was interrupted is recovered, which nothing ran
 		// before this schedule existed, and every kernel user and active mapping is accounted for
@@ -707,6 +712,20 @@ func scheduleSweeps(ctx context.Context, provisioner *provisioning.Provisioner, 
 		} else if purged > 0 {
 			logger.Info("expired idempotency keys purged", slog.Int64("keys", purged),
 				slog.Duration("retention", httpapi.KeyRetention))
+		}
+		// Audit records past their 7 years are purged (STD-GLB-007 1.2.1 §Data Retention,
+		// TDD-identity-control-001 1.24.0 §Audit Retention), once a day: a boundary of years needs no
+		// finer step, and a pass reads each audit table whole. A failed pass is retried on the next one.
+		if time.Since(auditPurgedAt) >= auditPurgeEvery {
+			if purged, err := controldb.PurgeExpiredAuditRecords(ctx, audit, controldb.AuditRetentionFloor); err != nil {
+				logger.Error("expired audit records could not be purged", slog.String("error", err.Error()))
+			} else {
+				auditPurgedAt = time.Now()
+				if total := purged.Total(); total > 0 {
+					logger.Info("expired audit records purged", slog.Int64("records", total),
+						slog.Int("retention_years", controldb.AuditRetentionFloor))
+				}
+			}
 		}
 		// Changes waiting for a provider's approval (TDD-identity-control-003 §Operational Notes):
 		// a warning past three days, an error past seven, so an approval backlog alerts.

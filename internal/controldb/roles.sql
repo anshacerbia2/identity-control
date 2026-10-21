@@ -52,12 +52,45 @@ BEGIN
 END
 $$;
 
+-- The audit purge role (STD-GLB-007 1.2.1 §Data Retention, TDD-identity-control-001 1.24.0 §Audit
+-- Retention). It holds DELETE on the audit tables the scheduled pass purges, SELECT on the columns
+-- that purge reads, and nothing else (grants.sql). The tables' retention triggers refuse it every row
+-- younger than 7 years, as they refuse every role. So the one delete it can make is the purge's.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'identity_audit_purger') THEN
+        CREATE ROLE identity_audit_purger
+            NOLOGIN
+            NOSUPERUSER
+            NOCREATEDB
+            NOCREATEROLE
+            NOREPLICATION
+            NOBYPASSRLS;
+    END IF;
+END
+$$;
+
 -- Re-assert the attributes on an existing role. A role created by an earlier run, by
 -- hand, or by a restored dump may carry privileges this file never granted, and the
 -- Week 1 exit criterion is a property of the role rather than of the statement that
 -- created it.
 ALTER ROLE identity_migrator NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
 ALTER ROLE identity_runtime  NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+ALTER ROLE identity_audit_purger NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+
+-- The runtime becomes the purge role for the purge's transaction alone, with SET LOCAL ROLE, and
+-- never holds its privileges otherwise (PostgreSQL 17, GRANT §GRANT on Roles):
+--
+--   INHERIT FALSE: "If set to FALSE, the new member does not inherit." DELETE on an audit table is
+--   never among the runtime's own privileges, and has_table_privilege says so.
+--   SET TRUE: it "allows the member to change to the granted role using the SET ROLE command", and
+--   through identity_app, "only if there is a chain of grants each of which has SET TRUE".
+--
+-- "The effects of SET LOCAL last only till the end of the current transaction, whether committed or
+-- not" (PostgreSQL 17, SET). Re-granted on every run: "To modify that options of an existing
+-- membership, simply specify the membership with updated option values" (GRANT), so a membership a
+-- restored dump or a hand-run GRANT left otherwise is put back.
+GRANT identity_audit_purger TO identity_runtime WITH INHERIT FALSE, SET TRUE;
 
 -- The schema container Atlas fills. Ownership is assigned in grants.sql, after every
 -- object inside it exists, so a single place decides who owns what.
