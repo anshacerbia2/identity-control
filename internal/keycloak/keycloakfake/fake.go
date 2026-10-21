@@ -290,6 +290,16 @@ func (c *Client) FindByUsernameOrEmail(ctx context.Context, realm keycloak.Realm
 	return found, nil
 }
 
+// SetEmail gives an existing user an email, as a console edit would.
+func (c *Client) SetEmail(userID keycloak.UserID, email string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if entry, ok := c.users[userID]; ok {
+		entry.user.Email = email
+		c.users[userID] = entry
+	}
+}
+
 // SeedEmail records a user with a username and an email and no Principal, as a user a prohibited path
 // or a lost mapping left behind.
 func (c *Client) SeedEmail(realm keycloak.Realm, username, email string) keycloak.UserID {

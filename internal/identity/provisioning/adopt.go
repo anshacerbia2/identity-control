@@ -215,8 +215,9 @@ func (p *Provisioner) Adopt(ctx context.Context, req AdoptRequest) (AdoptPlan, e
 			if err != nil {
 				return err
 			}
+			// Not proven: nobody has shown the person reads it (ADR-ORG-007 §5.3).
 			if _, err := tx.Exec(ctx, insertCreationAddressStatement, addressID.String(), req.PrincipalID.String(),
-				ev.user.Email); err != nil {
+				ev.user.Email, false); err != nil {
 				return fmt.Errorf("provisioning: record the adopted Principal's address: %w", err)
 			}
 		}
