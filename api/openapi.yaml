@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Identity Control API
-  version: 1.1.0
+  version: 1.2.0
   summary: The control plane of the Scnehaux Identity Runtime (SAD-001).
   description: |
     The HTTP contract of identity-control, published as a versioned artifact under ADR-GLB-010
@@ -33,6 +33,9 @@ info:
     - `self`: any person, acting on the Principal in its own token.
     - `person`: any authenticated person; the answer is about the caller.
     - `workload`: one named workload, verified by the route itself (Organization Control's).
+    - `enrolment-caller`: a workload the enrolment caller record admits (Identity Experience's BFF),
+      verified by the route itself, for a person who is not signed in; it forwards the client address
+      in `Forwarded` (ADR-IAM-011 §5.8, 1.2.0).
     - `probe`: no authentication.
 
     **Commands** (STD-GLB-001 1.4.0 §Commands Require an Idempotency-Key). Every mutating route is
@@ -86,6 +89,8 @@ tags:
     description: "The bootstrap ceremony record and its review (ADR-IAM-001 §5.11)."
   - name: organization
     description: "The routes Organization Control's workload calls."
+  - name: enrolment
+    description: "Enrolment from an invitation, for a person with no account, through the BFF workload (ADR-IAM-011)."
 paths:
   "/healthz":
     get:
@@ -884,6 +889,204 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "503":
           $ref: "#/components/responses/Unavailable"
+
+  "/v1/enrolments":
+    post:
+      operationId: requestEnrolment
+      summary: Ask for a code to enrol from an invitation (ADR-IAM-011 §5.1, §5.2, §5.8, §5.9).
+      description: |
+        Always `202` with one body when the request is admitted: a code was sent to the invited address
+        if the invitation can be redeemed and no account holds the address. An unknown, expired,
+        revoked or accepted token, an address held already, an open enrolment and the invitation's
+        message limit are not told apart; the identifier is fresh in every case. The client address is
+        counted from `Forwarded` (5 a minute, 20 an hour): past it, `429` with `Retry-After`. No key is
+        required. Added in 1.2.0.
+      tags: [enrolment]
+      x-route-class: enrolment-caller
+      x-mux-pattern: "POST /v1/enrolments"
+      security:
+        - enrolmentBearer: []
+      parameters:
+        - $ref: "#/components/parameters/Forwarded"
+        - $ref: "#/components/parameters/IdempotencyKeyIgnored"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [token]
+              properties:
+                token:
+                  type: string
+                  minLength: 1
+      responses:
+        "202":
+          description: Accepted; see the description.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [enrolment_id]
+                properties:
+                  enrolment_id:
+                    type: string
+                    format: uuid
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/enrolments/{enrolment_id}:verify":
+    post:
+      operationId: verifyEnrolment
+      summary: Return the code; create the Principal and show its temporary password once (ADR-IAM-011 §5.3).
+      description: |
+        The right code creates the Principal (username the invited address, lower-cased; its creation
+        address proven) and answers a temporary password once, with `no-store` (STD-IAM-001 3.1.0
+        §3.1). A wrong, expired or exhausted code, an unknown enrolment, an address held by then, and
+        the invitation's 15 failed codes a day are one `400` with one detail. The client address is
+        counted (5 a minute, 30 an hour): past it, `429` with `Retry-After`. A `503` leaves the code good:
+        retry it. No key is required. Added in 1.2.0.
+      tags: [enrolment]
+      x-route-class: enrolment-caller
+      x-mux-pattern: "POST /v1/enrolments/{enrolment_action}"
+      security:
+        - enrolmentBearer: []
+      parameters:
+        - name: enrolment_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: "#/components/parameters/Forwarded"
+        - $ref: "#/components/parameters/IdempotencyKeyIgnored"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [code]
+              properties:
+                code:
+                  type: string
+      responses:
+        "201":
+          description: The Principal, and its temporary password, shown once.
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [principal_id, username, temporary_password, lapses_at]
+                properties:
+                  principal_id:
+                    type: string
+                    format: uuid
+                  username:
+                    type: string
+                  temporary_password:
+                    type: string
+                    description: 24 symbols of Crockford's base32; temporary in the kernel, never stored or logged.
+                  lapses_at:
+                    type: string
+                    format: date-time
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  "/v1/enrolment-callers":
+    get:
+      operationId: listEnrolmentCallers
+      summary: The workloads admitted to the enrolment routes, retired ones included (ADR-IAM-011 §5.8).
+      tags: [enrolment]
+      x-route-class: provider
+      x-mux-pattern: "GET /v1/enrolment-callers"
+      responses:
+        "200":
+          $ref: "#/components/responses/EnrolmentCallersAnswer"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      operationId: registerEnrolmentCaller
+      summary: Admit an active workload Principal to the enrolment routes.
+      tags: [enrolment]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/enrolment-callers"
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [principal_id, purpose]
+              properties:
+                principal_id:
+                  type: string
+                  format: uuid
+                purpose:
+                  type: string
+                  minLength: 1
+                  maxLength: 500
+      responses:
+        "201":
+          $ref: "#/components/responses/EnrolmentCallerAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  "/v1/enrolment-callers/{principal_id}:retire":
+    post:
+      operationId: retireEnrolmentCaller
+      summary: Retire an enrolment caller; its next request is refused.
+      tags: [enrolment]
+      x-route-class: provider
+      x-mux-pattern: "POST /v1/enrolment-callers/{caller_action}"
+      parameters:
+        - $ref: "#/components/parameters/PrincipalID"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/AdministrativeReason"
+      responses:
+        "200":
+          $ref: "#/components/responses/EnrolmentCallerAnswer"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   "/v1/kernel-events:sweep":
     post:
@@ -2880,6 +3083,11 @@ components:
       scheme: bearer
       bearerFormat: JWT
       description: Organization Control's workload token, subject_type workload, the principal_id IDENTITY_DELIVERY_PRINCIPAL_ID names.
+    enrolmentBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: A workload token, subject_type workload, no tenant_id or provider_scope, whose principal_id is an active row of the enrolment caller record (1.2.0).
 
   headers:
     NoStore:
@@ -2893,6 +3101,13 @@ components:
         type: string
 
   parameters:
+    Forwarded:
+      name: Forwarded
+      in: header
+      required: true
+      description: "RFC 7239. The first element's for parameter is the client address the platform's ingress saw: an IPv4 address, or a bracketed IPv6 address in quotes, with an optional port. Missing or malformed is 400. Read on the enrolment caller's call alone (ADR-IAM-011 §5.8)."
+      schema:
+        type: string
     IdempotencyKey:
       name: Idempotency-Key
       in: header
@@ -3042,6 +3257,35 @@ components:
         application/problem+json:
           schema:
             $ref: "#/components/schemas/Problem"
+    RateLimited:
+      description: The client address is past an enrolment limit (ADR-IAM-011 §5.8).
+      headers:
+        Retry-After:
+          description: Seconds until the longest exceeded window ends (RFC 9110 §10.2.3).
+          schema:
+            type: integer
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    EnrolmentCallerAnswer:
+      description: The enrolment caller.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/EnrolmentCaller"
+    EnrolmentCallersAnswer:
+      description: Every enrolment caller, oldest first.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [enrolment_callers]
+            properties:
+              enrolment_callers:
+                type: array
+                items:
+                  $ref: "#/components/schemas/EnrolmentCaller"
     Unavailable:
       description: A dependency is unavailable; retry with the same Idempotency-Key.
       content:
@@ -3176,6 +3420,31 @@ components:
                   $ref: "#/components/schemas/WorkloadCondition"
 
   schemas:
+    EnrolmentCaller:
+      type: object
+      required: [principal_id, purpose, registered_by, register_reason, registered_at, retired_by, retire_reason, retired_at]
+      properties:
+        principal_id:
+          type: string
+          format: uuid
+        purpose:
+          type: string
+        registered_by:
+          type: string
+          format: uuid
+        register_reason:
+          type: string
+        registered_at:
+          type: string
+          format: date-time
+        retired_by:
+          type: [string, "null"]
+          format: uuid
+        retire_reason:
+          type: [string, "null"]
+        retired_at:
+          type: [string, "null"]
+          format: date-time
     UUID:
       type: string
       format: uuid

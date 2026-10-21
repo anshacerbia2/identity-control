@@ -48,6 +48,11 @@ var (
 	ErrDuplicateInKernel = errors.New("provisioning: more than one kernel user carries this principal_id")
 	ErrIdentifierTaken   = errors.New("provisioning: principal_id already exists")
 
+	// ErrKernelDuplicate is an enrolment's create the kernel refused as a duplicate username or email;
+	// its mapping is quarantined (TDD-identity-control-001 1.27.0). It wraps nothing of the kernel's
+	// answer, which names no field a caller may see.
+	ErrKernelDuplicate = errors.New("provisioning: the kernel refused the user as a duplicate")
+
 	// ErrWorkloadPath refuses a workload on the human creation and relink paths. A workload's
 	// Keycloak user is its client's service-account user, the one a client credentials token is
 	// issued for, so a user this path created would carry the workload's identity into no token at
@@ -125,6 +130,11 @@ type Mapping struct {
 	IdempotencyScope string
 	IdempotencyKey   string
 	RequestDigest    string
+
+	// EmailVerified writes the creation address with verified_at set: an enrolment's, whose code has
+	// just proven it (ADR-IAM-011 §5.3). Written with the pending row, so recovery finishing the create
+	// leaves the address proven as well. Not persisted on the mapping.
+	EmailVerified bool
 }
 
 // Transactor is the transaction source this package needs.
@@ -201,7 +211,8 @@ func (Repository) InsertPending(ctx context.Context, tx db.Tx, m Mapping) error 
 		if err != nil {
 			return fmt.Errorf("provisioning: notification address identifier: %w", err)
 		}
-		if _, err := tx.Exec(ctx, insertCreationAddressStatement, addressID.String(), m.PrincipalID.String(), m.Email); err != nil {
+		if _, err := tx.Exec(ctx, insertCreationAddressStatement, addressID.String(), m.PrincipalID.String(), m.Email,
+			m.EmailVerified); err != nil {
 			return fmt.Errorf("provisioning: insert the creation notification address: %w", err)
 		}
 	}
@@ -209,8 +220,8 @@ func (Repository) InsertPending(ctx context.Context, tx db.Tx, m Mapping) error 
 }
 
 const insertCreationAddressStatement = `INSERT INTO identity.notification_address
-    (address_id, principal_id, channel, address, origin, state)
-VALUES ($1, $2, 'email', $3, 'creation', 'active')`
+    (address_id, principal_id, channel, address, origin, state, verified_at)
+VALUES ($1, $2, 'email', $3, 'creation', 'active', CASE WHEN $4::boolean THEN now() END)`
 
 const activateStatement = `UPDATE identity.principal_mapping
 SET keycloak_user_id = $2,

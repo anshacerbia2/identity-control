@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-005
   title: Account Security and Investigation API Mediation
   owner: Core Platform Team
-  version: 2.13.0
+  version: 2.14.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-14
-  last_reviewed: 2026-10-20
+  last_reviewed: 2026-10-21
   parent_sad: SAD-001
 ---
 
@@ -1004,6 +1004,13 @@ approved secret manager and have independent rotation schedules.
 
 ### A First Credential (2.12.0)
 
+- **The second recipient (2.14.0, `STD-IAM-001` 3.1.0 §3.1, `ADR-IAM-011 §5.3`).** An enrolment issues
+  the first password through `IssueForEnrolment`, in the same order without a key or provider evidence:
+  `issued_by` is the BFF workload that carried the proven code, the reason `enrolment <enrolment_id>`,
+  the assurance `enrolment-code`; the value is shown once, to that person, in the `:verify` response
+  (`TDD-identity-control-001` 1.27.0 §Enrolment From an Invitation). Tested in
+  `TestAnEnrolmentIssuesTheFirstPassword`.
+
 - The value is 24 symbols of the alphabet, 120 bits, and evenly drawn; a failed random source issues
   nothing (`internal/firstcredential`).
 - Issued once: the kernel holds it as temporary with `UPDATE_PASSWORD` outstanding, one issuance and one
@@ -1081,6 +1088,7 @@ degradation.
 | Relationship | Target |
 | :-- | :-- |
 | Parent system | SAD-001 - Scnehaux Identity Runtime |
+| Governed by | STD-IAM-001 3.1.0 §3.1, ADR-IAM-011 §5.3 — the enrolling person as the temporary password's second recipient (2.14.0) |
 | Realizes capability | PAD-PLT-001 - identity administration, account security, and investigation |
 | Governed by | ADR-IAM-001 - supported Keycloak interfaces and Control Service mediation |
 | Conforms to | STD-IAM-001 sections 3.1 and 3.9 - authenticator policy and BFF authorization boundary |

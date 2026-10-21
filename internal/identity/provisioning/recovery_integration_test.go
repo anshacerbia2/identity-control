@@ -85,3 +85,52 @@ func TestARetryAfterRecoveryGetsTheRecordedResponse(t *testing.T) {
 		})
 	}
 }
+
+// An enrolment's create the kernel refuses as a duplicate quarantines its mapping, so recovery has
+// nothing to finish, and writes its creation address proven when it succeeds (TDD-identity-control-001
+// 1.27.0, ADR-IAM-011 §5.3, §5.9).
+func TestAnEnrolmentsCreateIsQuarantinedOnADuplicateAndProvenOtherwise(t *testing.T) {
+	h := newPortability(t)
+	ctx := context.Background()
+	h.kernel.RefuseDuplicateEmail = true
+	taken := "taken." + mustUUIDString(t) + "@example.test"
+	h.kernel.SeedEmail(portabilityRealm, "stray-"+mustUUIDString(t), taken)
+	key := mustUUIDString(t)
+	_, err := h.provisioner.Create(ctx, provisioning.CreateRequest{CallerScope: "enrolment", IdempotencyKey: key,
+		Realm: portabilityRealm, Username: taken, Email: taken, SubjectType: keycloak.SubjectHuman,
+		VerifiedEmail: true, QuarantineOnConflict: true})
+	if !errors.Is(err, provisioning.ErrKernelDuplicate) {
+		t.Fatalf("a duplicate returned %v, want ErrKernelDuplicate", err)
+	}
+	var state string
+	if err := h.pool.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		return tx.QueryRow(ctx, `SELECT state FROM identity.principal_mapping WHERE idempotency_scope = 'enrolment' AND idempotency_key = $1`,
+			key).Scan(&state)
+	}); err != nil || state != "quarantined" {
+		t.Fatalf("the mapping is %q (%v), want quarantined", state, err)
+	}
+
+	fresh := "fresh." + mustUUIDString(t) + "@example.test"
+	created, err := h.provisioner.Create(ctx, provisioning.CreateRequest{CallerScope: "enrolment", IdempotencyKey: mustUUIDString(t),
+		Realm: portabilityRealm, Username: fresh, Email: fresh, SubjectType: keycloak.SubjectHuman,
+		VerifiedEmail: true, QuarantineOnConflict: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var proven bool
+	if err := h.pool.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		return tx.QueryRow(ctx, `SELECT verified_at IS NOT NULL FROM identity.notification_address WHERE principal_id = $1`,
+			created.PrincipalID.String()).Scan(&proven)
+	}); err != nil || !proven {
+		t.Errorf("the enrolled creation address is not proven (%v)", err)
+	}
+}
+
+func mustUUIDString(t *testing.T) string {
+	t.Helper()
+	v, err := id.NewV7()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return v.String()
+}

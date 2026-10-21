@@ -1,4 +1,4 @@
-h1:PR8Mwy0GR4tWIakI5/QAx1OH5PbLDqMRzVLwfn5Ndwk=
+h1:r2SBNt7GnAI/CRmgcyBLd/xRiocc4jW4Sejn0eSy+AM=
 20260817151332_baseline_identity_schema.sql h1:GysIRGAJncY8eQTmFIhc3g8FTeFq8dGu9wmdY4kefVQ=
 20260817201931_add_creation_payload.sql h1:ejgDHTQ30FK0/adjz26CYPnLsAJyodOxBHvTI/GOd8M=
 20260820185807_add_bootstrap_ceremony.sql h1:0tiQsqClxrSDiz1Jl+vd6VDStnO/nObLoeKIHBWsX3M=
@@ -42,3 +42,4 @@ h1:PR8Mwy0GR4tWIakI5/QAx1OH5PbLDqMRzVLwfn5Ndwk=
 20261019142657_first_credential.sql h1:2RrvKTZd0S8q6+Tmjvw/Zwbsa+NRzUuSImLtOhZTbQM=
 20261020163355_ceremony_witness_adoption_consent.sql h1:m/5K+iNEv+h5hwMek1U9+Ic63aBrod55Q8BM6E37vUc=
 20261020200000_audit_retention.sql h1:kDUcoLjAOhVNch5z3uU4UFZDnq/gucAY2rdbNYMmSEE=
+20261021172637_enrolment.sql h1:8rTJx1PvqmP1BHXRpKRJhrA7eO5ld40hho2bBeprxTI=

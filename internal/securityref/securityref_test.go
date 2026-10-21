@@ -169,3 +169,26 @@ func TestAnAcceptedHandleOpensWithoutItsExpiry(t *testing.T) {
 		t.Errorf("OpenAccepted for another Principal: %v, want ErrInvalid", err)
 	}
 }
+
+// The keyed hash is stable for one value and purpose, differs across purposes and values, and holds
+// neither in its output (ADR-IAM-011 §5.8).
+func TestTheKeyedHashNamesAValueWithoutHoldingIt(t *testing.T) {
+	codec, err := New([]Key{{ID: "k1", Secret: make([]byte, 32)}}, time.Minute)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	a := codec.KeyedHash("enrolment-count", "address:203.0.113.7")
+	if a != codec.KeyedHash("enrolment-count", "address:203.0.113.7") || len(a) != 64 {
+		t.Fatalf("the hash is not stable 32 bytes: %q", a)
+	}
+	if a == codec.KeyedHash("other", "address:203.0.113.7") || a == codec.KeyedHash("enrolment-count", "address:203.0.113.8") {
+		t.Error("the hash does not separate purposes or values")
+	}
+	if strings.Contains(a, "203") {
+		t.Error("the hash carries the value")
+	}
+	other, _ := New([]Key{{ID: "k2", Secret: append(make([]byte, 31), 1)}}, time.Minute)
+	if other.KeyedHash("enrolment-count", "address:203.0.113.7") == a {
+		t.Error("another key gives the same hash")
+	}
+}

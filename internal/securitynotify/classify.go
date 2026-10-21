@@ -19,6 +19,10 @@ const (
 	// (TDD-identity-control-008 1.2.0): an address added or removed, and a new address's proof code.
 	EventAddressChanged = "notification_address_changed"
 	EventAddressProof   = "notification_address_proof"
+	// The two enrolment messages, to an invited address that no Principal holds yet (ADR-IAM-011 §5.2,
+	// §5.9): the code, and "an account exists" in its place.
+	EventEnrolmentCode    = "enrolment_code"
+	EventEnrolmentAccount = "enrolment_account_exists"
 )
 
 // Who acted on the account.

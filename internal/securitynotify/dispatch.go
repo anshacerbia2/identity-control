@@ -92,15 +92,19 @@ WHERE notification_id = $1`
 // Dispatch hands over every due request, up to the batch, and answers how many it handed over.
 func (d *Dispatcher) Dispatch(ctx context.Context) (int, error) {
 	handed := 0
-	for range dispatchBatch {
-		done, err := d.one(ctx)
-		if err != nil {
-			return handed, err
+	// A Principal's notifications first, then the enrolment messages (TDD-identity-control-001
+	// 1.27.0), each up to one batch per run.
+	for _, one := range []func(context.Context) (bool, error){d.one, d.oneEnrolment} {
+		for range dispatchBatch {
+			done, err := one(ctx)
+			if err != nil {
+				return handed, err
+			}
+			if !done {
+				break
+			}
+			handed++
 		}
-		if !done {
-			return handed, nil
-		}
-		handed++
 	}
 	return handed, nil
 }

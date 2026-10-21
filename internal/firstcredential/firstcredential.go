@@ -363,3 +363,103 @@ func (s *Service) recordOutcome(ctx context.Context, issuanceID id.UUID, outcome
 			slog.String("error", err.Error()))
 	}
 }
+
+// EnrolmentRequest is the temporary password an enrolment issues to the person who has just proven
+// the invited address (ADR-IAM-011 §5.3, STD-IAM-001 3.1.0 §3.1, the second recipient).
+type EnrolmentRequest struct {
+	// Caller is the BFF workload that carried the verified code: the issuance's issued_by. No provider
+	// acts, so no privileged-access row is written; the enrolment record is the evidence.
+	Caller      id.UUID
+	Subject     id.UUID
+	EnrolmentID id.UUID
+	Correlation string
+}
+
+// EnrolmentAssurance is what an enrolment's issuance records as its assurance: the address proof,
+// in place of a provider's aal2 session (STD-IAM-001 3.1.0 §3.1).
+const EnrolmentAssurance = "enrolment-code"
+
+// IssueForEnrolment issues the first temporary password of a Principal an enrolment has just
+// created. It follows Issue's order without its idempotency key and its provider evidence: the
+// enrolment is completed once, in the transaction that records this issuance's identifier, and a
+// retry after a failure here issues again, replacing the earlier issuance as a provider's retry does.
+func (s *Service) IssueForEnrolment(ctx context.Context, req EnrolmentRequest) (Issuance, error) {
+	if req.Caller.IsNil() || req.Subject.IsNil() || req.EnrolmentID.IsNil() || req.Caller == req.Subject {
+		return Issuance{}, ErrInvalid
+	}
+	var user keycloak.UserID
+	if err := s.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		rows, err := tx.Query(ctx, mappingStatement, req.Subject.String(), string(s.cfg.Realm))
+		if err != nil {
+			return err
+		}
+		var subjectType, state, kernelUser string
+		found := rows.Next()
+		if found {
+			err = rows.Scan(&subjectType, &state, &kernelUser)
+		}
+		rows.Close()
+		if err == nil {
+			err = rows.Err()
+		}
+		switch {
+		case err != nil:
+			return err
+		case !found:
+			return ErrNotFound
+		case subjectType != string(keycloak.SubjectHuman) || state != "active" || kernelUser == "":
+			return ErrState
+		}
+		user = keycloak.UserID(kernelUser)
+		return nil
+	}); err != nil {
+		return Issuance{}, err
+	}
+
+	callCtx, cancel := s.call(ctx)
+	actions, err := s.kernel.UserRequiredActions(callCtx, s.cfg.Realm, user)
+	cancel()
+	switch {
+	case err != nil:
+		return Issuance{}, fmt.Errorf("%w: %w", ErrUnavailable, err)
+	case !keycloak.OwesPassword(actions):
+		return Issuance{}, ErrCredentialEstablished
+	}
+	value, err := s.generate()
+	if err != nil {
+		return Issuance{}, err
+	}
+	issuanceID, err := s.newID()
+	if err != nil {
+		return Issuance{}, err
+	}
+	now := s.now().UTC().Truncate(time.Microsecond)
+	issued := Issuance{IssuanceID: issuanceID, PrincipalID: req.Subject, IssuedBy: req.Caller,
+		IssuedAt: now, LapsesAt: now.Add(s.cfg.TTL)}
+	if err := s.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		if _, err := tx.Exec(ctx, insertIssuanceStatement, issuanceID.String(), req.Subject.String(),
+			req.Caller.String(), "enrolment "+req.EnrolmentID.String(), req.Correlation, false,
+			EnrolmentAssurance, issued.IssuedAt, issued.LapsesAt); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, replaceStatement, req.Subject.String(), issuanceID.String())
+		return err
+	}); err != nil {
+		return Issuance{}, fmt.Errorf("firstcredential: record the issuance: %w", err)
+	}
+	callCtx, cancel = s.call(ctx)
+	err = s.kernel.SetTemporaryPassword(callCtx, s.cfg.Realm, user, value)
+	cancel()
+	if err != nil {
+		if !errors.Is(err, keycloak.ErrUnavailable) && !errors.Is(err, keycloak.ErrAmbiguous) &&
+			!errors.Is(err, context.DeadlineExceeded) {
+			s.recordOutcome(ctx, issuanceID, OutcomeFailed)
+		}
+		return Issuance{}, fmt.Errorf("%w: %w", ErrUnavailable, err)
+	}
+	s.logger.InfoContext(ctx, "a temporary password was issued for an enrolment",
+		slog.String("issuance_id", issuanceID.String()), slog.String("principal_id", req.Subject.String()),
+		slog.String("enrolment_id", req.EnrolmentID.String()), slog.Time("lapses_at", issued.LapsesAt))
+	issued.Value = value
+	return issued, nil
+}

@@ -3327,3 +3327,289 @@ table "temporary_password_outcome" {
     expr = "outcome = ANY (ARRAY['used'::text, 'lapsed'::text, 'replaced'::text, 'failed'::text])"
   }
 }
+
+// The BFF workloads admitted to the two enrolment routes, from a record (ADR-IAM-011 §5.8,
+// TDD-identity-control-001 1.27.0 §Enrolment From an Invitation). A provider registers and retires
+// one, with a reason. Never deleted.
+table "enrolment_caller" {
+  schema  = schema.identity
+  comment = "Workloads admitted to POST /v1/enrolments and :verify. ADR-IAM-011 §5.8, TDD-identity-control-001 1.27.0."
+
+  column "principal_id" {
+    null = false
+    type = uuid
+  }
+  column "purpose" {
+    null = false
+    type = text
+  }
+  column "registered_by" {
+    null = false
+    type = uuid
+  }
+  column "register_reason" {
+    null = false
+    type = text
+  }
+  column "registered_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+  column "retired_by" {
+    null = true
+    type = uuid
+  }
+  column "retire_reason" {
+    null = true
+    type = text
+  }
+  column "retired_at" {
+    null = true
+    type = timestamptz
+  }
+
+  primary_key {
+    columns = [column.principal_id]
+  }
+  foreign_key "enrolment_caller_principal_id_fkey" {
+    columns     = [column.principal_id]
+    ref_columns = [table.principal_mapping.column.principal_id]
+    on_update   = NO_ACTION
+    on_delete   = NO_ACTION
+  }
+
+  check "enrolment_caller_named" {
+    expr = "(btrim(purpose) <> '') AND (btrim(register_reason) <> '')"
+  }
+  check "enrolment_caller_retirement" {
+    expr = "((retired_at IS NULL) = (retired_by IS NULL)) AND ((retired_at IS NULL) = (retire_reason IS NULL))"
+  }
+}
+
+// One enrolment: a code sent to an invited address, and what came of it (ADR-IAM-011 §5.2, §5.3).
+// Evidence: never deleted by the runtime, purged by the audit pass only.
+table "enrolment" {
+  schema  = schema.identity
+  comment = "Each enrolment from an invitation: the invitation, the address hash, the code, the Principal created. ADR-IAM-011, TDD-identity-control-001 1.27.0."
+
+  column "enrolment_id" {
+    null = false
+    type = uuid
+  }
+  column "invitation_id" {
+    null = false
+    type = uuid
+  }
+  // SHA-256 of the address lower-cased, kept for good.
+  column "address_hash" {
+    null = false
+    type = text
+  }
+  // The address itself, while the enrolment is open; cleared when it closes.
+  column "address" {
+    null = true
+    type = text
+  }
+  column "code_hash" {
+    null = true
+    type = text
+  }
+  column "code_expires_at" {
+    null = false
+    type = timestamptz
+  }
+  column "attempts" {
+    null    = false
+    type    = integer
+    default = 0
+  }
+  column "state" {
+    null    = false
+    type    = text
+    default = "open"
+  }
+  // A :verify holding the enrolment while it creates the Principal and issues the password, so a
+  // second :verify waits rather than issuing a second password; it lapses if the process stops.
+  column "verifying_until" {
+    null = true
+    type = timestamptz
+  }
+  column "caller_principal_id" {
+    null = false
+    type = uuid
+  }
+  column "principal_id" {
+    null = true
+    type = uuid
+  }
+  column "issuance_id" {
+    null = true
+    type = uuid
+  }
+  column "created_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+  column "closed_at" {
+    null = true
+    type = timestamptz
+  }
+
+  primary_key {
+    columns = [column.enrolment_id]
+  }
+  foreign_key "enrolment_principal_id_fkey" {
+    columns     = [column.principal_id]
+    ref_columns = [table.principal_mapping.column.principal_id]
+    on_update   = NO_ACTION
+    on_delete   = NO_ACTION
+  }
+  foreign_key "enrolment_issuance_id_fkey" {
+    columns     = [column.issuance_id]
+    ref_columns = [table.temporary_password_issuance.column.issuance_id]
+    on_update   = NO_ACTION
+    on_delete   = NO_ACTION
+  }
+  // The open enrolments of one invitation: one at a time is the rule (§5.2), read under a lock.
+  index "enrolment_invitation" {
+    columns = [column.invitation_id, column.created_at]
+  }
+
+  check "enrolment_state_check" {
+    expr = "state IN ('open', 'completed', 'refused')"
+  }
+  check "enrolment_attempts_check" {
+    expr = "(attempts >= 0) AND (attempts <= 5)"
+  }
+  check "enrolment_open_holds_code" {
+    expr = "(state = 'open') = (code_hash IS NOT NULL AND address IS NOT NULL AND closed_at IS NULL)"
+  }
+  check "enrolment_completed_names_principal" {
+    expr = "(state = 'completed') = (principal_id IS NOT NULL AND issuance_id IS NOT NULL)"
+  }
+}
+
+// Mail to an invited address: a code, or the "an account exists" message (ADR-IAM-011 §5.1, §5.9).
+// The address and the sealed code are held until handed over, then cleared. Never deleted by the
+// runtime.
+table "enrolment_message" {
+  schema  = schema.identity
+  comment = "Each enrolment message to an invited address, until handed over. ADR-IAM-011, TDD-identity-control-001 1.27.0."
+
+  column "message_id" {
+    null = false
+    type = uuid
+  }
+  column "enrolment_id" {
+    null = true
+    type = uuid
+  }
+  column "kind" {
+    null = false
+    type = text
+  }
+  column "address" {
+    null = true
+    type = text
+  }
+  column "sealed_secret" {
+    null = true
+    type = text
+  }
+  column "state" {
+    null    = false
+    type    = text
+    default = "requested"
+  }
+  column "attempts" {
+    null    = false
+    type    = integer
+    default = 0
+  }
+  column "next_attempt_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+  column "platform_ref" {
+    null = true
+    type = text
+  }
+  column "last_error" {
+    null = true
+    type = text
+  }
+  column "requested_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+  column "submitted_at" {
+    null = true
+    type = timestamptz
+  }
+
+  primary_key {
+    columns = [column.message_id]
+  }
+  foreign_key "enrolment_message_enrolment_id_fkey" {
+    columns     = [column.enrolment_id]
+    ref_columns = [table.enrolment.column.enrolment_id]
+    on_update   = NO_ACTION
+    on_delete   = NO_ACTION
+  }
+  index "enrolment_message_due" {
+    columns = [column.next_attempt_at]
+    where   = "state = 'requested'"
+  }
+
+  check "enrolment_message_kind_check" {
+    expr = "(kind = 'code' AND enrolment_id IS NOT NULL) OR (kind = 'account_exists' AND enrolment_id IS NULL)"
+  }
+  check "enrolment_message_state_check" {
+    expr = "state IN ('requested', 'submitted', 'failed')"
+  }
+  check "enrolment_message_held_check" {
+    expr = "(state = 'requested') = (address IS NOT NULL)"
+  }
+}
+
+// The enrolment limits' counts (ADR-IAM-011 §5.8), under a keyed hash of the address or the
+// invitation, never either itself. A row is deleted once its window has ended.
+table "enrolment_count" {
+  schema  = schema.identity
+  comment = "Enrolment rate-limit counts by keyed hash and rule, deleted when their window ends. ADR-IAM-011 §5.8."
+
+  column "key_hash" {
+    null = false
+    type = text
+  }
+  column "rule" {
+    null = false
+    type = text
+  }
+  column "window_ends_at" {
+    null = false
+    type = timestamptz
+  }
+  column "count" {
+    null = false
+    type = integer
+  }
+
+  primary_key {
+    columns = [column.key_hash, column.rule]
+  }
+  index "enrolment_count_window" {
+    columns = [column.window_ends_at]
+  }
+
+  check "enrolment_count_rule_check" {
+    expr = "rule IN ('request:minute', 'request:hour', 'verify:minute', 'verify:hour', 'message:hour', 'message:day', 'failure:day')"
+  }
+  check "enrolment_count_positive" {
+    expr = "count > 0"
+  }
+}

@@ -75,6 +75,7 @@ existing SAD document. Root artifacts never link downward into this repository.
 | `cmd/identity-migrate/` | Schema stages: roles, then the platform schema and privileges |
 | `cmd/identity-bootstrap/` | The one-time bootstrap ceremony |
 | `internal/identity/provisioning/` | Principal minting, the Keycloak creation path, and pending-state recovery |
+| `internal/enrolment/` | Enrolment from an invitation: the BFF workloads' record, the limits, the code, and the Principal with its first password (ADR-IAM-011) |
 | `internal/registration/` | Client and protected-resource registration, and client public keys: registration, rotation, revocation, expiry |
 | `internal/reconcile/` | The registration drift sweep and what an operator does with its findings |
 | `internal/workload/` | Workload Principals: creation bound to the client's service account, recovery, ownership |

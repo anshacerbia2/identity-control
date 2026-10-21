@@ -379,3 +379,53 @@ func TestALapseTheKernelRefusesIsRetried(t *testing.T) {
 		t.Fatalf("a held key answered %v", err)
 	}
 }
+
+// An enrolment issues the first password to the person who has just proven the address, naming the
+// BFF workload as issued_by and the enrolment as the reason, with no provider evidence
+// (ADR-IAM-011 §5.3, STD-IAM-001 3.1.0 §3.1).
+func TestAnEnrolmentIssuesTheFirstPassword(t *testing.T) {
+	f := setup(t)
+	subject, user := f.person(t)
+	caller, enrolmentID := newID(t), newID(t)
+	ctx := context.Background()
+	issued, err := f.service.IssueForEnrolment(ctx, EnrolmentRequest{Caller: caller, Subject: subject,
+		EnrolmentID: enrolmentID, Correlation: "c-enrol"})
+	if err != nil || len(issued.Value) != 24 || issued.IssuedBy != caller {
+		t.Fatalf("IssueForEnrolment: %+v, %v", issued, err)
+	}
+	if value, ok := f.kernel.TemporaryPassword(user); !ok || value != issued.Value {
+		t.Error("the kernel does not hold the value answered")
+	}
+	if got := scalar[string](t, f.pool, `SELECT reason || ' ' || assurance || ' ' || emergency::text
+	    FROM identity.temporary_password_issuance WHERE issuance_id = $1`, issued.IssuanceID.String()); got !=
+		"enrolment "+enrolmentID.String()+" enrolment-code false" {
+		t.Errorf("the issuance reads %q", got)
+	}
+	if scalar[int](t, f.pool, `SELECT count(*) FROM identity.privileged_access WHERE subject_principal_id = $1`, subject.String()) != 0 {
+		t.Error("an enrolment wrote provider evidence")
+	}
+	if f.holds(t, issued.Value) {
+		t.Error("a record holds the value")
+	}
+	for name, req := range map[string]EnrolmentRequest{
+		"no caller":          {Subject: subject, EnrolmentID: enrolmentID},
+		"the subject itself": {Caller: subject, Subject: subject, EnrolmentID: enrolmentID},
+		"no enrolment":       {Caller: caller, Subject: subject},
+	} {
+		if _, err := f.service.IssueForEnrolment(ctx, req); !errors.Is(err, ErrInvalid) {
+			t.Errorf("%s returned %v", name, err)
+		}
+	}
+	if _, err := f.service.IssueForEnrolment(ctx, EnrolmentRequest{Caller: caller, Subject: newID(t), EnrolmentID: enrolmentID}); !errors.Is(err, ErrNotFound) {
+		t.Errorf("an unknown Principal returned %v", err)
+	}
+	f.kernel.FailContainment = errors.New("kernel down")
+	if _, err := f.service.IssueForEnrolment(ctx, EnrolmentRequest{Caller: caller, Subject: subject, EnrolmentID: enrolmentID}); !errors.Is(err, ErrUnavailable) {
+		t.Errorf("a kernel failure returned %v", err)
+	}
+	f.kernel.FailContainment = nil
+	f.kernel.FailSecurity = errors.New("kernel down")
+	if _, err := f.service.IssueForEnrolment(ctx, EnrolmentRequest{Caller: caller, Subject: subject, EnrolmentID: enrolmentID}); !errors.Is(err, ErrUnavailable) {
+		t.Errorf("an unreadable kernel returned %v", err)
+	}
+}

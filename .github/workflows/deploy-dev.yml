@@ -325,6 +325,16 @@ jobs:
           export IDENTITY_OPERATOR_TOTP_FILE="$RUNNER_TEMP/operator-totp.json"
           pwsh -NoProfile -File scripts/dev-first-credential-proof.ps1 -ComposeDir deploy/dev
 
+      # ADR-IAM-011 §5.8, TDD-identity-control-001 1.27.0: the enrolment routes admit a workload the
+      # enrolment caller record names, read the client address from its Forwarded alone, count it before
+      # Organization Control is asked, and answer 429 past the limit. The whole enrolment runs in
+      # organization-control's deploy-dev, against the real Organization Control.
+      - name: the enrolment caller and its limits
+        run: |
+          set -a; . deploy/dev/.env; set +a
+          export IDENTITY_OPERATOR_TOTP_FILE="$RUNNER_TEMP/operator-totp.json"
+          pwsh -NoProfile -File scripts/dev-enrolment-proof.ps1 -KeyDir "$RUNNER_TEMP/enrolment-proof"
+
       # ROADMAP §Gates, production gate: session removal's accept-to-enforcement delay, measured
       # against this kernel (TDD-identity-control-005 2.10.0 §Enforcement Delay). It ends the bootstrap
       # operator's sessions, so it runs after every step that reads them.

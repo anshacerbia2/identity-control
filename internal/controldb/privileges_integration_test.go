@@ -731,6 +731,9 @@ var auditTables = []string{
 	"identity.temporary_password_issuance",
 	"identity.temporary_password_outcome",
 	"identity.security_notification",
+	"identity.enrolment_caller",
+	"identity.enrolment",
+	"identity.enrolment_message",
 }
 
 // TestNoAuditRecordIsPurgedBeforeSevenYears is STD-GLB-007 1.2.1 §5 item 4 for this service, read from

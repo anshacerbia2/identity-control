@@ -72,6 +72,9 @@ var AuditTables = []struct {
 	{AuditTable{"identity.temporary_password_issuance", []string{"issued_at", "lapses_at"}}, true},
 	{AuditTable{"identity.temporary_password_outcome", []string{"recorded_at"}}, true},
 	{AuditTable{"identity.security_notification", []string{"occurred_at", "next_attempt_at", "requested_at", "submitted_at"}}, true},
+	{AuditTable{"identity.enrolment_caller", []string{"registered_at", "retired_at"}}, true},
+	{AuditTable{"identity.enrolment", []string{"code_expires_at", "verifying_until", "created_at", "closed_at"}}, true},
+	{AuditTable{"identity.enrolment_message", []string{"next_attempt_at", "requested_at", "submitted_at"}}, true},
 }
 
 // expired is the boundary every purge statement compares a row's newest timestamp with. $1 is the
@@ -133,6 +136,21 @@ var auditPurges = []struct{ table, statement string }{
 		  WHERE o.state IN ('applied', 'refused')
 		    AND greatest(o.next_attempt_at, o.created_at, o.applied_at) ` + expired + `
 		    AND NOT EXISTS (SELECT 1 FROM identity.security_operation_attempt a WHERE a.operation_id = o.operation_id)`},
+	// Enrolment (TDD-identity-control-001 1.27.0): a message before the enrolment it names, and an
+	// enrolment before the temporary password issuance it names. An open enrolment, a message not yet
+	// handed over and a registered caller not retired are in force.
+	{"identity.enrolment_message",
+		`DELETE FROM identity.enrolment_message
+		  WHERE state <> 'requested'
+		    AND greatest(next_attempt_at, requested_at, submitted_at) ` + expired},
+	{"identity.enrolment",
+		`DELETE FROM identity.enrolment e
+		  WHERE e.state <> 'open'
+		    AND greatest(e.code_expires_at, e.verifying_until, e.created_at, e.closed_at) ` + expired + `
+		    AND NOT EXISTS (SELECT 1 FROM identity.enrolment_message m WHERE m.enrolment_id = e.enrolment_id)`},
+	{"identity.enrolment_caller",
+		`DELETE FROM identity.enrolment_caller
+		  WHERE retired_at IS NOT NULL AND greatest(registered_at, retired_at) ` + expired},
 	// An outcome goes with its issuance, both expired, in one statement: an issuance left without its
 	// outcome would read as open, and the lapse sweep would act on it again.
 	{"identity.temporary_password_outcome",
@@ -142,6 +160,7 @@ var auditPurges = []struct{ table, statement string }{
 		     WHERE i.issuance_id = o.issuance_id
 		       AND o.recorded_at ` + expired + `
 		       AND greatest(i.issued_at, i.lapses_at) ` + expired + `
+		       AND NOT EXISTS (SELECT 1 FROM identity.enrolment e WHERE e.issuance_id = o.issuance_id)
 		    RETURNING o.issuance_id)
 		DELETE FROM identity.temporary_password_issuance i
 		 WHERE i.issuance_id IN (SELECT issuance_id FROM outcomes)`},
