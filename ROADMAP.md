@@ -820,10 +820,11 @@ from; an open one says what it waits on.
       is not purged.
     - Tests against PostgreSQL: a young record refused to the superuser and the purge role, an old one
       purged, `TRUNCATE` refused on every audit table, the purge's in-force rows kept.
-    - ⏳ **Waits on the architecture:** the kernel event record is kept until Audit & Evidence has it
-      (STD-IAM-001 §3.8), and the ceremony, its reviews and the ceremony grant's retirement are kept
-      while the realm exists, because they are its state. STD-GLB-007 1.2.1 has the rule stand as
-      written, so keeping them past 7 years needs its decision.
+    - ✅ **Aligned 2026-10-21 with STD-GLB-007 1.3.0 §Data Retention Lifecycle** (TDD-001 1.25.0 §Audit
+      Retention). Seven years is a minimum. A row counts from its newest timestamp, a row in force is
+      never purged, and the ceremony, its reviews and the ceremony grant's retirement are audit
+      evidence and state together: kept while the grant's record exists, so never purged. No code
+      change: the triggers and the pass already behave so. The kernel event record's purge is item 23.
 15. ✅ **Only the first Principal and the reviewer are served before the bootstrap review** (STD-IAM-001
     2.10.0 §3.10, ADR-IAM-001 §5.11 requirement 3, amended 2026-10-20; TDD-001 1.24.0 §The Bootstrap
     Ceremony). `docs/runbooks/bootstrap-ceremony.md` steps 5 and 6 create only the reviewer's Principal
@@ -839,6 +840,11 @@ from; an open one says what it waits on.
     Organization Control's `POST /v1/invitations/resolve`, and the enrolment record. Waits on
     organization-control's resolve route and identity-experience's enrolment page; in production on the
     Notification Platform.
+    - Recorded 2026-10-21 (ADR-IAM-011 §5.7 as amended, TDD-001 1.25.0 §Enrolment From an Invitation):
+      the client is a registered workload with an owner, admitted from an `invitation:resolve` registry
+      entry in organization-control (its ROADMAP item 56), signed in with its own key in development
+      too, never by its consumer registration. It treats the route's one `404` as "nothing" and never
+      forwards it. Registering the workload is part of this item.
 18. ⏳ **3b in `deploy-dev`: an `external` test registration and a live consent withdrawal**
     (STD-IAM-002 1.9.0 §3.6, ADR-IAM-003 §5.11, TDD-005 2.13.0). Recorded 2026-10-20. Today the smoke
     lists the bootstrap operator's consents, and the list is empty. Waits on identity-kernel marking
@@ -858,6 +864,15 @@ from; an open one says what it waits on.
     timeout values are ADR-GLB-004 §5.1 item 2's (amended 2026-10-20).
 22. ✅ **One registration per developer device, in the design** (ADR-IAM-001 §5.12 as amended
     2026-10-20, STD-GLB-009 1.10.0 rule 15; TDD-003 1.40.0 §Client Key Records). Done 2026-10-20.
+23. ⏳ **The `kernel_event` purge** (STD-GLB-007 1.3.0 §Data Retention Lifecycle, STD-IAM-001 §3.8;
+    TDD-001 1.25.0 §Audit Retention). Planned, recorded 2026-10-21. A row is purged once it is 7 years
+    old and Audit & Evidence has received it, whichever is later; until then it keeps its triggers and
+    is outside the pass (`Purged: false`). Waits on Audit & Evidence existing.
+24. ✅ **`.dockerignore` meets rule 12, and CI checks it** (STD-GLB-009 3.0.0 §Container Images rule 12
+    and §5 item 9, ADR-GLB-020; TDD-001 1.25.0 §The Migrate Image and Its Exceptions). Done 2026-10-21.
+    - The check found two gaps: `**/compose.override.yaml` and `.token`. Both are excluded.
+    - `scripts/check-dockerignore.sh` (the same file in all three repositories) and the `dockerignore`
+      job of `ci.yml` fail on a missing file or an unmatched path of the three kinds.
 
 ## Waiting on the Keycloak proof-of-concept
 

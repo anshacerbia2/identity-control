@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-001
   title: Canonical Principal Identifier and Creation Path
   owner: Core Platform Team
-  version: 1.24.0
+  version: 1.25.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-10
-  last_reviewed: 2026-10-20
+  last_reviewed: 2026-10-21
   parent_sad: SAD-001
 ---
 
@@ -166,7 +166,18 @@ recovery and the sweep are the same.
 - **The enrolment record**: the invitation, the address's hash, the Principal created and when. The
   first password binding is notified (`ADR-IAM-007 §5.1`). Nothing else is granted: the person accepts
   the invitation afterwards, signed in, as `ADR-ORG-007 §5.1` decides (§5.4).
-- **Waits on**: organization-control's resolve route, identity-experience's enrolment page, and in
+- **The resolve client (1.25.0, `ADR-IAM-011` §5.7 as amended 2026-10-21).** This service reaches
+  the route as a registered workload, admitted from a registry row, not from a scope or a `client_id`.
+  Organization Control's reporter registry gains an `invitation:resolve` entry for this workload's
+  `principal_id`, and that entry reaches the resolve route alone. It is not this service's consumer
+  registration (`SAD-004` §7.6), which admits it to the consumer routes only. The workload has an owner
+  and a review (`ADR-IAM-003 §5.8`) and signs in with its own client key, in development as in
+  production: no development flag admits another caller. Every outcome of the route that is not an
+  invitation is one `404` with one body (§5.7 (b)); the client treats it as "nothing" and never
+  forwards it, so its own answer stays the `202` above. Each call is recorded by Organization Control
+  with the entry's purpose, `invitation:resolve` (NIST AU-3). The client's own limits per invitation and
+  per client address bound the calls (§5.2).
+- **Waits on**: organization-control's resolve route (ROADMAP item 56 there), identity-experience's enrolment page, and in
   production the Notification Platform (§5.5, §5.6). The route classes, the table and the problem
   types are designed when it is built.
 
@@ -1208,12 +1219,21 @@ appears in structured logs; `keycloak_user_id` does not.
 
 ### Audit Retention
 
-1.23.0, rewritten in 1.24.0. `STD-GLB-007` 1.2.1 §Data Retention: audit logs are "Retained in
+1.23.0, rewritten in 1.24.0. `STD-GLB-007` 1.3.0 §Data Retention Lifecycle: audit logs are "Retained in
 immutable storage for `7 years`", every audit record counts, privileged access included, they are
 "purged after that by the owning service's own maintenance", and "A record younger than 7 years is
 never purged". Its §5 item 4 asks for tests that the purge "deletes only records older than 7 years",
 and that "a direct `DELETE` of a younger record and a `TRUNCATE` are refused, as the migration role
 and as a superuser". 1.2.1 records that this service had built neither; 1.24.0 builds both.
+
+**How the 7 years count (1.25.0, `STD-GLB-007` 1.3.0).** Seven years is a minimum, not a deadline.
+An evidence row counts from when it was written. A row that records something that stays in force
+counts from the later of when it was written and when it stopped being in force, and is never purged
+while in force. A row a current decision depends on is state, and is kept while it does. A
+`kernel_event` row is not purged until Audit & Evidence has received it. This service conforms:
+the row trigger's age is the greatest of the row's timestamps, and the purge leaves a row in force
+alone (below). The sources are the standard's (CA/Browser Forum BR §5.4.3 and §5.5.2, NIST AU-11,
+OMB M-21-31).
 
 This service's audit records are the tables that record a decision, an access or an outcome with who
 made it and why: `privileged_access`, `provider_emergency_use`, `kernel_event`, `bootstrap_ceremony`
@@ -1276,8 +1296,12 @@ retention under 7 years before it runs anything.
   - `bootstrap_ceremony`, `bootstrap_ceremony_review` and `ceremony_grant_retirement`: they are the
     realm's state as well as its record. The retirement's absence is what keeps the ceremony's grant
     retired (`TDD-identity-control-006` §The Ceremony's Grant), and the review's presence is what the
-    ceremony record reports as `reviewed`. **Open, for the architecture:** STD-GLB-007 1.2.1 says the
-    rule stands as written, so keeping these past 7 years needs its decision.
+    ceremony record reports as `reviewed`. Decided in `STD-GLB-007` 1.3.0 (§Realm state is audit
+    evidence as well): they are audit evidence and state together, kept while a decision depends on
+    them (the retirement's record exists) and for 7 years after, so none of the three is purged.
+  - **`kernel_event` purge, planned (ROADMAP item 23).** Once Audit & Evidence exists, a row is purged
+    when it is 7 years old and received, whichever is later (`STD-GLB-007` 1.3.0). Until then the
+    row keeps its triggers and is not in the pass.
 
 **Tested against PostgreSQL on every build** (`internal/controldb`):
 
@@ -1409,6 +1433,14 @@ image scan's `.image-scan/`. identity-kernel's checkout holds its signing keysto
 owner alone, and sent, it failed the build with `permission denied`; excluded, it is never read. The
 images need `go.mod`, `go.sum`, the Go sources, `atlas.hcl`, `schema.hcl`, `migrations/` and
 `deploy/dev/migrate.sh`, none of which is excluded.
+
+**The rule and its check (1.25.0, `STD-GLB-009` 3.0.0 §Container Images rule 12 and §5 item 9,
+`ADR-GLB-020`).** The file MUST exclude secrets and key material, local state, and `.git` and
+`.github`. The check found two gaps against rule 12: a Compose override (`**/compose.override.yaml`,
+which holds a host's values) and a local token file (`.token`). Both are now excluded.
+`scripts/check-dockerignore.sh`, byte-identical in identity-kernel and organization-control, builds a
+scratch context with the file and a probe of each kind and fails when one reaches the context. It uses
+Docker's own matching. The `dockerignore` job of `ci.yml` runs it.
 
 **What the image runs.** The entrypoint is `identity-dev-migrate`. It runs `psql`, this repository's
 `identity-migrate`, and Atlas once, as `atlas migrate apply --env local`. Both of that environment's
@@ -1629,7 +1661,9 @@ not pulled.
 | Conforms to | STD-GLB-003 1.1.0 §State Metrics — the pending and quarantined gauges (1.18.0) |
 | Conforms to | STD-GLB-009 1.8.0 §Container Images rules 4, 5, 7, 8 and 10 — the migrate image's exceptions as VEX statements, and the zlib upgrade; 1.8.0 lands with scnehaux-architecture #86 (1.19.0) [R2]–[R10] |
 | Conforms to | STD-GLB-009 1.8.0 §Container Images rules 1 and 4 — the Atlas pin moves to 1.3.4, which fixes GO-2026-6617 and every earlier advisory in the binary, and its statements go (1.20.0) [R11] [R12] |
-| Conforms to | STD-GLB-007 1.2.1 §Data Retention and §5 item 4 — audit records kept 7 years, younger ones refused to every role by triggers, purged after by the scheduled pass as a role allowed only that delete (1.24.0) |
+| Conforms to | STD-GLB-007 1.3.0 §Data Retention Lifecycle and §5 item 4 — audit records kept 7 years, younger ones refused to every role by triggers, purged after by the scheduled pass as a role allowed only that delete (1.24.0); how the years count, and what is state (1.25.0) |
+| Conforms to | STD-GLB-009 3.0.0 §Container Images rule 12 and §5 item 9, authorized by ADR-GLB-020 — `.dockerignore` and its CI check (§The Migrate Image and Its Exceptions) |
+| Conforms to | ADR-IAM-011 §5.7 (amended 2026-10-21) — the resolve client is a registered workload with an `invitation:resolve` entry (§Enrolment From an Invitation) |
 | Conforms to | ADR-GLB-004 §5.1 items 1 to 3 — integrity, the destructive-statement gate (squawk after the cutover, the text match before it and for `TRUNCATE`) and synchronisation (1.24.0) |
 | Conforms to | STD-IAM-001 2.10.0 §3.10, ADR-IAM-001 §5.11 as amended 2026-10-20 — the reviewer is the one person served before the bootstrap review; every orphan adopted or triaged before a new Principal (1.24.0) |
 | Plans | ADR-IAM-011 §5.1 to §5.6 — enrolment from an invitation, a third creation path, not built (1.24.0) |
