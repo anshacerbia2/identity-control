@@ -162,6 +162,10 @@ func describe(problems []*verrors.ValidationError) string {
 	return strings.Join(lines, "\n")
 }
 
+// contractWaived names the operations whose success is not yet checked, with the reason. It is empty
+// unless a repository's own file fills it; the coverage gate does not ask for a success of these.
+var contractWaived = map[string]string{}
+
 // serveChecked runs a request through a handler and checks the exchange.
 func serveChecked(t testing.TB, handler http.Handler, request *http.Request) *httptest.ResponseRecorder {
 	t.Helper()
@@ -223,9 +227,10 @@ func uncovered() []string {
 				problem = problem || status >= 400
 			}
 			switch {
-			case wantSuccess && !success && !problem:
+			case wantSuccess && contractWaived[key] != "" && problem:
+			case wantSuccess && !success && contractWaived[key] == "" && !problem:
 				missing = append(missing, key+": no success and no problem")
-			case wantSuccess && !success:
+			case wantSuccess && !success && contractWaived[key] == "":
 				missing = append(missing, key+": no success")
 			case wantProblem && !problem:
 				missing = append(missing, key+": no problem")
