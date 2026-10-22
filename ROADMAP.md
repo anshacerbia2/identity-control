@@ -1017,6 +1017,14 @@ Two decisions are recorded here:
   own client with its own key, and both `.env.example` files say so. The two-key adoption in
   `scripts/dev-adopt-bff.ps1` stays, for a client caught in the middle of a rotation.
 
+- ✅ **`deploy-dev` proves the migrate image was built from the commit under test (2026-10-22, TDD-001
+  1.28.0 §The Migrate Image and Its Exceptions; STD-GLB-009 §Development Server Deployment, the
+  never-pulled rule).** Reason: run 39735938275 failed on the runner image `ubuntu-26.04` with "carries a
+  registry digest: it was pulled, not built", though the log shows it built. A local build there is
+  exported as a manifest list with attestations, so "no registry digest" no longer proves "built here".
+  The proof is now the `org.opencontainers.image.revision` label, set by compose `build.labels` from
+  `GITHUB_SHA` and read back from the image ID the migrate container runs. `pull_policy` stays asserted.
+
 ## API specification (ADR-GLB-010 §5.1)
 
 ✅ `api/openapi.yaml` is this service's published HTTP contract, an OpenAPI 3.1 document kept by hand

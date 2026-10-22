@@ -78,6 +78,7 @@ On the server, from `identity-control/deploy/dev`:
 3. **Register the registration client,** with its key: `./create-registration-client.sh`.
 4. **Make the key ring that seals `security_ref` handles:** `./create-security-ref-key.sh`.
 5. **Start the stack:** `docker compose up -d --build`.
+   `BUILD_REVISION=$(git rev-parse HEAD) docker compose up -d --build` also records the commit as the image's `org.opencontainers.image.revision` label (`unknown` without it); `deploy-dev` sets it and checks it.
 6. **Wait until it is ready:** `curl -fsS http://127.0.0.1:8082/readyz` answers once the migration
    job has succeeded.
 7. **Perform the bootstrap ceremony,** two named people, an operator and a witness, never the same
