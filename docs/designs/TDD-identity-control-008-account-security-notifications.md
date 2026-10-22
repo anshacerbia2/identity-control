@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-008
   title: Account Security Notifications
   owner: Core Platform Team
-  version: 1.7.0
+  version: 1.8.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-10-06
-  last_reviewed: 2026-10-19
+  last_reviewed: 2026-10-21
   parent_sad: SAD-001
 ---
 
@@ -162,6 +162,13 @@ rolls back both together.
 ## Algorithms / Logic
 
 ### Dispatch
+
+**Enrolment messages (1.8.0, `TDD-identity-control-001` 1.27.0, `ADR-IAM-011 §5.2`, §5.9).** An
+invited address no Principal holds yet is sent its code, or the "an account exists" message in its
+place, from `identity.enrolment_message`. The dispatcher takes them after the notification requests,
+with the same backoff and attempts; it opens a code (kind `enrolment-code`, bound to the enrolment) only
+to hand it over, and clears the address and the seal with the outcome. The development mail catcher
+renders both; the account message does not say whether the address was proven.
 
 ```text
 every 15 seconds:
@@ -498,6 +505,7 @@ impossible to lose without losing the event as well.
 | Relationship | Target |
 | :-- | :-- |
 | Governed by | ADR-IAM-007, NIST SP 800-63B-4 §4.6 through it |
+| Serves | ADR-IAM-011 §5.2, §5.5, §5.9 — enrolment messages through the same dispatcher (1.8.0) |
 | Conforms to | STD-IAM-001 §3.1 (2.6.0) |
 | Consumes | `TDD-identity-control-007`, the kernel event record |
 | Consumes | `TDD-identity-control-005`, the applied restore of assisted recovery (1.3.0) |

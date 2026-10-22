@@ -33,6 +33,7 @@ import (
 	"github.com/anshacerbia2/identity-control/internal/config"
 	"github.com/anshacerbia2/identity-control/internal/controldb"
 	"github.com/anshacerbia2/identity-control/internal/delivery"
+	"github.com/anshacerbia2/identity-control/internal/enrolment"
 	"github.com/anshacerbia2/identity-control/internal/firstcredential"
 	"github.com/anshacerbia2/identity-control/internal/httpapi"
 	"github.com/anshacerbia2/identity-control/internal/identity/provisioning"
@@ -491,6 +492,44 @@ func run() error {
 		logger.Warn("IDENTITY_ORGANIZATION_BASE_URL is unset; this consumer never reconciles itself with Organization Control")
 	}
 
+	// Enrolment from an invitation (ADR-IAM-011, TDD-identity-control-001 1.27.0). The routes are always
+	// served behind the caller record and the counts; without Organization Control a request answers
+	// 503 once counted, the same for every token, and :verify still serves the enrolments there are.
+	enrolmentCallers, err := enrolment.NewCallers(pool)
+	if err != nil {
+		return fmt.Errorf("enrolment callers: %w", err)
+	}
+	if routesConfig.EnrolmentCallers, err = httpapi.NewEnrolmentCallers(enrolmentCallers); err != nil {
+		return err
+	}
+	{
+		var enrolmentMeter metric.Meter
+		if exported != nil {
+			enrolmentMeter = exported.MeterProvider.Meter("github.com/anshacerbia2/identity-control/internal/enrolment")
+		}
+		enrolments, err := enrolment.New(pool, invitationResolver{frontier}, kernel, provisioner, firstCredentials,
+			refs, refs, enrolment.Config{Realm: keycloak.Realm(cfg.KeycloakRealm), CallTimeout: cfg.ProvisionTimeout},
+			logger, enrolmentMeter)
+		if err != nil {
+			return fmt.Errorf("enrolment: %w", err)
+		}
+		enrolmentVerifier, err := verify.New(verify.Config{
+			Issuer: cfg.TokenIssuer, Audience: cfg.TokenAudience, Keys: keys,
+			Requirement:            httpapi.EnrolmentCallerRequirement(),
+			MaxSkew:                cfg.TokenMaxSkew,
+			RequireAccessTokenType: cfg.EnforceAccessTokenType,
+		})
+		if err != nil {
+			return fmt.Errorf("enrolment verifier: %w", err)
+		}
+		routesConfig.Enrolments, routesConfig.EnrolmentVerifier, routesConfig.EnrolmentAdmission =
+			enrolments, enrolmentVerifier, enrolmentCallers
+		go scheduleEnrolmentSweeps(ctx, enrolments, logger)
+		if frontier == nil {
+			logger.Warn("IDENTITY_ORGANIZATION_BASE_URL is unset; POST /v1/enrolments answers 503 once counted")
+		}
+	}
+
 	surface, err := httpapi.Routes(routesConfig)
 	if err != nil {
 		return fmt.Errorf("routes: %w", err)
@@ -940,6 +979,34 @@ func scheduleKernelEventSweeps(ctx context.Context, sweeper *kernelevents.Sweepe
 	for {
 		if _, err := sweeper.Sweep(ctx); err != nil && ctx.Err() == nil {
 			logger.Error("kernel event sweep failed", slog.String("error", err.Error()))
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// invitationResolver adapts Organization Control's client to the enrolment's question.
+type invitationResolver struct{ client *organization.Client }
+
+func (r invitationResolver) Resolve(ctx context.Context, token string) (enrolment.Invitation, bool, error) {
+	if r.client == nil {
+		return enrolment.Invitation{}, false, errors.New("organization control is not configured")
+	}
+	invitation, found, err := r.client.ResolveInvitation(ctx, token)
+	return enrolment.Invitation{ID: invitation.ID, Address: invitation.Address}, found, err
+}
+
+// scheduleEnrolmentSweeps deletes the enrolment counts whose window has ended, and closes the
+// enrolments whose code has lapsed, every minute (ADR-IAM-011 §5.8).
+func scheduleEnrolmentSweeps(ctx context.Context, enrolments *enrolment.Service, logger *slog.Logger) {
+	ticker := time.NewTicker(enrolment.SweepInterval)
+	defer ticker.Stop()
+	for {
+		if _, err := enrolments.Sweep(ctx); err != nil && ctx.Err() == nil {
+			logger.Warn("the enrolment sweep failed; it runs again next interval", slog.String("error", err.Error()))
 		}
 		select {
 		case <-ctx.Done():

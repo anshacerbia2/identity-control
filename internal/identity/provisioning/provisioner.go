@@ -32,6 +32,13 @@ type CreateRequest struct {
 	SubjectType   keycloak.SubjectType
 	WorkloadOwner id.UUID
 
+	// VerifiedEmail writes the creation address proven, and QuarantineOnConflict quarantines the
+	// pending mapping when the kernel refuses the user as a duplicate (a definite 409: nothing was
+	// created), so recovery has nothing to finish. Both are an enrolment's (ADR-IAM-011 §5.3, §5.9,
+	// TDD-identity-control-001 1.27.0); every other caller leaves them false.
+	VerifiedEmail        bool
+	QuarantineOnConflict bool
+
 	// principalID is the identifier the bootstrap ceremony minted when it claimed its row, so the
 	// insert-only row names the Principal created. Unexported: no caller outside this package can
 	// choose an identifier, and validateCreate refuses it from anything but the ceremony.
@@ -194,6 +201,7 @@ func (p *Provisioner) Create(ctx context.Context, req CreateRequest) (Response, 
 			IdempotencyScope: req.CallerScope,
 			IdempotencyKey:   req.IdempotencyKey,
 			RequestDigest:    digest,
+			EmailVerified:    req.VerifiedEmail,
 		})
 	})
 	if err != nil {
@@ -219,6 +227,20 @@ func (p *Provisioner) Create(ctx context.Context, req CreateRequest) (Response, 
 		SubjectType:   req.SubjectType,
 		WorkloadOwner: req.WorkloadOwner,
 	})
+	if createErr != nil && req.QuarantineOnConflict && errors.Is(createErr, keycloak.ErrConflict) {
+		// A 409 is a definite refusal: the kernel wrote nothing. The mapping is quarantined with the
+		// reason, so recovery, which reads pending mappings alone, has nothing to finish, and the
+		// identifier stays on record (TDD-identity-control-001 1.27.0, ADR-IAM-011 §5.9).
+		if err := p.tx.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+			return p.repo.Quarantine(ctx, tx, principalID,
+				"enrolment: the kernel refused the user as a duplicate of an existing username or email; no user was created")
+		}); err != nil {
+			return Response{}, fmt.Errorf("provisioning: quarantine a refused enrolment: %w", err)
+		}
+		p.logger.WarnContext(ctx, "the kernel refused an enrolled Principal as a duplicate; its mapping is quarantined",
+			slog.String("principal_id", principalID.String()))
+		return Response{}, fmt.Errorf("provisioning: create kernel user: %w", ErrKernelDuplicate)
+	}
 	if createErr != nil {
 		// The mapping stays pending on purpose. Rolling it back would discard the
 		// identifier that is the only way to find the user if the call actually

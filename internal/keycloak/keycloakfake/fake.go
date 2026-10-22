@@ -67,6 +67,17 @@ type Client struct {
 	// a response lost after the kernel committed.
 	AmbiguousCreateSucceeds bool
 
+	// IDPrefix, when set, replaces "kc-user" in the identifiers this fake assigns, so fakes that share
+	// one database across tests do not assign the same kernel identifier twice.
+	IDPrefix string
+
+	// RefuseDuplicateEmail makes CreateUser refuse an email another user holds, without case, as the
+	// realm's duplicateEmailsAllowed false does (ADR-IAM-011 §5.9).
+	RefuseDuplicateEmail bool
+
+	// FailLookup is returned by FindByUsernameOrEmail when set.
+	FailLookup error
+
 	// FailFind, FailList, FailDisable and FailWrite are returned by their operations when set.
 	FailFind    error
 	FailList    error
@@ -140,6 +151,15 @@ type stored struct {
 	requiredActions []string
 }
 
+// assign names the next user. Called with the lock held.
+func (c *Client) assign() keycloak.UserID {
+	prefix := c.IDPrefix
+	if prefix == "" {
+		prefix = "kc-user"
+	}
+	return keycloak.UserID(fmt.Sprintf("%s-%04d", prefix, c.nextID))
+}
+
 // New returns an empty fake.
 func New() *Client {
 	return &Client{users: make(map[keycloak.UserID]stored)}
@@ -166,6 +186,10 @@ func (c *Client) CreateUser(ctx context.Context, req keycloak.CreateUserRequest)
 		if existing.realm == req.Realm && strings.EqualFold(existing.user.Username, req.Username) {
 			return "", fmt.Errorf("username %q: %w", req.Username, keycloak.ErrConflict)
 		}
+		if c.RefuseDuplicateEmail && req.Email != "" && existing.realm == req.Realm &&
+			strings.EqualFold(existing.user.Email, req.Email) {
+			return "", fmt.Errorf("email: %w", keycloak.ErrConflict)
+		}
 	}
 
 	if c.FailCreate != nil && !c.AmbiguousCreateSucceeds {
@@ -173,7 +197,7 @@ func (c *Client) CreateUser(ctx context.Context, req keycloak.CreateUserRequest)
 	}
 
 	c.nextID++
-	userID := keycloak.UserID(fmt.Sprintf("kc-user-%04d", c.nextID))
+	userID := c.assign()
 	c.users[userID] = stored{
 		realm: req.Realm,
 		user: keycloak.User{
@@ -245,6 +269,46 @@ func (c *Client) FindByPrincipalID(ctx context.Context, realm keycloak.Realm, pr
 		found = append(found, entry.user)
 	}
 	return found, nil
+}
+
+// FindByUsernameOrEmail returns the users whose username or email equals the value without case.
+func (c *Client) FindByUsernameOrEmail(ctx context.Context, realm keycloak.Realm, value string) ([]keycloak.User, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.FailLookup != nil {
+		return nil, c.FailLookup
+	}
+	var found []keycloak.User
+	for _, entry := range c.users {
+		if entry.realm == realm && (strings.EqualFold(entry.user.Username, value) || strings.EqualFold(entry.user.Email, value)) {
+			found = append(found, entry.user)
+		}
+	}
+	return found, nil
+}
+
+// SetEmail gives an existing user an email, as a console edit would.
+func (c *Client) SetEmail(userID keycloak.UserID, email string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if entry, ok := c.users[userID]; ok {
+		entry.user.Email = email
+		c.users[userID] = entry
+	}
+}
+
+// SeedEmail records a user with a username and an email and no Principal, as a user a prohibited path
+// or a lost mapping left behind.
+func (c *Client) SeedEmail(realm keycloak.Realm, username, email string) keycloak.UserID {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.nextID++
+	userID := c.assign()
+	c.users[userID] = stored{realm: realm, user: keycloak.User{ID: userID, Username: username, Email: email, Enabled: true}}
+	return userID
 }
 
 // ListUsers returns a page of users in a stable order.
@@ -385,7 +449,7 @@ func (c *Client) Seed(realm keycloak.Realm, username string, principalID id.UUID
 	defer c.mu.Unlock()
 
 	c.nextID++
-	userID := keycloak.UserID(fmt.Sprintf("kc-user-%04d", c.nextID))
+	userID := c.assign()
 	c.users[userID] = stored{
 		realm: realm,
 		user: keycloak.User{

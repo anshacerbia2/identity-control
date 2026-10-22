@@ -492,3 +492,8 @@ func (a *Addresses) Remove(ctx context.Context, principal, addressID id.UUID) er
 	}
 	return nil
 }
+
+// NormalizeAddress parses one bare addr-spec, as an added address is parsed: no display name, no
+// list, at most 254 characters, and returns it as given. An enrolment reads an invited address with it
+// (TDD-identity-control-001 1.27.0).
+func NormalizeAddress(raw string) (string, error) { return normalized(raw) }

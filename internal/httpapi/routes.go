@@ -70,6 +70,15 @@ type RoutesConfig struct {
 	Identifiers        IdentifierMatcher
 	IdentifierVerifier TokenVerifier
 
+	// Enrolments runs enrolment from an invitation, EnrolmentVerifier verifies the BFF workload's token
+	// and EnrolmentAdmission admits it from the record (TDD-identity-control-001 1.27.0). Any nil, the
+	// two routes answer 503. EnrolmentCallers serves the record's provider routes; nil, they are not
+	// mounted.
+	Enrolments         Enrolments
+	EnrolmentVerifier  TokenVerifier
+	EnrolmentAdmission EnrolmentAdmission
+	EnrolmentCallers   *EnrolmentCallers
+
 	// TemporaryPasswords serves a provider's :issue-temporary-password (TDD-identity-control-005
 	// 2.12.0). Nil, the action is unknown.
 	TemporaryPasswords *TemporaryPasswords
@@ -112,6 +121,10 @@ type Surface struct {
 	// Identifiers is the identifier match Organization Control asks at an invitation's acceptance. It
 	// verifies its own caller, Organization Control's workload, as Deliveries does.
 	Identifiers http.Handler
+
+	// Enrolments is POST /v1/enrolments and :verify. It verifies its own caller, a BFF workload the
+	// enrolment caller record admits, as Identifiers does (ADR-IAM-011 §5.8).
+	Enrolments http.Handler
 }
 
 // Routes builds the HTTP surface.
@@ -274,6 +287,11 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	api.HandleFunc("GET /v1/registration-requests", p(cfg.Registrations.RequestQueue))
 	api.HandleFunc("GET /v1/registration-requests:mine", creator(cfg.Registrations.MyRequests))
 	api.HandleFunc("POST /v1/registration-requests/{request_action}", creator(k.replay(cfg.Registrations.RequestAction)))
+	if cfg.EnrolmentCallers != nil {
+		api.HandleFunc("GET /v1/enrolment-callers", p(cfg.EnrolmentCallers.List))
+		api.HandleFunc("POST /v1/enrolment-callers", p(k.replay(cfg.EnrolmentCallers.Register)))
+		api.HandleFunc("POST /v1/enrolment-callers/{caller_action}", p(k.replay(cfg.EnrolmentCallers.Action)))
+	}
 	api.HandleFunc("POST /v1/workloads", p(k.cmd(cfg.Workloads.CreateWorkload)))
 	// The read and :review are the workload owner's too, and every other action a provider's
 	// (TDD-identity-control-004 1.5.0, 1.7.0; ADR-IAM-003 §5.8). :mine is the caller's own.
@@ -287,7 +305,8 @@ func Routes(cfg RoutesConfig) (Surface, error) {
 	api.HandleFunc("GET /v1/workloads:reviews-overdue", p(cfg.Workloads.ReviewsOverdue))
 
 	return Surface{Probes: probes, API: api, Deliveries: deliveryIntake(cfg.DeliveryVerifier, cfg.Deliveries),
-		Identifiers: identifierMatch(cfg.IdentifierVerifier, cfg.Identifiers, cfg.Telemetry)}, nil
+		Identifiers: identifierMatch(cfg.IdentifierVerifier, cfg.Identifiers, cfg.Telemetry),
+		Enrolments:  enrolmentRoutes(cfg.EnrolmentVerifier, cfg.EnrolmentAdmission, cfg.Enrolments)}, nil
 }
 
 // Mount joins the two halves onto one root mux, each behind the chain its half requires.
@@ -306,6 +325,10 @@ func (s Surface) Mount(probeChain, apiChain func(http.Handler) http.Handler) htt
 	}
 	if s.Identifiers != nil {
 		root.Handle("POST /v1/principals/{principal_id}/identifiers:match", probeChain(s.Identifiers))
+	}
+	if s.Enrolments != nil {
+		root.Handle("POST /v1/enrolments", probeChain(s.Enrolments))
+		root.Handle("POST /v1/enrolments/{enrolment_action}", probeChain(s.Enrolments))
 	}
 	root.Handle("/", apiChain(reasonHeaders(s.API)))
 	return root

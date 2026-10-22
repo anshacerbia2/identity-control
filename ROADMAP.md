@@ -834,7 +834,7 @@ from; an open one says what it waits on.
     §5.11, amended 2026-10-20; TDD-001 1.24.0 §Re-Adopting an Orphan). `:adopt`'s check 3 leaves out
     mappings an adoption wrote and counts every other, so the restore runbook's step 7 creates no
     Principal while an `orphan` finding is open. Done 2026-10-20.
-17. ⏳ **Enrolment from an invitation** (ADR-IAM-011 §5.1 to §5.6, accepted 2026-10-20; TDD-001 1.24.0
+17. ✅ **Enrolment from an invitation** (ADR-IAM-011 §5.1 to §5.6, accepted 2026-10-20; TDD-001 1.24.0
     §Enrolment From an Invitation). Planned, recorded 2026-10-20: `POST /v1/enrolments` and
     `POST /v1/enrolments/{enrolment_id}:verify` (anonymous, rate-limited, one answer), the client of
     Organization Control's `POST /v1/invitations/resolve`, and the enrolment record. Waits on
@@ -851,14 +851,35 @@ from; an open one says what it waits on.
       validation-failed as "nothing", `403` as `ErrRefused`, and anything else as an error. The
       `invitation:resolve` entry is registered by organization-control (its `scripts/dev-wire.ps1` in
       development).
-    - ⏳ **Open questions, recorded 2026-10-21.** The two routes, the enrolment table, the code and the
+    - ✅ **Open questions, recorded 2026-10-21, decided the same day** (scnehaux-architecture #118): The two routes, the enrolment table, the code and the
       temporary password are not built until the architecture decides:
       - Q1, ADR-IAM-011 §5.2: the rate-limit values and windows, and how the client address reaches
         this service (identity-experience's BFF drops `x-forwarded-for`, and the route is anonymous).
       - Q2, ADR-IAM-011 §5.1 and §5.3: what an address held but not proven, or an existing kernel
         username or email, answers (the realm refuses duplicate emails at `:verify`).
       - Q3, STD-IAM-001 §3.1 (2.8.0): the temporary password shown to the enrolling person needs the
-        amendment ADR-IAM-011 §5.6 and §7 name, not on scnehaux-architecture main yet.
+        amendment ADR-IAM-011 §5.6 and §7 name. Decided: Q1 by ADR-IAM-011 §5.8, Q2 by §5.9, Q3 by
+        STD-IAM-001 3.1.0 §3.1.
+    - ✅ **The rest built 2026-10-21** (TDD-001 1.27.0 §Enrolment From an Invitation; ADR-IAM-011 §5.1 to
+      §5.9; STD-IAM-001 3.1.0 §3.1; `api/openapi.yaml` 1.2.0):
+      - `POST /v1/enrolments` and `:verify`, mounted apart and admitted only for a BFF workload named
+        in `identity.enrolment_caller` (`GET`/`POST /v1/enrolment-callers`, `:retire`, a provider's);
+        the client address from the first `Forwarded` `for` of that workload's call alone, `400` when
+        missing (§5.8);
+      - the four counts in `identity.enrolment_count` under a keyed hash, deleted when their window
+        ends: 5/min and 20/h per address on the request, 5/min and 30/h on `:verify` (`429` with
+        `Retry-After`), 3/h and 5/day messages per invitation and 15 failed codes a day, both silent;
+      - one `202` with a fresh identifier in every case but a sent code; the double check at the
+        request and again before the create, with the "an account exists" message for a held address
+        or an existing kernel username or email (§5.9); a kernel duplicate at the create quarantines
+        the pending mapping so recovery has nothing to finish;
+      - the code (8 digits, 10 minutes, five attempts, sealed in `identity.enrolment_message`), the
+        Principal through `provisioning.Create` with its creation address proven, and the temporary
+        password through `firstcredential`, shown once with `no-store` (STD-IAM-001 3.1.0's second
+        recipient); the enrolment record as evidence, with the audit retention triggers.
+      - Not this repository: identity-experience's enrolment page and BFF routes, and its workload and
+        `Forwarded` (ADR-IAM-011 §5.6, §5.8); organization-experience's **I do not have an account**
+        link. In production the Notification Platform (§5.5).
 18. ⏳ **3b in `deploy-dev`: an `external` test registration and a live consent withdrawal**
     (STD-IAM-002 1.9.0 §3.6, ADR-IAM-003 §5.11, TDD-005 2.13.0). Recorded 2026-10-20. Today the smoke
     lists the bootstrap operator's consents, and the list is empty. Waits on identity-kernel marking

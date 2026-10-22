@@ -212,6 +212,41 @@ func (a *Admin) FindByPrincipalID(ctx context.Context, realm Realm, principalID 
 	}
 }
 
+// FindByUsernameOrEmail returns every user whose username or email equals the value, compared
+// without case (TDD-identity-control-001 1.27.0 §Enrolment From an Invitation, ADR-IAM-011 §5.9). The
+// kernel is asked twice with exact=true, once for each attribute: "exact: Boolean which defines whether
+// the params "last", "first", "email" and "username" must match exactly" (Keycloak Admin REST API, GET
+// /admin/realms/{realm}/users). The answer is still filtered here, as FindByPrincipalID filters, so a
+// release that loosened the match could not report a stranger as a collision or hide one.
+func (a *Admin) FindByUsernameOrEmail(ctx context.Context, realm Realm, value string) ([]User, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, errors.New("keycloak: refusing to search for an empty username or email")
+	}
+	var found []User
+	seen := map[UserID]bool{}
+	for _, attribute := range []string{"username", "email"} {
+		query := url.Values{}
+		query.Set(attribute, value)
+		query.Set("exact", "true")
+		query.Set("max", strconv.Itoa(findPageSize))
+		users, err := a.listUsers(ctx, realm, query)
+		if err != nil {
+			return nil, err
+		}
+		for _, user := range users {
+			if seen[user.ID] {
+				continue
+			}
+			if strings.EqualFold(user.Username, value) || strings.EqualFold(user.Email, value) {
+				seen[user.ID] = true
+				found = append(found, user)
+			}
+		}
+	}
+	return found, nil
+}
+
 // ListUsers enumerates a page for the reconciliation sweep.
 func (a *Admin) ListUsers(ctx context.Context, realm Realm, page Page) ([]User, error) {
 	if page.Max <= 0 {

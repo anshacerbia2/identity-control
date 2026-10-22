@@ -12,8 +12,11 @@ package securityref
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -37,6 +40,9 @@ const (
 	// KindNotificationProof is a notification address's proof code, sealed while its request waits
 	// for the dispatcher (TDD-identity-control-008 1.2.0). Its "kernel identifier" is the code.
 	KindNotificationProof Kind = "notification-address-proof"
+	// KindEnrolmentCode is an enrolment's code, sealed while its message waits for the dispatcher and
+	// bound to the enrolment identifier (TDD-identity-control-001 1.27.0, ADR-IAM-011 §5.2).
+	KindEnrolmentCode Kind = "enrolment-code"
 )
 
 // PurposeAdminRevoke is the purpose an authenticator's handle is sealed for in a provider's read:
@@ -217,4 +223,18 @@ func (c *Codec) open(handle string, kind Kind, principal id.UUID, purpose string
 	}
 	expires := time.Unix(p.Expires, 0).UTC()
 	return Ref{Kind: kind, Principal: principal, Purpose: purpose, Realm: p.Realm, KernelID: p.KernelID, Expires: expires}, nil
+}
+
+// KeyedHash is HMAC-SHA256 of value under a key derived from the sealing key for purpose alone, in
+// hex. It names a value in a store without holding it: the enrolment counts key on it, so the table
+// holds no address and no invitation identifier (ADR-IAM-011 §5.8: "under a keyed hash"). The derived
+// key is HMAC-SHA256(sealing key, "scnehaux.securityref.keyed-hash.v1|" + purpose), so a hash for one
+// purpose says nothing about another, and the sealing key itself never keys a hash. A ring rotation
+// changes every hash.
+func (c *Codec) KeyedHash(purpose, value string) string {
+	derive := hmac.New(sha256.New, c.keys[0].Secret)
+	derive.Write([]byte("scnehaux.securityref.keyed-hash.v1|" + purpose))
+	mac := hmac.New(sha256.New, derive.Sum(nil))
+	mac.Write([]byte(value))
+	return hex.EncodeToString(mac.Sum(nil))
 }

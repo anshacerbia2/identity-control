@@ -19,6 +19,7 @@
       "internal/config",
       "internal/controldb",
       "internal/delivery",
+      "internal/enrolment",
       "internal/firstcredential",
       "internal/httpapi",
       "internal/identity/provisioning",
@@ -128,6 +129,21 @@
       "the kernel event sweep calls it through the composition root's hook."
     ],
     "internal/firstcredential": ["internal/keycloak", "internal/keycloak/keycloakfake"],
+    "_comment_enrolment": [
+      "internal/enrolment is the third creation path: an invitee who proved the invited address",
+      "(ADR-IAM-011, TDD-identity-control-001 1.27.0). It creates through provisioning, issues the first",
+      "password through firstcredential, queues its mail through securitynotify and keys its counts with",
+      "securityref. Organization Control's resolve reaches it through an interface the composition root",
+      "fills from internal/organization, so it holds no network client."
+    ],
+    "internal/enrolment": [
+      "internal/firstcredential",
+      "internal/identity/provisioning",
+      "internal/keycloak",
+      "internal/keycloak/keycloakfake",
+      "internal/securitynotify",
+      "internal/securityref"
+    ],
     "internal/securityref": [],
     "internal/investigation": [
       "internal/keycloak",
@@ -146,6 +162,7 @@
     ],
     "internal/httpapi": [
       "internal/delivery",
+      "internal/enrolment",
       "internal/firstcredential",
       "internal/identity/provisioning",
       "internal/investigation",

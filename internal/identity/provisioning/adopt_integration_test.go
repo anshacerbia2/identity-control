@@ -245,3 +245,33 @@ func (p *portability) state2(principalID id.UUID) (string, string) {
 	}
 	return state, user
 }
+
+// An adopted orphan's email becomes its creation address, not proven: nobody has shown the person reads
+// it (ADR-ORG-007 §5.3). Found by deploy-dev's restore drill, which adopts a user with an email.
+func TestAnAdoptedOrphansEmailIsAnUnprovenCreationAddress(t *testing.T) {
+	p := newPortability(t)
+	events := keycloakfake.NewEvents()
+	p.adopter(events)
+	p.create("kept.with.address")
+	identifier := uuidV7At(t, time.Now().Add(time.Hour))
+	user := p.kernel.Seed(portabilityRealm, "orphan.with.address", identifier, keycloak.SubjectHuman)
+	p.kernel.SetEmail(user, "orphan."+identifier.String()+"@example.test")
+	events.Record(keycloak.KernelEvent{Kind: keycloak.KindAdminEvent, ID: "admin-event-orphan.with.address",
+		Time: time.Now().UTC(), Type: "CREATE", ResourceType: "USER", ResourcePath: "users/" + string(user),
+		UserID: creatorAccount, Representation: `{"username":"orphan.with.address","attributes":{"scnehaux_principal_id":["` +
+			identifier.String() + `"]}}`})
+	if _, err := p.provisioner.Sweep(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if adopted, err := p.adopt(identifier, false); err != nil || !adopted.Adopted {
+		t.Fatalf("adopt: %+v, %v", adopted, err)
+	}
+	var origin string
+	var proven bool
+	if err := p.pool.InTx(context.Background(), func(ctx context.Context, tx db.Tx) error {
+		return tx.QueryRow(ctx, `SELECT origin, verified_at IS NOT NULL FROM identity.notification_address WHERE principal_id = $1`,
+			identifier.String()).Scan(&origin, &proven)
+	}); err != nil || origin != "creation" || proven {
+		t.Errorf("the adopted address is %q, proven %t (%v); want an unproven creation address", origin, proven, err)
+	}
+}

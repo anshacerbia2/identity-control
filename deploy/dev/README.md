@@ -418,6 +418,30 @@ organization-control's README shows. Until Organization Control admits a consume
 interval. That is expected on such a server, and the runbook's operator run
 (`docs/runbooks/projection-drift-repair.md`) stays the manual path.
 
+### Enrolment from an invitation
+
+A person invited to a Tenant who holds no account enrols at `POST /v1/enrolments` and
+`POST /v1/enrolments/{enrolment_id}:verify` (ADR-IAM-011, `TDD-identity-control-001` 1.27.0). Identity
+Experience's BFF calls both as a workload of its own, never with a person's token, and forwards the
+client address in `Forwarded`. On a server built from zero:
+
+1. Organization Control is wired (above), and its `scripts/dev-wire.ps1` registered this service's
+   workload as its `invitation:resolve` entry (organization-control `deploy/dev/README.md` §6c). Without
+   `IDENTITY_ORGANIZATION_BASE_URL` a request is counted and answered `503`.
+2. A provider makes the BFF's enrolment workload with its own key, as any workload is made:
+   `POST /v1/workloads` `{"display_name","purpose","workload_type":"service","owner_principal_id",
+   "client_key","application_ref":"identity-experience","audience":["identity-control-api"],"public_key"}`.
+3. A provider admits it: `POST /v1/enrolment-callers` `{"principal_id","purpose"}` with
+   `Idempotency-Key` and `X-Administrative-Reason`. `GET /v1/enrolment-callers` lists the record, and
+   `POST /v1/enrolment-callers/{principal_id}:retire` stops its next request.
+4. The codes and the "an account exists" messages go to the mail catcher (`IDENTITY_NOTIFICATION_DELIVERY
+   =smtp-catcher`), where §Reading a code in the mail catcher reads them.
+
+`scripts/dev-enrolment-proof.ps1` runs steps 2 and 3 with a stand-in workload in `deploy-dev`, and proves
+the caller check, `Forwarded` and the limits; organization-control's `deploy-dev` runs the enrolment
+against the real Organization Control. The BFF's own workload and its enrolment page are
+identity-experience's.
+
 ### Adopting the BFF
 
 `identity-experience-bff` was created by `identity-experience`'s `deploy/dev/create-bff-client.sh`

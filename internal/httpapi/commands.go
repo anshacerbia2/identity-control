@@ -76,6 +76,8 @@ var replayedKey = map[string]string{
 	"POST /v1/me/notification-addresses":                               "an address added",
 	"POST /v1/me/notification-addresses/{address_action}":              "an address verified, removed, or sent a proof code",
 	"POST /v1/bootstrap-ceremony:review":                               "a review of the bootstrap ceremony's record (STD-IAM-001 2.9.0 §3.10)",
+	"POST /v1/enrolment-callers":                                       "a BFF workload admitted to the enrolment routes (ADR-IAM-011 §5.8)",
+	"POST /v1/enrolment-callers/{caller_action}":                       "an enrolment caller retired",
 }
 
 // adoptKey is POST /v1/registrations:adopt: the adoption requires the key and the service claims it;
@@ -106,6 +108,13 @@ var keyOptional = map[string]string{
 		"the inbox guard, so a repeat is acknowledged and applied once (TDD-identity-control-006)",
 	"POST /v1/principals/{principal_id}/identifiers:match": "a read carried in a body: it answers whether " +
 		"the Principal holds the address, proven, and changes nothing (TDD-identity-control-008 1.7.0)",
+	"POST /v1/enrolments": "a request for a code, bounded by its own rule: while an enrolment of the " +
+		"invitation is open a repeat sends nothing, and the per-invitation and per-address counts bound " +
+		"the rest (ADR-IAM-011 §5.2, §5.8; TDD-identity-control-001 1.27.0)",
+	"POST /v1/enrolments/{enrolment_action}": "a code returned once: after it completes the code is " +
+		"invalidated and a repeat creates nothing, and a repeat after a 503 resumes through the create's " +
+		"own key; a key here would record the temporary password, which no record may hold " +
+		"(ADR-IAM-011 §5.3, STD-IAM-001 3.1.0 §3.1)",
 }
 
 // KeyRetention is how long a completed command's Idempotency-Key, and the answer recorded with it,

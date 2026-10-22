@@ -3,7 +3,7 @@ doc_meta:
   id: TDD-identity-control-001
   title: Canonical Principal Identifier and Creation Path
   owner: Core Platform Team
-  version: 1.26.0
+  version: 1.27.0
   status: approved
   classification: restricted
   review_cycle_days: 90
@@ -127,7 +127,7 @@ Authorized
     Identity Control Service → Keycloak Admin API
         via POST /v1/principals              ordinary path, authenticated caller
         via the bootstrap ceremony           single use per Control Database
-        via an enrolment (planned, 1.24.0)   anonymous, an invitee who proved the invited address
+        via an enrolment (built, 1.27.0)     the BFF workload, for an invitee who proved the invited address
 
 Prohibited in this phase
     Self-registration
@@ -141,32 +141,178 @@ Prohibited paths are closed by realm configuration rather than by policy alone. 
 reconciler treats any Principal that appears without a mapping as evidence that a
 prohibited path is open, and quarantines it.
 
-#### Enrolment From an Invitation (resolve client built; the rest planned)
+#### Enrolment From an Invitation (built 1.27.0)
 
-1.24.0, `ADR-IAM-011` (accepted 2026-10-20) §5.1 to §5.6. **Planned, not built** (`ROADMAP.md` item
-17), except the resolve client, built in 1.26.0. The routes, the table, the code and the temporary
-password wait on the three open questions at the end of this section. A person invited to a Tenant who holds no account creates one from the invitation, after proving
-the invited address. It is a third authorized creation path, beside the ceremony and
-`POST /v1/principals`, and it creates the Principal through the ordinary path's code, so the mapping,
-recovery and the sweep are the same.
+1.24.0 to 1.27.0, `ADR-IAM-011` §5.1 to §5.9 (accepted 2026-10-20, amended twice on 2026-10-21) and
+`STD-IAM-001` 3.1.0 §3.1. **Built in 1.27.0** (`ROADMAP.md` item 17); the resolve client was built in
+1.26.0. A person invited to a Tenant who holds no account creates one from the invitation, after
+proving the invited address. It is the third authorized creation path, beside the ceremony and
+`POST /v1/principals`. It creates the Principal through the ordinary path's code (`provisioning.Create`),
+so the pending mapping, its recovery and the sweep are the same.
 
-- **`POST /v1/enrolments`**, anonymous and rate-limited per invitation and per client address, takes
-  the invitation token in the body. This service asks Organization Control, as its workload, for the
-  invitation the token names (`POST /v1/invitations/resolve`, which admits this service's workload
-  alone and answers the invitation's identifier and target address only for one `pending` and
-  unexpired, naming no Tenant). It always answers `202` with one body, whatever the outcome: an
-  unknown, expired, revoked or accepted token, and an address a Principal already holds proven, are
-  not told apart (ADR-IAM-011 §5.1, OWASP WSTG-IDNT-04). One open enrolment per invitation.
-- **The code.** 8 digits from the operating system's random source, sent to the invited address
-  alone as `TDD-identity-control-008` sends an address proof, its SHA-256 kept sealed, good for 10
-  minutes and five attempts, invalidated on use (§5.2, NIST SP 800-63A-4).
-- **`POST /v1/enrolments/{enrolment_id}:verify`** with the code creates the Principal: username the
-  invited address, lower-cased; the creation address that address with `verified_at` set; a temporary
-  password issued as `ADR-IAM-010 §5.1` and §5.2 issue it, shown once with `no-store`, never stored or
-  logged. A wrong, expired or exhausted code creates nothing (§5.3).
-- **The enrolment record**: the invitation, the address's hash, the Principal created and when. The
-  first password binding is notified (`ADR-IAM-007 §5.1`). Nothing else is granted: the person accepts
-  the invitation afterwards, signed in, as `ADR-ORG-007 §5.1` decides (§5.4).
+```text
+POST /v1/enrolments                       the BFF workload, for an anonymous person   {"token"}  -> 202
+POST /v1/enrolments/{enrolment_id}:verify the BFF workload, for an anonymous person   {"code"}   -> 201
+GET  /v1/enrolment-callers                provider
+POST /v1/enrolment-callers                provider, Idempotency-Key, reason           {"principal_id","purpose"}
+POST /v1/enrolment-callers/{principal_id}:retire   provider, Idempotency-Key, reason
+```
+
+**The caller is the BFF workload, admitted from a record (§5.8).** The two enrolment routes are
+anonymous as to the person and not as to the caller. Identity Experience's BFF calls them as a
+registered workload with an owner (`ADR-IAM-003 §5.8`) and its own client key.
+
+- **The record.** `identity.enrolment_caller` names the workload's `principal_id`, its purpose, who
+  registered it and why, and when it was retired, as `ADR-ORG-001 §5.11` admits a reporter from a
+  row. A provider registers and retires it, with a reason; a registration names an active workload
+  Principal of this service (`identity.principal_mapping` with `subject_type` `workload`).
+- **The token.** It is verified as every caller's is (issuer, audience, signature, `at+jwt`), with
+  `subject_type` `workload` and no `tenant_id` or provider scope. Its `principal_id` must be an active
+  row of the record, read for each request. Any other token is `401` or `403`, and the routes are
+  mounted apart from the caller routes, behind this check alone, as the identifier match is
+  (TDD-identity-control-008 1.7.0).
+- **The client address comes from `Forwarded`, only on this workload's call.** Only the first
+  element's `for` is read. It must be an IPv4 address or a bracketed IPv6 address, with an optional
+  port. The address is counted as itself for IPv4 and as its /64 prefix for IPv6 (§5.8). A missing,
+  obfuscated (`_…`), `unknown` or malformed value is `400`, before any count or lookup: one shared
+  bucket would stop everyone, and the status depends on nothing about the token. On no other route is
+  `Forwarded` read. RFC 7239 §5.2: "The "for" parameter is used to disclose information about the
+  client that initiated the request", and §8.1: the header "cannot be relied upon to be correct", so it
+  is trusted from this one authenticated caller and from no chain behind it.
+
+**The counts (§5.8).** `identity.enrolment_count` holds one row per counted key and rule: a keyed hash,
+the rule, the window's end and the count. The hash is HMAC-SHA256 under a key derived from the
+`security_ref` sealing key for this purpose alone, over `address:<address or /64>` or
+`invitation:<invitation_id>`, so the table holds no address and no invitation identifier. A window
+starts at its first count and lasts its length; a sweep deletes every row whose window has ended, each
+minute. A rotation of the `security_ref` ring changes the key, so counts restart, at most once per
+rotation.
+
+| Rule | Limit | At the limit |
+| :-- | :-- | :-- |
+| `request` per client address | 5 a minute, 20 an hour | `429` with `Retry-After`, before Organization Control is asked |
+| `verify` per client address | 5 a minute, 30 an hour | `429` with `Retry-After` |
+| messages per invitation | 3 an hour, 5 a day | `202` as always, and nothing is sent |
+| failed codes per invitation | 15 a day | the same refusal as a wrong code, before the code is compared |
+
+Every request counts against its address, refused or not, so a `429` says nothing about any invitation.
+The per-invitation limits answer as always and do nothing (§5.8: a different answer "would tell the
+caller that the token names an invitation"). A message here is a code, or the "an account exists"
+message of §5.9 that takes a code's place: both are mail to the invited address, which OWASP's
+per-account limit protects from flooding (§5.8 [R17]). `Retry-After` is the whole seconds until the
+longest exceeded window ends (RFC 9110 §10.2.3).
+
+**`POST /v1/enrolments` (§5.1, §5.2, §5.9).** In this order:
+
+1. the caller and `Forwarded`, then the body `{"token": "..."}` (a body that is not that is `400`);
+2. the `request` counts of the address (`429` past them);
+3. the resolve (`internal/organization`, 1.26.0). Nothing found is the `202` below. Organization
+   Control unreachable, or not configured (`IDENTITY_ORGANIZATION_BASE_URL` unset), is `503`, the same for
+   every token;
+4. under a transaction-scoped advisory lock on the invitation, so two requests for one invitation queue:
+   - an enrolment of the invitation that is open (its code good and not used up) is the `202`, and
+     nothing is sent: one open enrolment per invitation;
+   - the message counts at their limit is the `202`, and nothing is sent;
+5. the double check (§5.9), against this service and the kernel: an `active` notification address of
+   any Principal equal to the address without case, proven or not; a mapping that is not retired whose
+   username or email equals it; and a kernel user whose username or email equals it exactly. The kernel
+   is read before the transaction; unreachable is `503`;
+6. a collision queues the "an account exists" message to the address and counts it. Otherwise the
+   enrolment is recorded with its code, and the code's message is queued and counted.
+
+The answer is always `202` `{"enrolment_id": "<uuid>"}`, `Cache-Control: no-store`. When a code was
+sent, the identifier is the enrolment's. In every other case it is a fresh UUIDv7 that is stored
+nowhere, so the body is the same shape and draws from the same space whatever happened, and a
+`:verify` on it is a wrong code. The same identifier never answers twice, so a repeat for an open
+enrolment does not reveal it. No token, no invitation identifier and no address is logged; the log
+line names the enrolment identifier and the outcome class, which no caller sees.
+
+**The code (§5.2).** 8 digits from `crypto/rand`, as `TDD-identity-control-008` draws an address proof.
+The enrolment keeps SHA-256 of the enrolment identifier and the code, so a code proves the enrolment it
+was sent for. The message carries the code sealed with `security_ref` (kind `enrolment-code`, bound to
+the enrolment identifier), opened by the dispatcher only to hand it to the adapter, then cleared. It is
+good for 10 minutes and five attempts, and it is invalidated when the enrolment completes.
+
+**`POST /v1/enrolments/{enrolment_id}:verify` (§5.2, §5.3, §5.9).** `{"code": "<8 digits>"}`.
+
+1. the caller and `Forwarded`, the body, and the `verify` counts of the address (`429`);
+2. the enrolment row, locked: unknown, completed, refused, expired, used up, or its invitation past 15
+   failed codes today, is the refusal;
+3. a wrong code adds an attempt and a failed code to the invitation's count, and is the refusal. The
+   right code takes a one-minute lease on the enrolment (`verifying_until`) in the same transaction, so
+   a second `:verify` of it meanwhile is `503`, never a second password. Steps 4 to 6 run with no
+   transaction open, as the creation path requires, and step 7 ends the lease;
+4. the right code: the double check again, immediately before the create, leaving out only the mapping
+   this enrolment's own create made (found by its idempotency key, below). A collision consumes the
+   enrolment (`refused`), creates nothing, and is the refusal;
+5. `provisioning.Create`: caller scope `enrolment`, key the enrolment identifier, username the address
+   lower-cased, email the address, human. The creation address is written with `verified_at` set,
+   because the code just proved it. A kernel refusal of the user as a duplicate (`409`, a definite answer:
+   nothing was created) quarantines the pending mapping in the same step, with the reason, so recovery
+   has nothing to finish; the enrolment is consumed and the answer is the refusal (§5.9). An ambiguous
+   or unavailable kernel leaves the mapping pending for recovery, the enrolment open and the code good,
+   and answers `503`: the person retries the same code, and the create's key replays the Principal;
+6. the temporary password, through `firstcredential` as `ADR-IAM-010 §5.1` and §5.2 issue it: 120
+   bits, set in the kernel as temporary, lapsing within `IDENTITY_TEMPORARY_PASSWORD_TTL` (24 hours at
+   most), recorded without its value. The issuance names the BFF workload as `issued_by` and
+   `enrolment <enrolment_id>` as its reason; no provider is involved and no privileged-access row is
+   written. A kernel failure answers `503` and leaves the enrolment open, so the same code resumes;
+7. the enrolment is `completed`: the Principal and the issuance are recorded, the code's hash and the
+   address are cleared.
+
+The answer is `201` `{"principal_id", "username", "temporary_password", "lapses_at"}` with
+`Cache-Control: no-store`. The value is never logged, stored or put in an idempotency record
+(`STD-IAM-001` 3.1.0 §3.1, the second recipient). Every refusal is one answer: `400`
+`validation-failed`, detail "The code is wrong, has expired, or has been tried too often; start again
+from the invitation link", the same as an address proof's wrong code. An unknown identifier, a decoy,
+a collision and the invitation's daily limit answer it too. A malformed body is `400` with another
+detail, which depends on the body alone.
+
+**Neither route takes an `Idempotency-Key`** (`commands.go` names them key-optional with the reason).
+A repeat of `POST /v1/enrolments` sends nothing while a code is open, and the counts bound it; a repeat
+of `:verify` after completion finds the code invalidated and creates nothing; a repeat after a `503`
+resumes through the create's own key. A key here would record the temporary password, which no record
+may hold.
+
+**The record (§5.3).** `identity.enrolment`: the identifier, the invitation identifier, SHA-256 of the
+address lower-cased, the address while open, the code's hash, its expiry and attempts, the state
+(`open`, `completed`, `refused`), the Principal created, the issuance, the BFF workload that carried it,
+and when it was created and closed. `identity.enrolment_message` is its delivery queue, as
+`identity.security_notification` is for a Principal (the enrolment also holds its `:verify` lease,
+`verifying_until`): the kind (`code` or `account_exists`), the address
+and the sealed code until handed over, then cleared, the attempts and the outcome. Both are evidence:
+the runtime role holds no `DELETE`, and both carry the audit retention triggers (§Audit Retention). The
+new Principal holds no Membership; the person accepts the invitation afterwards, signed in, as
+`ADR-ORG-007 §5.1` decides (§5.4). The first password the person binds is notified through the kernel
+event record, as every first binding is (`ADR-IAM-007 §5.1`).
+
+**Delivery (§5.5).** The security notification dispatcher takes enrolment messages after
+notification requests, with the same backoff and attempts. The development mail catcher renders the
+code message ("Your code is …") and the account message ("An account exists for this address: sign
+in, confirm the address in your account's settings, or ask the person who invited you"), which does not
+say whether the address was proven. In production the Notification Platform delivers them; it is a
+production gate, as for every proof.
+
+**Telemetry.** `identity.enrolment.requests` counts requests by outcome class (`sent`, `held`,
+`limited`, `nothing`, `collision`), `identity.enrolment.verifications` by `completed`, `refused`,
+`collision`, `limited`, and `identity.enrolment.limited` the `429`s by rule. Many refusals for one
+invitation are seen as the `failed codes` rule reaching its limit, which is logged at `WARN` with the
+enrolment identifier, never the invitation's.
+
+**Tested** (`internal/enrolment`, against PostgreSQL and the kernel fake, with the real creation and
+first-credential paths): the whole path once, and the password in no row; every non-sending outcome a
+fresh identifier no enrolment holds, with the account message for a held address, proven or not, a
+kernel username and a kernel email; the per-invitation message limit silent; the address limits `429`
+before Organization Control is asked; five attempts per code and 15 failures per invitation; a holder
+appearing before the create, and a kernel duplicate at the create, creating nothing and leaving no
+pending mapping; a lost create resumed by the same code after recovery; the sweep; the caller record;
+and no token, address, code or password in any log line. `internal/httpapi`: the caller check,
+`Forwarded` (`ClientAddress`), each outcome's one answer, `Retry-After` and `no-store`.
+`internal/securitynotify`: the messages handed over and cleared. `deploy-dev`:
+`scripts/dev-enrolment-proof.ps1`, the caller check, `Forwarded` and the limits on the running stack.
+
+**The resolve client (1.26.0).**
+
 - **The resolve client (1.25.0, `ADR-IAM-011` §5.7 as amended 2026-10-21; built in 1.26.0).** This service reaches
   the route as a registered workload, admitted from a registry row, not from a scope or a `client_id`.
   Organization Control's reporter registry gains an `invitation:resolve` entry for this workload's
@@ -196,30 +342,6 @@ recovery and the sweep are the same.
     token, so the next call presents a fresh one, as on the consumer routes; it does not retry.
   The `invitation:resolve` entry is registered in organization-control, not here: its
   `scripts/dev-wire.ps1` registers it in development (`ADR-ORG-001` §5.11).
-- **Open questions (2026-10-21).** `ADR-IAM-011` leaves three points undecided, so the routes, the
-  table, the code and the temporary password are not built until the architecture decides them:
-  - **Q1, §5.2 "rate-limited per invitation and per client address".** No limits or windows are
-    given. This service cannot see the client address: identity-experience's BFF sets
-    `trustProxy: false` and drops `x-forwarded-for` from every upstream request (identity-experience `bff/src/server.ts`,
-    `bff/src/api/proxy.ts`), and the route is
-    anonymous, so a forwarded address from an unauthenticated caller could not be trusted. Needs the
-    limit values and windows, and how the client address reaches this service (for example an
-    authenticated BFF that forwards it, RFC 7239).
-  - **Q2, §5.1 and §5.3.** §5.1 covers only "an address a Principal already holds proven". An address
-    held but not proven is undecided: a provider-created Principal's creation address, which is the
-    kernel user's email. The realm sets `duplicateEmailsAllowed: false` (identity-kernel
-    `realm/scnehaux.json`), so the kernel would refuse the
-    new user at `:verify` after the code was proven, and leave a pending mapping that recovery cannot
-    complete. The same holds for a kernel username already equal to the lower-cased address. Needs:
-    whether any held address, proven or not, and any existing kernel username or email gets the "sign
-    in instead" answer, or something else.
-  - **Q3, `STD-IAM-001` §3.1 (2.8.0).** Its one exception covers a temporary password "shown once to
-    a provider". §5.6 and §7 of the ADR say the standard gains the enrolling person as a second
-    recipient, but that amendment is not on scnehaux-architecture main yet. Until it is, `:verify`
-    showing the password to the person is not covered by the standard.
-- **Waits on**: Q1 to Q3 above, organization-control's resolve route (ROADMAP item 56 there), identity-experience's enrolment page, and in
-  production the Notification Platform (§5.5, §5.6). The route classes, the table and the problem
-  types are designed when it is built.
 
 #### The Bootstrap Ceremony
 
@@ -1281,8 +1403,11 @@ and its reviews, `ceremony_grant_retirement`, `principal_relink`, `principal_rel
 `principal_adoption`, `registration_adoption`, `registration_state_change`, `registration_change`,
 `registration_request`, `registration_owner`, `application_developer`, `drift_exception`,
 `workload_owner_change`, `workload_review`, `security_operation` and its attempts,
-`temporary_password_issuance` and `temporary_password_outcome`, and `security_notification`
-(`controldb.AuditTables`). It holds no Tenant's data, so the Tenant decommissioning purge has nothing
+`temporary_password_issuance` and `temporary_password_outcome`, `security_notification`, and, from
+1.27.0, `enrolment_caller`, `enrolment` and `enrolment_message` (`controldb.AuditTables`; their
+triggers are migration `20261021175107_enrolment`). An open enrolment, a message not handed over and a
+caller not retired are in force; `enrolment_count` is not evidence and is deleted when its window
+ends (§Enrolment From an Invitation). It holds no Tenant's data, so the Tenant decommissioning purge has nothing
 to delete here.
 
 **The table refuses the early delete, for every role** (migration `20261020200000_audit_retention`).
@@ -1708,6 +1833,7 @@ not pulled.
 | Conforms to | STD-IAM-001 2.10.0 §3.10, ADR-IAM-001 §5.11 as amended 2026-10-20 — the reviewer is the one person served before the bootstrap review; every orphan adopted or triaged before a new Principal (1.24.0) |
 | Conforms to | ADR-IAM-011 §5.7 (a) and (b) — the resolve client is built: the token in the body, the one `404` read as "nothing" (1.26.0) |
 | Plans | ADR-IAM-011 §5.1 to §5.6 — enrolment from an invitation, a third creation path, not built (1.24.0); waits on open questions Q1 to Q3 (1.26.0) |
+| Conforms to | ADR-IAM-011 §5.1 to §5.9 (amended 2026-10-21) and STD-IAM-001 3.1.0 §3.1 — enrolment built: the BFF workload from `identity.enrolment_caller`, `Forwarded`, the four counts, the double check, quarantine on a kernel duplicate, the temporary password to the second recipient; Q1 to Q3 closed by §5.8, §5.9 and STD-IAM-001 3.1.0 (1.27.0) |
 
 ### Open Proof-of-Concept Questions
 

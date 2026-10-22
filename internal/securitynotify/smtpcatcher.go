@@ -119,6 +119,8 @@ var subjects = map[string]string{
 	EventAccountRecovered:     "Your account was recovered",
 	EventAddressChanged:       "Your notification addresses changed",
 	EventAddressProof:         "Your code to prove this address",
+	EventEnrolmentCode:        "Your code to create your account",
+	EventEnrolmentAccount:     "An account exists for this address",
 }
 
 // render writes the plain message: what happened and when, the bounded details the request carries,
@@ -133,6 +135,22 @@ func render(r Request) (subject, body string) {
 	var b strings.Builder
 	b.WriteString("This message is from a Scnehaux development server. It was captured by the development\r\n")
 	b.WriteString("mail catcher and was not delivered to any inbox.\r\n\r\n")
+	switch r.Event {
+	case EventEnrolmentCode:
+		fmt.Fprintf(&b, "Your code is %s\r\n\r\n", r.Code)
+		b.WriteString("You were invited to join, and asked to create an account for this address. Enter the code\r\n")
+		b.WriteString("on the page you came from. It is good for ten minutes and five attempts. If you did not\r\n")
+		b.WriteString("ask for it, ignore this message.\r\n")
+		return subject, b.String()
+	case EventEnrolmentAccount:
+		// ADR-IAM-011 §5.9: it says an account exists and how to continue, and not whether the address
+		// was proven.
+		b.WriteString("You were invited to join, and someone asked to create an account for this address. An\r\n")
+		b.WriteString("account exists for it already. To continue, sign in, confirm this address in your\r\n")
+		b.WriteString("account's settings, or ask the person who invited you. If you did not ask, ignore this\r\n")
+		b.WriteString("message.\r\n")
+		return subject, b.String()
+	}
 	if r.Event == EventAddressProof {
 		fmt.Fprintf(&b, "Your code is %s\r\n\r\n", r.Code)
 		b.WriteString("Enter it in the account application to prove that you read this address. It is good for\r\n")

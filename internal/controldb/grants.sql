@@ -67,6 +67,10 @@ BEGIN
               ('identity.security_notification'),
               ('identity.temporary_password_issuance'),
               ('identity.temporary_password_outcome'),
+              ('identity.enrolment_caller'),
+              ('identity.enrolment'),
+              ('identity.enrolment_message'),
+              ('identity.enrolment_count'),
               ('platform.outbox'),
               ('platform.processed_event'),
               ('platform.dead_letter'),
@@ -228,6 +232,15 @@ REVOKE DELETE, TRUNCATE ON identity.security_notification FROM identity_runtime;
 -- who issued it cannot rewrite either. Neither holds the value.
 REVOKE UPDATE, DELETE, TRUNCATE ON identity.temporary_password_issuance FROM identity_runtime;
 REVOKE UPDATE, DELETE, TRUNCATE ON identity.temporary_password_outcome FROM identity_runtime;
+-- Enrolment from an invitation (ADR-IAM-011, TDD-identity-control-001 1.27.0). The BFF workloads'
+-- record is retired by its three columns and never deleted. An enrolment and its messages are
+-- evidence: their state moves forward and nothing deletes one. The counts are not evidence: a row is
+-- deleted when its window ends (§5.8), so the runtime keeps DELETE there alone.
+REVOKE UPDATE, DELETE, TRUNCATE ON identity.enrolment_caller FROM identity_runtime;
+GRANT UPDATE (retired_by, retire_reason, retired_at) ON identity.enrolment_caller TO identity_runtime;
+REVOKE DELETE, TRUNCATE ON identity.enrolment FROM identity_runtime;
+REVOKE DELETE, TRUNCATE ON identity.enrolment_message FROM identity_runtime;
+REVOKE TRUNCATE ON identity.enrolment_count FROM identity_runtime;
 -- The ceremony grant ends once, by an insert, and is never revived: insert-only like the ceremony
 -- row it retires (TDD-identity-control-006 §The Ceremony's Grant).
 REVOKE UPDATE, DELETE, TRUNCATE ON identity.ceremony_grant_retirement FROM identity_runtime;
@@ -275,6 +288,9 @@ GRANT SELECT (operation_id, claimed_at, lease_until, finished_at), DELETE ON ide
 GRANT SELECT (issuance_id, issued_at, lapses_at), DELETE ON identity.temporary_password_issuance TO identity_audit_purger;
 GRANT SELECT (issuance_id, recorded_at), DELETE ON identity.temporary_password_outcome TO identity_audit_purger;
 GRANT SELECT (state, occurred_at, next_attempt_at, requested_at, submitted_at), DELETE ON identity.security_notification TO identity_audit_purger;
+GRANT SELECT (registered_at, retired_at), DELETE ON identity.enrolment_caller TO identity_audit_purger;
+GRANT SELECT (enrolment_id, issuance_id, state, code_expires_at, verifying_until, created_at, closed_at), DELETE ON identity.enrolment TO identity_audit_purger;
+GRANT SELECT (enrolment_id, state, next_attempt_at, requested_at, submitted_at), DELETE ON identity.enrolment_message TO identity_audit_purger;
 
 -- The retention trigger function (migration 20261020200000_audit_retention). EXECUTE is asked of the
 -- trigger's creator: "To create or replace a trigger on a table, the user must have the TRIGGER
