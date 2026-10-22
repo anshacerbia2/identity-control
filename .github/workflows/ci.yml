@@ -245,13 +245,8 @@ jobs:
       # it fails, correctly, because a role that does not exist is exactly what it guards
       # against. That stayed invisible for three weeks behind an earlier step that never passed,
       # and locally behind a development database that had been migrated long ago.
-      #
-      # `-p 1`: the integration suites share this one database. With packages overlapping,
-      # internal/identity/provisioning failed on rows it did not write (a duplicate
-      # principal_mapping key, RecoverPending = 2) in the coverage step, after a new test
-      # dependency changed which packages ran together. organization-control runs `-p 1` too.
       - name: test with race detector
-        run: go test ./... -race -count=1 -p 1
+        run: go test ./... -race -count=1
 
       # This is the Week 1 exit criterion, asserted against the catalog rather than against
       # the SQL that produced it. Rerun verbosely on its own because each assertion names a
@@ -268,7 +263,7 @@ jobs:
       - name: coverage floor
         run: |
           pkgs=$(go list ./... | grep -v '/cmd/' | paste -sd ' ')
-          go test $pkgs -count=1 -p 1 -covermode=atomic -coverprofile=coverage.out
+          go test $pkgs -count=1 -covermode=atomic -coverprofile=coverage.out
           total=$(go tool cover -func=coverage.out | awk '/^total:/ {print $3}' | tr -d '%')
           echo "library-package coverage: ${total}%"
           if awk "BEGIN {exit !($total < 80)}"; then
