@@ -29,12 +29,12 @@ func TestAnOwnerReachesOnlyTheRegistrationsItOwns(t *testing.T) {
 		"/v1/registrations/" + owned.String() + "/keys",
 		"/v1/registrations/" + owned.String() + "/owners",
 	} {
-		if w := serve(handler, asOwner(httptest.NewRequest(http.MethodGet, path, nil), owner)); w.Code != http.StatusOK {
+		if w := serve(t, handler, asOwner(httptest.NewRequest(http.MethodGet, path, nil), owner)); w.Code != http.StatusOK {
 			t.Errorf("an owner reading %s answered %d, want 200: %s", path, w.Code, w.Body)
 		}
 	}
 	// Another registration is not found, so an owner cannot learn which exist.
-	if w := serve(handler, asOwner(httptest.NewRequest(http.MethodGet, "/v1/registrations/"+other.String(), nil), owner)); w.Code != http.StatusNotFound {
+	if w := serve(t, handler, asOwner(httptest.NewRequest(http.MethodGet, "/v1/registrations/"+other.String(), nil), owner)); w.Code != http.StatusNotFound {
 		t.Errorf("an owner reading a registration it does not own answered %d, want 404", w.Code)
 	}
 
@@ -42,13 +42,13 @@ func TestAnOwnerReachesOnlyTheRegistrationsItOwns(t *testing.T) {
 	for action, want := range map[string]int{"suspend": http.StatusOK, "restore": http.StatusOK, "retire": http.StatusForbidden} {
 		r := asOwner(httptest.NewRequest(http.MethodPost, "/v1/registrations/"+owned.String()+":"+action, nil), owner)
 		r.Header.Set(httpapi.AdministrativeReasonHeader, "the key leaked")
-		if w := serve(handler, r); w.Code != want {
+		if w := serve(t, handler, r); w.Code != want {
 			t.Errorf("an owner's :%s answered %d, want %d: %s", action, w.Code, want, w.Body)
 		}
 	}
 
 	// GET /v1/registrations:mine lists what the caller owns.
-	w := serve(handler, asOwner(httptest.NewRequest(http.MethodGet, "/v1/registrations:mine", nil), owner))
+	w := serve(t, handler, asOwner(httptest.NewRequest(http.MethodGet, "/v1/registrations:mine", nil), owner))
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), owned.String()) || strings.Contains(w.Body.String(), other.String()) {
 		t.Errorf("mine answered %d: %s", w.Code, w.Body)
 	}
@@ -77,7 +77,7 @@ func TestEveryProviderRouteRefusesAnOwner(t *testing.T) {
 	} {
 		r := asOwner(httptest.NewRequest(c.method, c.path, strings.NewReader(`{}`)), owner)
 		r.Header.Set(httpapi.AdministrativeReasonHeader, "r")
-		if w := serve(handler, r); w.Code != http.StatusForbidden {
+		if w := serve(t, handler, r); w.Code != http.StatusForbidden {
 			t.Errorf("an owner's %s %s answered %d, want 403", c.method, c.path, w.Code)
 		}
 	}
@@ -137,12 +137,12 @@ func TestAProviderGrantsOwnershipWithAReason(t *testing.T) {
 	path := "/v1/registrations/" + registrationID.String() + "/owners"
 
 	r, _ := asPrincipal(t, httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"principal_id":"`+owner.String()+`"}`)))
-	if w := serve(handler, r); w.Code != http.StatusBadRequest || registrar.granted != nil {
+	if w := serve(t, handler, r); w.Code != http.StatusBadRequest || registrar.granted != nil {
 		t.Errorf("a grant without a reason answered %d", w.Code)
 	}
 	r, caller := asPrincipal(t, httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"principal_id":"`+owner.String()+`"}`)))
 	r.Header.Set(httpapi.AdministrativeReasonHeader, "the orders team owns this BFF")
-	if w := serve(handler, r); w.Code != http.StatusCreated {
+	if w := serve(t, handler, r); w.Code != http.StatusCreated {
 		t.Fatalf("status %d: %s", w.Code, w.Body)
 	}
 	if got := registrar.granted; got == nil || got.RegistrationID != registrationID || got.Principal != owner ||
@@ -168,7 +168,7 @@ func TestAProviderRevokesOwnershipWithAReason(t *testing.T) {
 		if c.reason != "" {
 			r.Header.Set(httpapi.AdministrativeReasonHeader, c.reason)
 		}
-		if w := serve(registrarHandler(t, registrar), r); w.Code != c.want || registrar.granted != nil {
+		if w := serve(t, registrarHandler(t, registrar), r); w.Code != c.want || registrar.granted != nil {
 			t.Errorf("%s answered %d, want %d", name, w.Code, c.want)
 		}
 	}
@@ -176,7 +176,7 @@ func TestAProviderRevokesOwnershipWithAReason(t *testing.T) {
 	registrar := &stubRegistrar{}
 	r, caller := asPrincipal(t, httptest.NewRequest(http.MethodPost, base+owner.String()+":revoke", nil))
 	r.Header.Set(httpapi.AdministrativeReasonHeader, "moved team")
-	if w := serve(registrarHandler(t, registrar), r); w.Code != http.StatusOK {
+	if w := serve(t, registrarHandler(t, registrar), r); w.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", w.Code, w.Body)
 	}
 	if got := registrar.granted; got == nil || got.Principal != owner || got.ChangedBy != caller || got.Reason != "moved team" {
@@ -203,15 +203,15 @@ func TestOwnershipRefusalsAreMappedToTheirStatus(t *testing.T) {
 		grant, _ := asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/registrations/"+registrationID.String()+"/owners",
 			strings.NewReader(`{"principal_id":"`+owner.String()+`"}`)))
 		grant.Header.Set(httpapi.AdministrativeReasonHeader, "r")
-		if w := serve(handler, grant); w.Code != c.want {
+		if w := serve(t, handler, grant); w.Code != c.want {
 			t.Errorf("a grant meeting %s answered %d, want %d", name, w.Code, c.want)
 		}
 		list, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, "/v1/registrations/"+registrationID.String()+"/owners", nil))
-		if w := serve(handler, list); w.Code != c.want {
+		if w := serveInjected(handler, list); w.Code != c.want {
 			t.Errorf("a listing meeting %s answered %d, want %d", name, w.Code, c.want)
 		}
 	}
-	if strings.Contains(serve(registrarHandler(t, &stubRegistrar{err: errors.New("connection refused")}),
+	if strings.Contains(serve(t, registrarHandler(t, &stubRegistrar{err: errors.New("connection refused")}),
 		func() *http.Request {
 			r, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, "/v1/registrations/"+registrationID.String()+"/owners", nil))
 			return r
@@ -223,16 +223,16 @@ func TestOwnershipRefusalsAreMappedToTheirStatus(t *testing.T) {
 func TestOwnerRoutesRefuseWhatTheyCannotRead(t *testing.T) {
 	owner := mustUUID(t)
 	handler := registrarHandler(t, &stubRegistrar{})
-	if w := serve(handler, httptest.NewRequest(http.MethodGet, "/v1/registrations:mine", nil)); w.Code != http.StatusUnauthorized {
+	if w := serve(t, handler, httptest.NewRequest(http.MethodGet, "/v1/registrations:mine", nil)); w.Code != http.StatusUnauthorized {
 		t.Errorf("mine without a caller answered %d, want 401", w.Code)
 	}
-	if w := serve(handler, httptest.NewRequest(http.MethodGet, "/v1/registrations/"+owner.String()+"/keys", nil)); w.Code != http.StatusUnauthorized {
+	if w := serve(t, handler, httptest.NewRequest(http.MethodGet, "/v1/registrations/"+owner.String()+"/keys", nil)); w.Code != http.StatusUnauthorized {
 		t.Errorf("an owner route without a caller answered %d, want 401", w.Code)
 	}
-	if w := serve(handler, asOwner(httptest.NewRequest(http.MethodGet, "/v1/registrations/nope/keys", nil), owner)); w.Code != http.StatusBadRequest {
+	if w := serve(t, handler, asOwner(httptest.NewRequest(http.MethodGet, "/v1/registrations/nope/keys", nil), owner)); w.Code != http.StatusBadRequest {
 		t.Errorf("an owner naming a malformed registration answered %d, want 400", w.Code)
 	}
-	if w := serve(handler, httptest.NewRequest(http.MethodGet, "/v1/registrations", nil)); w.Code != http.StatusUnauthorized {
+	if w := serve(t, handler, httptest.NewRequest(http.MethodGet, "/v1/registrations", nil)); w.Code != http.StatusUnauthorized {
 		t.Errorf("a provider route without a caller answered %d, want 401", w.Code)
 	}
 }
@@ -248,7 +248,7 @@ func TestOwnershipRoutesRefuseMalformedRequests(t *testing.T) {
 	} {
 		r, _ := asPrincipal(t, httptest.NewRequest(c.method, c.path, strings.NewReader(c.body)))
 		r.Header.Set(httpapi.AdministrativeReasonHeader, "r")
-		if w := serve(handler, r); w.Code != http.StatusBadRequest {
+		if w := serve(t, handler, r); w.Code != http.StatusBadRequest {
 			t.Errorf("%s answered %d, want 400", name, w.Code)
 		}
 	}
@@ -260,7 +260,7 @@ func TestAFailedOwnershipReadAdmitsNobody(t *testing.T) {
 	handler := registrarHandler(t, &stubRegistrar{readErr: errors.New("connection refused"),
 		owners: map[id.UUID]id.UUID{registrationID: owner}})
 	for _, path := range []string{"/v1/registrations/" + registrationID.String() + "/keys", "/v1/registrations:mine"} {
-		w := serve(handler, asOwner(httptest.NewRequest(http.MethodGet, path, nil), owner))
+		w := serve(t, handler, asOwner(httptest.NewRequest(http.MethodGet, path, nil), owner))
 		if w.Code != http.StatusInternalServerError || strings.Contains(w.Body.String(), "connection refused") {
 			t.Errorf("%s answered %d: %s", path, w.Code, w.Body)
 		}

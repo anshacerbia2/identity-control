@@ -75,48 +75,48 @@ func TestAPersonManagesTheirOwnAddresses(t *testing.T) {
 	addressID := mustUUID(t).String()
 
 	r, person := asPerson(t, httptest.NewRequest(http.MethodGet, "/v1/me/notification-addresses", nil), time.Minute)
-	if w := serve(handler, r); w.Code != http.StatusOK || stub.principal != person || !strings.Contains(w.Body.String(), "me@example.com") {
+	if w := serve(t, handler, r); w.Code != http.StatusOK || stub.principal != person || !strings.Contains(w.Body.String(), "me@example.com") {
 		t.Errorf("list: %d %s", w.Code, w.Body)
 	}
 
 	r, person = asPerson(t, httptest.NewRequest(http.MethodPost, "/v1/me/notification-addresses",
 		strings.NewReader(`{"address":"new@example.com"}`)), time.Minute)
-	if w := serve(handler, r); w.Code != http.StatusCreated || stub.address != "new@example.com" || stub.principal != person {
+	if w := serve(t, handler, r); w.Code != http.StatusCreated || stub.address != "new@example.com" || stub.principal != person {
 		t.Errorf("add: %d %s", w.Code, w.Body)
 	}
 
 	r, _ = asPerson(t, httptest.NewRequest(http.MethodPost, "/v1/me/notification-addresses",
 		strings.NewReader(`{"address":"new@example.com"}`)), time.Hour)
-	if w := serve(handler, r); w.Code != http.StatusUnauthorized || !strings.Contains(w.Header().Get("WWW-Authenticate"), "acr_values") {
+	if w := serve(t, handler, r); w.Code != http.StatusUnauthorized || !strings.Contains(w.Header().Get("WWW-Authenticate"), "acr_values") {
 		t.Errorf("an add an hour after sign-in answered %d; want a step-up challenge", w.Code)
 	}
 
 	// Proving needs no step-up: the code is the proof, and the person may read it on another device.
 	r, _ = asPerson(t, httptest.NewRequest(http.MethodPost, "/v1/me/notification-addresses/"+addressID+":verify",
 		strings.NewReader(`{"code":"12345678"}`)), time.Hour)
-	if w := serve(handler, r); w.Code != http.StatusNoContent || stub.verb != "verify" || stub.code != "12345678" {
+	if w := serve(t, handler, r); w.Code != http.StatusNoContent || stub.verb != "verify" || stub.code != "12345678" {
 		t.Errorf("verify: %d %s", w.Code, w.Body)
 	}
 
 	r, _ = asPerson(t, httptest.NewRequest(http.MethodPost, "/v1/me/notification-addresses/"+addressID+":remove", nil), time.Hour)
-	if w := serve(handler, r); w.Code != http.StatusUnauthorized {
+	if w := serve(t, handler, r); w.Code != http.StatusUnauthorized {
 		t.Errorf("a removal an hour after sign-in answered %d; want a step-up challenge", w.Code)
 	}
 	r, _ = asPerson(t, httptest.NewRequest(http.MethodPost, "/v1/me/notification-addresses/"+addressID+":remove", nil), time.Minute)
-	if w := serve(handler, r); w.Code != http.StatusNoContent || stub.verb != "remove" {
+	if w := serve(t, handler, r); w.Code != http.StatusNoContent || stub.verb != "remove" {
 		t.Errorf("remove: %d %s", w.Code, w.Body)
 	}
 
 	// Sending a proof to an address already held needs no step-up either: the code goes to that address,
 	// and proving it changes no recipient (TDD-identity-control-008 1.7.0).
 	r, person = asPerson(t, httptest.NewRequest(http.MethodPost, "/v1/me/notification-addresses/"+addressID+":send-proof", nil), time.Hour)
-	if w := serve(handler, r); w.Code != http.StatusOK || stub.verb != "send-proof" || stub.principal != person ||
+	if w := serve(t, handler, r); w.Code != http.StatusOK || stub.verb != "send-proof" || stub.principal != person ||
 		!strings.Contains(w.Body.String(), `"proof_expires_at":"2026-10-19T12:10:00Z"`) {
 		t.Errorf("send-proof: %d %s", w.Code, w.Body)
 	}
 
 	r, _ = asPerson(t, httptest.NewRequest(http.MethodPost, "/v1/me/notification-addresses/not-an-id:remove", nil), time.Minute)
-	if w := serve(handler, r); w.Code != http.StatusNotFound {
+	if w := serve(t, handler, r); w.Code != http.StatusNotFound {
 		t.Errorf("a malformed address id answered %d; want 404", w.Code)
 	}
 }
@@ -133,7 +133,7 @@ func TestAddressRefusalsAreTold(t *testing.T) {
 		handler := addressHandler(t, &stubAddresses{err: err})
 		r, _ := asPerson(t, httptest.NewRequest(http.MethodPost, "/v1/me/notification-addresses",
 			strings.NewReader(`{"address":"x@example.com"}`)), time.Minute)
-		if w := serve(handler, r); w.Code != want {
+		if w := serveInjected(handler, r); w.Code != want {
 			t.Errorf("%v answered %d; want %d", err, w.Code, want)
 		}
 	}
@@ -149,7 +149,7 @@ func TestSendProofRefusalsAreTold(t *testing.T) {
 	} {
 		handler := addressHandler(t, &stubAddresses{err: err})
 		r, _ := asPerson(t, httptest.NewRequest(http.MethodPost, "/v1/me/notification-addresses/"+addressID+":send-proof", nil), time.Minute)
-		if w := serve(handler, r); w.Code != want {
+		if w := serve(t, handler, r); w.Code != want {
 			t.Errorf("%v answered %d; want %d", err, w.Code, want)
 		}
 	}

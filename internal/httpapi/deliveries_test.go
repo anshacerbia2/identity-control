@@ -40,9 +40,7 @@ func deliver(t *testing.T, handler http.Handler, authorization, body string) *ht
 	if authorization != "" {
 		request.Header.Set("Authorization", authorization)
 	}
-	recorder := httptest.NewRecorder()
-	handler.ServeHTTP(recorder, request)
-	return recorder
+	return serveChecked(t, handler, request)
 }
 
 // The marker asserts this consumer holds the event's effect, and is set exactly where that is true.

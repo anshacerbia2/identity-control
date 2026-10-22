@@ -34,6 +34,9 @@ func (s *stubTenantOperator) Unconverged(context.Context) ([]tenantcontext.Uncon
 
 func (s *stubTenantOperator) Findings(_ context.Context, class string, limit int) ([]tenantcontext.Finding, error) {
 	s.class, s.limit = class, limit
+	if s.findings == nil && s.err == nil {
+		return []tenantcontext.Finding{}, nil
+	}
 	return s.findings, s.err
 }
 
@@ -66,7 +69,7 @@ func TestARedriveNamesTheTenantTheCallerAndTheReason(t *testing.T) {
 	r, operator := asPrincipal(t, httptest.NewRequest(http.MethodPost,
 		"/v1/projections/tenant-context/tenants/"+tenant.String()+":redrive", nil))
 	r.Header.Set(httpapi.AdministrativeReasonHeader, "the credential's roles are back")
-	w := serve(tenantRoutes(t, stub), r)
+	w := serve(t, tenantRoutes(t, stub), r)
 	if w.Code != http.StatusAccepted || !strings.Contains(w.Body.String(), `"state":"pending"`) {
 		t.Fatalf("status %d: %s", w.Code, w.Body)
 	}
@@ -89,7 +92,7 @@ func TestARedriveNamesTheTenantTheCallerAndTheReason(t *testing.T) {
 		if c.reason != "" {
 			r.Header.Set(httpapi.AdministrativeReasonHeader, c.reason)
 		}
-		if w := serve(tenantRoutes(t, &stubTenantOperator{err: c.err}), r); w.Code != c.want {
+		if w := serve(t, tenantRoutes(t, &stubTenantOperator{err: c.err}), r); w.Code != c.want {
 			t.Errorf("%s answered %d, want %d", name, w.Code, c.want)
 		}
 	}
@@ -100,27 +103,27 @@ func TestTheProjectionListingsAndTheSweepOnRequest(t *testing.T) {
 	handler := tenantRoutes(t, stub)
 
 	r, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, "/v1/projections/tenant-context:unconverged", nil))
-	if w := serve(handler, r); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"state":"unresolved"`) {
+	if w := serve(t, handler, r); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"state":"unresolved"`) {
 		t.Errorf("unconverged answered %d: %s", w.Code, w.Body)
 	}
 	r, _ = asPrincipal(t, httptest.NewRequest(http.MethodGet, "/v1/projections/tenant-context:findings?class=extra_member&limit=20", nil))
-	if w := serve(handler, r); w.Code != http.StatusOK || stub.class != "extra_member" || stub.limit != 20 {
+	if w := serve(t, handler, r); w.Code != http.StatusOK || stub.class != "extra_member" || stub.limit != 20 {
 		t.Errorf("findings answered %d with class %q, limit %d", w.Code, stub.class, stub.limit)
 	}
 	r, _ = asPrincipal(t, httptest.NewRequest(http.MethodGet, "/v1/projections/tenant-context:findings?limit=0", nil))
-	if w := serve(handler, r); w.Code != http.StatusBadRequest {
+	if w := serve(t, handler, r); w.Code != http.StatusBadRequest {
 		t.Errorf("a limit of 0 answered %d", w.Code)
 	}
 	r, _ = asPrincipal(t, httptest.NewRequest(http.MethodGet, "/v1/projections/tenant-context:findings?class=x", nil))
-	if w := serve(tenantRoutes(t, &stubTenantOperator{err: tenantcontext.ErrUnknownClass}), r); w.Code != http.StatusBadRequest {
+	if w := serve(t, tenantRoutes(t, &stubTenantOperator{err: tenantcontext.ErrUnknownClass}), r); w.Code != http.StatusBadRequest {
 		t.Errorf("an unknown class answered %d", w.Code)
 	}
 	r, _ = asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/projections/tenant-context:sweep", nil))
-	if w := serve(handler, r); w.Code != http.StatusOK || stub.swept != 1 || !strings.Contains(w.Body.String(), `"outcome":"converged"`) {
+	if w := serve(t, handler, r); w.Code != http.StatusOK || stub.swept != 1 || !strings.Contains(w.Body.String(), `"outcome":"converged"`) {
 		t.Errorf("a sweep on request answered %d: %s", w.Code, w.Body)
 	}
 	r, _ = asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/projections/tenant-context:sweep", nil))
-	if w := serve(tenantRoutes(t, &stubTenantOperator{err: errors.New("kernel down")}), r); w.Code != http.StatusServiceUnavailable {
+	if w := serve(t, tenantRoutes(t, &stubTenantOperator{err: errors.New("kernel down")}), r); w.Code != http.StatusServiceUnavailable {
 		t.Errorf("a failed sweep answered %d", w.Code)
 	}
 	for _, r := range []*http.Request{
@@ -128,7 +131,7 @@ func TestTheProjectionListingsAndTheSweepOnRequest(t *testing.T) {
 		httptest.NewRequest(http.MethodGet, "/v1/projections/tenant-context:findings", nil),
 		httptest.NewRequest(http.MethodPost, "/v1/projections/tenant-context:sweep", nil),
 	} {
-		if w := serve(handler, r); w.Code != http.StatusUnauthorized {
+		if w := serve(t, handler, r); w.Code != http.StatusUnauthorized {
 			t.Errorf("%s %s without a caller answered %d", r.Method, r.URL.Path, w.Code)
 		}
 	}

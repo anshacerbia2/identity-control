@@ -34,7 +34,7 @@ func TestARelinkIsRecordedUnderTheCallerWithItsReason(t *testing.T) {
 	target := mustUUID(t)
 	r, operator := asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/principals/"+target.String()+":relink", nil))
 	r.Header.Set(httpapi.AdministrativeReasonHeader, "user deleted by mistake")
-	w := serve(principalRoutes(t, stub), r)
+	w := serve(t, principalRoutes(t, stub), r)
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"state":"active"`) {
 		t.Fatalf("status %d: %s", w.Code, w.Body)
 	}
@@ -69,7 +69,7 @@ func TestARelinkRefusesWhatItCannotDo(t *testing.T) {
 		if c.reason != "" {
 			r.Header.Set(httpapi.AdministrativeReasonHeader, c.reason)
 		}
-		if w := serve(principalRoutes(t, &stubProvisioner{err: c.err}), r); w.Code != c.want {
+		if w := serve(t, principalRoutes(t, &stubProvisioner{err: c.err}), r); w.Code != c.want {
 			t.Errorf("%s answered %d, want %d", name, w.Code, c.want)
 		}
 	}
@@ -81,17 +81,17 @@ func TestDanglingAndReconcileReportTheSweep(t *testing.T) {
 	handler := principalRoutes(t, stub)
 
 	r, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, "/v1/principals:unmapped", nil))
-	if w := serve(handler, r); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"username":"console.made"`) ||
+	if w := serve(t, handler, r); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"username":"console.made"`) ||
 		!strings.Contains(w.Body.String(), `"finding_class":"unmapped"`) {
 		t.Errorf("unmapped answered %d: %s", w.Code, w.Body)
 	}
 
 	r, _ = asPrincipal(t, httptest.NewRequest(http.MethodGet, "/v1/principals:dangling", nil))
-	if w := serve(handler, r); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), stub.dangling[0].PrincipalID.String()) {
+	if w := serve(t, handler, r); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), stub.dangling[0].PrincipalID.String()) {
 		t.Errorf("dangling answered %d: %s", w.Code, w.Body)
 	}
 	r, _ = asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/principals:reconcile", nil))
-	if w := serve(handler, r); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"dangling":1`) ||
+	if w := serve(t, handler, r); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"dangling":1`) ||
 		!strings.Contains(w.Body.String(), `"unmapped":1`) {
 		t.Errorf("reconcile answered %d: %s", w.Code, w.Body)
 	}
@@ -100,12 +100,12 @@ func TestDanglingAndReconcileReportTheSweep(t *testing.T) {
 	for path, want := range map[string]int{"/v1/principals:dangling": http.StatusInternalServerError,
 		"/v1/principals:unmapped": http.StatusInternalServerError} {
 		r, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, path, nil))
-		if w := serve(failing, r); w.Code != want {
+		if w := serve(t, failing, r); w.Code != want {
 			t.Errorf("%s answered %d, want %d", path, w.Code, want)
 		}
 	}
 	r, _ = asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/principals:reconcile", nil))
-	if w := serve(failing, r); w.Code != http.StatusServiceUnavailable {
+	if w := serve(t, failing, r); w.Code != http.StatusServiceUnavailable {
 		t.Errorf("a failed reconcile answered %d", w.Code)
 	}
 	for _, r := range []*http.Request{
@@ -113,7 +113,7 @@ func TestDanglingAndReconcileReportTheSweep(t *testing.T) {
 		httptest.NewRequest(http.MethodGet, "/v1/principals:unmapped", nil),
 		httptest.NewRequest(http.MethodPost, "/v1/principals:reconcile", nil),
 	} {
-		if w := serve(handler, r); w.Code != http.StatusUnauthorized {
+		if w := serve(t, handler, r); w.Code != http.StatusUnauthorized {
 			t.Errorf("%s %s without a caller answered %d", r.Method, r.URL.Path, w.Code)
 		}
 	}
@@ -127,7 +127,7 @@ func TestAReleaseIsRecordedUnderTheCallerWithItsReasonAndUser(t *testing.T) {
 	r, operator := asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/principals/"+target.String()+":release",
 		strings.NewReader(`{"username":"ana.santos"}`)))
 	r.Header.Set(httpapi.AdministrativeReasonHeader, "the console copy was deleted; ticket 41")
-	w := serve(principalRoutes(t, stub), r)
+	w := serve(t, principalRoutes(t, stub), r)
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"state":"suspended"`) {
 		t.Fatalf("status %d: %s", w.Code, w.Body)
 	}
@@ -160,7 +160,7 @@ func TestAReleaseRefusesWhatItCannotDo(t *testing.T) {
 		if c.reason != "" {
 			r.Header.Set(httpapi.AdministrativeReasonHeader, c.reason)
 		}
-		if w := serve(principalRoutes(t, &stubProvisioner{err: c.err}), r); w.Code != c.want {
+		if w := serve(t, principalRoutes(t, &stubProvisioner{err: c.err}), r); w.Code != c.want {
 			t.Errorf("%s answered %d, want %d", name, w.Code, c.want)
 		}
 	}
@@ -182,7 +182,7 @@ func TestAReleaseOfTheCallersOwnPrincipalIsForbidden(t *testing.T) {
 		if c.reason != "" {
 			r.Header.Set(httpapi.AdministrativeReasonHeader, c.reason)
 		}
-		w := serve(principalRoutes(t, stub), r)
+		w := serve(t, principalRoutes(t, stub), r)
 		if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "its own token") {
 			t.Errorf("%s: a self release answered %d: %s", name, w.Code, w.Body)
 		}
@@ -204,15 +204,15 @@ func TestThePendingAndQuarantinedListings(t *testing.T) {
 		"/v1/principals:quarantined": `"quarantine_reason":"2 kernel users carry this principal_id"`,
 	} {
 		r, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, path, nil))
-		w := serve(handler, r)
+		w := serve(t, handler, r)
 		if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), want) || strings.Contains(w.Body.String(), "keycloak_user_id") {
 			t.Errorf("%s answered %d: %s", path, w.Code, w.Body)
 		}
-		if w := serve(handler, httptest.NewRequest(http.MethodGet, path, nil)); w.Code != http.StatusUnauthorized {
+		if w := serve(t, handler, httptest.NewRequest(http.MethodGet, path, nil)); w.Code != http.StatusUnauthorized {
 			t.Errorf("%s without a caller answered %d", path, w.Code)
 		}
 		failing, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, path, nil))
-		if w := serve(principalRoutes(t, &stubProvisioner{err: errors.New("database down")}), failing); w.Code != http.StatusInternalServerError {
+		if w := serve(t, principalRoutes(t, &stubProvisioner{err: errors.New("database down")}), failing); w.Code != http.StatusInternalServerError {
 			t.Errorf("%s failing answered %d", path, w.Code)
 		}
 	}
@@ -227,7 +227,7 @@ func TestAnAdoptionPlansAndIsRecordedUnderTheCaller(t *testing.T) {
 	r, operator := asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/principals/"+target.String()+":adopt",
 		strings.NewReader(`{"dry_run": true}`)))
 	r.Header.Set(httpapi.AdministrativeReasonHeader, "restored to 2026-10-19; ticket 52")
-	w := serve(principalRoutes(t, stub), r)
+	w := serve(t, principalRoutes(t, stub), r)
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"adoptable":true`) ||
 		!strings.Contains(w.Body.String(), `"orphan_finding"`) {
 		t.Fatalf("status %d: %s", w.Code, w.Body)
@@ -258,7 +258,7 @@ func TestAnAdoptionRefusesWhatItCannotDo(t *testing.T) {
 		if c.reason != "" {
 			r.Header.Set(httpapi.AdministrativeReasonHeader, c.reason)
 		}
-		if w := serve(principalRoutes(t, &stubProvisioner{err: c.err}), r); w.Code != c.want {
+		if w := serve(t, principalRoutes(t, &stubProvisioner{err: c.err}), r); w.Code != c.want {
 			t.Errorf("%s answered %d, want %d: %s", name, w.Code, c.want, w.Body)
 		}
 	}
@@ -270,7 +270,7 @@ func TestAnAdoptionOfTheCallersOwnPrincipalIsForbidden(t *testing.T) {
 	r, operator := asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/principals/x:adopt", nil))
 	r = httptest.NewRequest(http.MethodPost, "/v1/principals/"+operator.String()+":adopt", nil).WithContext(r.Context())
 	r.Header.Set(httpapi.IdempotencyHeader, "key-adopt-self")
-	if w := serve(principalRoutes(t, stub), r); w.Code != http.StatusForbidden || stub.adopted != nil {
+	if w := serve(t, principalRoutes(t, stub), r); w.Code != http.StatusForbidden || stub.adopted != nil {
 		t.Fatalf("status %d, adopted %+v", w.Code, stub.adopted)
 	}
 }

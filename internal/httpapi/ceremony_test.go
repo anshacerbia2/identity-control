@@ -45,13 +45,13 @@ func ceremonyRoutes(t *testing.T, stub *stubCeremony) http.Handler {
 func TestAProviderReadsAndReviewsTheCeremonyRecord(t *testing.T) {
 	stub := &stubCeremony{}
 	r, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, "/v1/bootstrap-ceremony", nil))
-	if w := serve(ceremonyRoutes(t, stub), r); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"witness":"Witness"`) {
+	if w := serve(t, ceremonyRoutes(t, stub), r); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"witness":"Witness"`) {
 		t.Fatalf("read: %d %s", w.Code, w.Body)
 	}
 	r, reviewer := asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/bootstrap-ceremony:review",
 		strings.NewReader(`{"reviewer":"Security Reviewer","outcome":"satisfactory"}`)))
 	r.Header.Set(httpapi.AdministrativeReasonHeader, "record matches change ticket 7")
-	if w := serve(ceremonyRoutes(t, stub), r); w.Code != http.StatusCreated {
+	if w := serve(t, ceremonyRoutes(t, stub), r); w.Code != http.StatusCreated {
 		t.Fatalf("review: %d %s", w.Code, w.Body)
 	}
 	if stub.reviewed == nil || stub.reviewed.RecordedBy != reviewer || stub.reviewed.Statement != "record matches change ticket 7" ||
@@ -77,14 +77,14 @@ func TestACeremonyReviewRefusesWhatItCannotRecord(t *testing.T) {
 		if c.reason != "" {
 			r.Header.Set(httpapi.AdministrativeReasonHeader, c.reason)
 		}
-		if w := serve(ceremonyRoutes(t, &stubCeremony{err: c.err}), r); w.Code != c.want {
+		if w := serve(t, ceremonyRoutes(t, &stubCeremony{err: c.err}), r); w.Code != c.want {
 			t.Errorf("%s answered %d, want %d: %s", name, w.Code, c.want, w.Body)
 		}
 	}
 	// An owner, not a provider, is refused before anything is read.
 	owner, _ := id.NewV7()
 	r := asOwner(httptest.NewRequest(http.MethodGet, "/v1/bootstrap-ceremony", nil), owner)
-	if w := serve(ceremonyRoutes(t, &stubCeremony{}), r); w.Code != http.StatusForbidden {
+	if w := serve(t, ceremonyRoutes(t, &stubCeremony{}), r); w.Code != http.StatusForbidden {
 		t.Errorf("an owner read the ceremony record: %d", w.Code)
 	}
 }

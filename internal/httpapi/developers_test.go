@@ -19,7 +19,7 @@ import (
 )
 
 func registerRequest() *http.Request {
-	r := httptest.NewRequest(http.MethodPost, "/v1/registrations", strings.NewReader(`{"client_key":"orders-web","profile":"public"}`))
+	r := httptest.NewRequest(http.MethodPost, "/v1/registrations", strings.NewReader(registerBody))
 	r.Header.Set("Idempotency-Key", "k-1")
 	return r
 }
@@ -29,10 +29,10 @@ func TestAnApplicationDeveloperRegistersOnItsStanding(t *testing.T) {
 	registrar := &stubRegistrar{developers: map[id.UUID]bool{developer: true}}
 	handler := registrarHandler(t, registrar)
 
-	if w := serve(handler, asOwner(registerRequest(), stranger)); w.Code != http.StatusForbidden || registrar.req != nil {
+	if w := serve(t, handler, asOwner(registerRequest(), stranger)); w.Code != http.StatusForbidden || registrar.req != nil {
 		t.Fatalf("a caller without the standing answered %d and reached the service: %v", w.Code, registrar.req != nil)
 	}
-	if w := serve(handler, asOwner(registerRequest(), developer)); w.Code != http.StatusCreated {
+	if w := serve(t, handler, asOwner(registerRequest(), developer)); w.Code != http.StatusCreated {
 		t.Fatalf("an application developer's registration answered %d: %s", w.Code, w.Body)
 	}
 	if registrar.req == nil || !registrar.req.Developer || registrar.req.RegisteredBy != developer {
@@ -40,7 +40,7 @@ func TestAnApplicationDeveloperRegistersOnItsStanding(t *testing.T) {
 	}
 
 	r, _ := asPrincipal(t, registerRequest())
-	if w := serve(handler, r); w.Code != http.StatusCreated || registrar.req.Developer {
+	if w := serve(t, handler, r); w.Code != http.StatusCreated || registrar.req.Developer {
 		t.Errorf("a provider's registration answered %d, registered as a developer: %v", w.Code, registrar.req.Developer)
 	}
 }
@@ -52,12 +52,12 @@ func TestADevelopersRefusalIsForbidden(t *testing.T) {
 		registration.ErrNotDeveloper,
 	} {
 		registrar := &stubRegistrar{developers: map[id.UUID]bool{developer: true}, err: err}
-		if w := serve(registrarHandler(t, registrar), asOwner(registerRequest(), developer)); w.Code != http.StatusForbidden {
+		if w := serve(t, registrarHandler(t, registrar), asOwner(registerRequest(), developer)); w.Code != http.StatusForbidden {
 			t.Errorf("a registration refused with %v answered %d, want 403", err, w.Code)
 		}
 	}
 	failing := &stubRegistrar{readErr: errors.New("database down")}
-	if w := serve(registrarHandler(t, failing), asOwner(registerRequest(), developer)); w.Code != http.StatusInternalServerError {
+	if w := serve(t, registrarHandler(t, failing), asOwner(registerRequest(), developer)); w.Code != http.StatusInternalServerError {
 		t.Errorf("a failed standing read answered %d, want 500", w.Code)
 	}
 }
@@ -83,24 +83,24 @@ func TestAProviderGrantsAndRevokesTheStanding(t *testing.T) {
 		"grant":  grant(),
 		"revoke": revoke(),
 	} {
-		if w := serve(handler, asOwner(r, owner)); w.Code != http.StatusForbidden {
+		if w := serve(t, handler, asOwner(r, owner)); w.Code != http.StatusForbidden {
 			t.Errorf("an owner's %s answered %d, want 403", name, w.Code)
 		}
 	}
 
 	r, provider := asPrincipal(t, grant())
-	if w := serve(handler, r); w.Code != http.StatusCreated {
+	if w := serve(t, handler, r); w.Code != http.StatusCreated {
 		t.Fatalf("a provider's grant answered %d: %s", w.Code, w.Body)
 	}
 	if got := registrar.devChange; got == nil || got.Principal != developer || got.ChangedBy != provider || got.Reason != "builds the orders service" {
 		t.Errorf("the grant reached the service as %+v", got)
 	}
 	r, _ = asPrincipal(t, revoke())
-	if w := serve(handler, r); w.Code != http.StatusOK || !registrar.devRevoked {
+	if w := serve(t, handler, r); w.Code != http.StatusOK || !registrar.devRevoked {
 		t.Errorf("a provider's revocation answered %d, revoked %v", w.Code, registrar.devRevoked)
 	}
 	l, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, "/v1/application-developers", nil))
-	if w := serve(handler, l); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"developers"`) {
+	if w := serve(t, handler, l); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"developers"`) {
 		t.Errorf("a provider's list answered %d: %s", w.Code, w.Body)
 	}
 }
@@ -124,7 +124,7 @@ func TestStandingRoutesRefuseMalformedRequestsAndMapRefusals(t *testing.T) {
 		if c.reason {
 			r.Header.Set(httpapi.AdministrativeReasonHeader, "r")
 		}
-		if w := serve(handler, r); w.Code != c.want {
+		if w := serve(t, handler, r); w.Code != c.want {
 			t.Errorf("%s answered %d, want %d", name, w.Code, c.want)
 		}
 	}
@@ -137,13 +137,13 @@ func TestStandingRoutesRefuseMalformedRequestsAndMapRefusals(t *testing.T) {
 	} {
 		r, _ := asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/application-developers/"+developer.String()+":revoke", nil))
 		r.Header.Set(httpapi.AdministrativeReasonHeader, "r")
-		if w := serve(registrarHandler(t, &stubRegistrar{err: err}), r); w.Code != want {
+		if w := serve(t, registrarHandler(t, &stubRegistrar{err: err}), r); w.Code != want {
 			t.Errorf("a revocation refused with %v answered %d, want %d", err, w.Code, want)
 		}
 	}
 	failing := &stubRegistrar{readErr: errors.New("database down")}
 	l, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, "/v1/application-developers", nil))
-	if w := serve(registrarHandler(t, failing), l); w.Code != http.StatusInternalServerError {
+	if w := serve(t, registrarHandler(t, failing), l); w.Code != http.StatusInternalServerError {
 		t.Errorf("a failed list answered %d, want 500", w.Code)
 	}
 }
@@ -153,23 +153,23 @@ func TestAnyCallerReadsItsOwnStanding(t *testing.T) {
 	handler := registrarHandler(t, &stubRegistrar{developers: map[id.UUID]bool{developer: true}})
 	read := func() *http.Request { return httptest.NewRequest(http.MethodGet, "/v1/registrations:standing", nil) }
 
-	w := serve(handler, asOwner(read(), developer))
+	w := serve(t, handler, asOwner(read(), developer))
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"application_developer":true`) ||
 		!strings.Contains(w.Body.String(), `"provider":false`) || !strings.Contains(w.Body.String(), `"environment":"non-production"`) {
 		t.Errorf("a developer's standing answered %d: %s", w.Code, w.Body)
 	}
-	if w := serve(handler, asOwner(read(), stranger)); !strings.Contains(w.Body.String(), `"application_developer":false`) {
+	if w := serve(t, handler, asOwner(read(), stranger)); !strings.Contains(w.Body.String(), `"application_developer":false`) {
 		t.Errorf("a stranger's standing answered %s", w.Body)
 	}
 	r, _ := asPrincipal(t, read())
-	if w := serve(handler, r); !strings.Contains(w.Body.String(), `"provider":true`) {
+	if w := serve(t, handler, r); !strings.Contains(w.Body.String(), `"provider":true`) {
 		t.Errorf("a provider's standing answered %s", w.Body)
 	}
-	if w := serve(handler, read()); w.Code != http.StatusUnauthorized {
+	if w := serve(t, handler, read()); w.Code != http.StatusUnauthorized {
 		t.Errorf("an anonymous read answered %d, want 401", w.Code)
 	}
 	failing := registrarHandler(t, &stubRegistrar{readErr: errors.New("database down")})
-	if w := serve(failing, asOwner(read(), developer)); w.Code != http.StatusInternalServerError {
+	if w := serve(t, failing, asOwner(read(), developer)); w.Code != http.StatusInternalServerError {
 		t.Errorf("a failed read answered %d, want 500", w.Code)
 	}
 }

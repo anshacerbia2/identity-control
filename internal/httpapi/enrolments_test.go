@@ -85,9 +85,7 @@ func enrol(t *testing.T, handler http.Handler, path, body, bearer string, forwar
 	for _, value := range forwarded {
 		request.Header.Add("Forwarded", value)
 	}
-	recorder := httptest.NewRecorder()
-	handler.ServeHTTP(recorder, request)
-	return recorder
+	return serveChecked(t, handler, request)
 }
 
 func TestTheEnrolmentRoutesAdmitTheRegisteredBFFWorkloadAlone(t *testing.T) {
@@ -275,7 +273,7 @@ func TestAProviderKeepsTheEnrolmentCallerRecord(t *testing.T) {
 	r, provider := asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/enrolment-callers",
 		strings.NewReader(`{"principal_id":"`+bff.String()+`","purpose":"Identity Experience's BFF"}`)))
 	r.Header.Set(httpapi.AdministrativeReasonHeader, "the enrolment page")
-	if w := serve(handler, r); w.Code != http.StatusCreated {
+	if w := serve(t, handler, r); w.Code != http.StatusCreated {
 		t.Fatalf("register: %d %s", w.Code, w.Body)
 	}
 	if len(registry.changes) != 1 || registry.changes[0].By != provider || registry.changes[0].Reason != "the enrolment page" ||
@@ -283,12 +281,12 @@ func TestAProviderKeepsTheEnrolmentCallerRecord(t *testing.T) {
 		t.Fatalf("registered %+v", registry.changes)
 	}
 	r, _ = asPrincipal(t, httptest.NewRequest(http.MethodGet, "/v1/enrolment-callers", nil))
-	if w := serve(handler, r); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), bff.String()) {
+	if w := serve(t, handler, r); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), bff.String()) {
 		t.Fatalf("list: %d %s", w.Code, w.Body)
 	}
 	r, _ = asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/enrolment-callers/"+bff.String()+":retire", nil))
 	r.Header.Set(httpapi.AdministrativeReasonHeader, "replaced")
-	if w := serve(handler, r); w.Code != http.StatusOK || len(registry.changes) != 2 {
+	if w := serve(t, handler, r); w.Code != http.StatusOK || len(registry.changes) != 2 {
 		t.Fatalf("retire: %d %s", w.Code, w.Body)
 	}
 	for name, c := range map[string]struct {
@@ -309,14 +307,14 @@ func TestAProviderKeepsTheEnrolmentCallerRecord(t *testing.T) {
 		if c.reason != "" {
 			r.Header.Set(httpapi.AdministrativeReasonHeader, c.reason)
 		}
-		if w := serve(callerRoutes(t, registry), r); w.Code != c.want {
+		if w := serve(t, callerRoutes(t, registry), r); w.Code != c.want {
 			t.Errorf("%s answered %d, want %d: %s", name, w.Code, c.want, w.Body)
 		}
 	}
 	// A person who is not a provider is refused before anything is read.
 	r = httptest.NewRequest(http.MethodGet, "/v1/enrolment-callers", nil)
 	r = asOwner(r, bff)
-	if w := serve(callerRoutes(t, &stubCallerRegistry{}), r); w.Code != http.StatusForbidden {
+	if w := serve(t, callerRoutes(t, &stubCallerRegistry{}), r); w.Code != http.StatusForbidden {
 		t.Errorf("a non-provider answered %d", w.Code)
 	}
 }
