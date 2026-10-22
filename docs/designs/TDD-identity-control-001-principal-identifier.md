@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-001
   title: Canonical Principal Identifier and Creation Path
   owner: Core Platform Team
-  version: 1.27.0
+  version: 1.28.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-10
-  last_reviewed: 2026-10-21
+  last_reviewed: 2026-10-22
   parent_sad: SAD-001
 ---
 
@@ -1794,8 +1794,28 @@ registry and relies on the platform cached image. If there is no cached image, a
 reported" [R10]. The default for a service that does not build is `missing`, under which a task run
 before the first build would have pulled the name. `deploy-dev` asserts both on every run. Every image
 the stack names without a digest must carry `build` where its service builds it and `never`
-elsewhere, and the migrate image in use must have no registry digest, which shows it was built and
-not pulled.
+elsewhere, and the migrate image in use must carry the commit under test (1.28.0).
+
+The check on the image itself is positive since 1.28.0. It reads the commit under test back from the
+image the running migrate container uses. Compose sets the label: "`labels` add metadata to the
+resulting image" [R22], here `org.opencontainers.image.revision`, fed from `GITHUB_SHA` in CI and
+from `git rev-parse HEAD` on a server (`BUILD_REVISION`). The OCI Image Specification defines it:
+"**org.opencontainers.image.revision** Source control revision identifier for the packaged
+software", in the namespace that "is reserved for use in the OCI Image Specification" [R23].
+`deploy-dev` takes the image ID of the migrate container, not a tag, and requires that image's label
+to equal `GITHUB_SHA`. An image pulled under the same name would not carry the revision of a commit
+that did not exist when it was published.
+
+Until 1.28.0 the check required the image to carry no registry digest. It failed on 2026-10-22, run
+39735938275, on the runner image `ubuntu-26.04` (the last pass, run 39651327871, ran on
+`ubuntu-24.04`): the log shows the migrate image built, not pulled, with its "exporting attestation
+manifest" and "exporting manifest list" lines, and the same check then reported a registry digest.
+Docker's containerd image store is "the default storage backend for Docker Engine 29.0 and later on
+fresh installations", and it is the store that handles "images that include attestations
+(provenance, SBOM)", which "use image indices that the classic store doesn't support" [R24]. The
+explanation is that a locally built image in that store carries a digest too, so an absent digest no
+longer shows that an image was built here. The log does not print the digests, so the check now
+prints them. The runner image is not pinned to dodge it.
 
 **Residual risk.**
 
@@ -1968,3 +1988,6 @@ Keycloak release:
 - **[R21]** squawk, _prefer-bigint-over-int_, accessed 2026-10-20.
   <https://squawkhq.com/docs/prefer-bigint-over-int>. "Using 32 bit integer fields can result in
   hitting the max int limit."
+- **[R22]** Docker, _Compose Build Specification_, `labels`, <https://docs.docker.com/reference/compose-file/build/#labels>, accessed 2026-10-22. "`labels` add metadata to the resulting image."
+- **[R23]** Open Container Initiative, _Image Format Specification: Annotations_, <https://github.com/opencontainers/image-spec/blob/main/annotations.md>, accessed 2026-10-22. "**org.opencontainers.image.revision** Source control revision identifier for the packaged software." "Keys using the `org.opencontainers.image` namespace are reserved for use in the OCI Image Specification and MUST NOT be used by other specifications and extensions, including other OCI specifications." The page defines annotations; that the same key is set as an image label is Compose's `labels` [R22].
+- **[R24]** Docker, _containerd image store_, <https://docs.docker.com/engine/storage/containerd/>, accessed 2026-10-22. "The containerd image store is the default storage backend for Docker Engine 29.0 and later on fresh installations." "Working with images that include attestations (provenance, SBOM). These use image indices that the classic store doesn't support."
