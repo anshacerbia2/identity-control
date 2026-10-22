@@ -246,10 +246,10 @@ jobs:
       # against. That stayed invisible for three weeks behind an earlier step that never passed,
       # and locally behind a development database that had been migrated long ago.
       #
-      # `-p 1`: every integration suite runs against this one database and clears the rows it
-      # reads, so two packages in flight at once see each other's pending Principals
-      # (internal/identity/provisioning failed that way when a new test dependency changed which
-      # packages overlapped). organization-control runs the same way.
+      # `-p 1`: the integration suites share this one database. With packages overlapping,
+      # internal/identity/provisioning failed on rows it did not write (a duplicate
+      # principal_mapping key, RecoverPending = 2) in the coverage step, after a new test
+      # dependency changed which packages ran together. organization-control runs `-p 1` too.
       - name: test with race detector
         run: go test ./... -race -count=1 -p 1
 
