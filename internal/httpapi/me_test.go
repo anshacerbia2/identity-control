@@ -44,7 +44,7 @@ func (s *stubSelf) Enroll(_ context.Context, actor securitystate.Actor, authenti
 
 func (s *stubSelf) MySessions(_ context.Context, principal id.UUID, sid string) ([]securitystate.MySession, error) {
 	s.caller, s.sid = principal, sid
-	return []securitystate.MySession{{SecurityRef: "k1.s", Current: true}}, s.err
+	return []securitystate.MySession{{SecurityRef: "k1.s", Clients: []string{"web"}, Current: true}}, s.err
 }
 
 func (s *stubSelf) MyAuthenticators(_ context.Context, principal id.UUID) ([]securitystate.MyAuthenticator, error) {
@@ -104,14 +104,14 @@ func TestAPersonReadsTheirOwnState(t *testing.T) {
 	for path, key := range map[string]string{"/v1/me/sessions": `"sessions"`, "/v1/me/authenticators": `"authenticators"`} {
 		stub := &stubSelf{}
 		r, person := asPerson(t, httptest.NewRequest(http.MethodGet, path, nil), time.Minute)
-		w := serve(meHandler(t, stub), r)
+		w := serve(t, meHandler(t, stub), r)
 		if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), key) || stub.caller != person {
 			t.Errorf("%s: %d %s, read as %s", path, w.Code, w.Body, stub.caller)
 		}
 	}
 	stub := &stubSelf{}
 	r, _ := asPerson(t, httptest.NewRequest(http.MethodGet, "/v1/me/sessions", nil), time.Minute)
-	serve(meHandler(t, stub), r)
+	serve(t, meHandler(t, stub), r)
 	if stub.sid != "sid-1" {
 		t.Errorf("the session list was asked for sid %q, not the token's", stub.sid)
 	}
@@ -125,7 +125,7 @@ func TestEachSelfCommandActsOnTheCaller(t *testing.T) {
 	} {
 		stub := &stubSelf{}
 		r, person := asPerson(t, httptest.NewRequest(http.MethodPost, path, nil), time.Minute)
-		w := serve(meHandler(t, stub), r)
+		w := serve(t, meHandler(t, stub), r)
 		c := stub.submitted
 		if w.Code != http.StatusOK || c == nil {
 			t.Fatalf("%s: %d %s", path, w.Code, w.Body)
@@ -142,14 +142,14 @@ func TestARemovalNeedsTwoFactors(t *testing.T) {
 	stub := &stubSelf{}
 	r, _ := asPerson(t, httptest.NewRequest(http.MethodPost, "/v1/me/authenticators/k1.a:remove", nil), time.Minute)
 	r = r.WithContext(httpapi.WithAssurance(r.Context(), "aal1", time.Now()))
-	w := serve(meHandler(t, stub), r)
+	w := serve(t, meHandler(t, stub), r)
 	if w.Code != http.StatusUnauthorized || !strings.Contains(w.Header().Get("WWW-Authenticate"), `acr_values="aal2"`) ||
 		stub.submitted != nil {
 		t.Errorf("a removal at aal1: %d %q", w.Code, w.Header().Get("WWW-Authenticate"))
 	}
 	r, _ = asPerson(t, httptest.NewRequest(http.MethodGet, "/v1/me/sessions", nil), time.Minute)
 	r = r.WithContext(httpapi.WithAssurance(r.Context(), "aal1", time.Now()))
-	if w := serve(meHandler(t, stub), r); w.Code != http.StatusOK {
+	if w := serve(t, meHandler(t, stub), r); w.Code != http.StatusOK {
 		t.Errorf("reading one's sessions at aal1: %d", w.Code)
 	}
 }
@@ -158,13 +158,13 @@ func TestARemovalNeedsTwoFactors(t *testing.T) {
 func TestOnlyARemovalNeedsAStepUp(t *testing.T) {
 	stub := &stubSelf{}
 	r, _ := asPerson(t, httptest.NewRequest(http.MethodPost, "/v1/me/authenticators/k1.a:remove", nil), time.Hour)
-	w := serve(meHandler(t, stub), r)
+	w := serve(t, meHandler(t, stub), r)
 	if w.Code != http.StatusUnauthorized || !strings.Contains(w.Header().Get("WWW-Authenticate"), "insufficient_user_authentication") ||
 		stub.submitted != nil {
 		t.Errorf("a stale removal: %d %q", w.Code, w.Header().Get("WWW-Authenticate"))
 	}
 	r, _ = asPerson(t, httptest.NewRequest(http.MethodPost, "/v1/me/sessions:terminate-all", nil), time.Hour)
-	if w := serve(meHandler(t, stub), r); w.Code != http.StatusOK {
+	if w := serve(t, meHandler(t, stub), r); w.Code != http.StatusOK {
 		t.Errorf("ending sessions after an hour: %d", w.Code)
 	}
 }
@@ -172,36 +172,36 @@ func TestOnlyARemovalNeedsAStepUp(t *testing.T) {
 func TestASelfCommandStillRunningPointsAtTheCallersOwnOperation(t *testing.T) {
 	stub := &stubSelf{state: securitystate.StatePending}
 	r, _ := asPerson(t, httptest.NewRequest(http.MethodPost, "/v1/me/sessions:terminate-all", nil), time.Minute)
-	w := serve(meHandler(t, stub), r)
+	w := serve(t, meHandler(t, stub), r)
 	if w.Code != http.StatusAccepted || !strings.HasPrefix(w.Header().Get("Location"), "/v1/me/security-operations/") {
 		t.Errorf("%d, Location %q", w.Code, w.Header().Get("Location"))
 	}
 	r, person := asPerson(t, httptest.NewRequest(http.MethodGet, "/v1/me/security-operations/"+mustUUID(t).String(), nil), time.Minute)
-	if w := serve(meHandler(t, stub), r); w.Code != http.StatusOK || stub.caller != person {
+	if w := serve(t, meHandler(t, stub), r); w.Code != http.StatusOK || stub.caller != person {
 		t.Errorf("reading the operation: %d as %s", w.Code, stub.caller)
 	}
 }
 
 func TestSelfRoutesRefuseWhatTheyMust(t *testing.T) {
 	handler := meHandler(t, &stubSelf{})
-	if w := serve(handler, httptest.NewRequest(http.MethodGet, "/v1/me/sessions", nil)); w.Code != http.StatusUnauthorized {
+	if w := serve(t, handler, httptest.NewRequest(http.MethodGet, "/v1/me/sessions", nil)); w.Code != http.StatusUnauthorized {
 		t.Errorf("no caller: %d", w.Code)
 	}
 	r, _ := asPerson(t, httptest.NewRequest(http.MethodPost, "/v1/me/sessions:terminate-all", nil), time.Minute)
 	r.Header.Del("Idempotency-Key")
-	if w := serve(handler, r); w.Code != http.StatusBadRequest {
+	if w := serve(t, handler, r); w.Code != http.StatusBadRequest {
 		t.Errorf("no Idempotency-Key: %d", w.Code)
 	}
 	r, _ = asPerson(t, httptest.NewRequest(http.MethodPost, "/v1/me/sessions/k1.s:delete", nil), time.Minute)
-	if w := serve(handler, r); w.Code != http.StatusNotFound {
+	if w := serve(t, handler, r); w.Code != http.StatusNotFound {
 		t.Errorf("an unknown action: %d", w.Code)
 	}
 	r, _ = asPerson(t, httptest.NewRequest(http.MethodGet, "/v1/me/sessions", nil), time.Minute)
-	if w := serve(meHandler(t, &stubSelf{err: keycloak.ErrUnavailable}), r); w.Code != http.StatusServiceUnavailable {
+	if w := serve(t, meHandler(t, &stubSelf{err: keycloak.ErrUnavailable}), r); w.Code != http.StatusServiceUnavailable {
 		t.Errorf("the kernel failing: %d", w.Code)
 	}
 	r, _ = asPerson(t, httptest.NewRequest(http.MethodPost, "/v1/me/sessions:terminate-all", nil), time.Minute)
-	if w := serve(meHandler(t, &stubSelf{err: securitystate.ErrState}), r); w.Code != http.StatusConflict {
+	if w := serve(t, meHandler(t, &stubSelf{err: securitystate.ErrState}), r); w.Code != http.StatusConflict {
 		t.Errorf("a suspended caller: %d", w.Code)
 	}
 }
@@ -233,7 +233,7 @@ func TestEnrollingNeedsTheLevelBindingRequires(t *testing.T) {
 			r, person := asPerson(t, httptest.NewRequest(http.MethodPost, "/v1/me/authenticators:enroll",
 				strings.NewReader(`{"type":"totp"}`)), c.age)
 			r = r.WithContext(httpapi.WithAssurance(r.Context(), c.acr, time.Now().Add(-c.age)))
-			w := serve(meHandler(t, stub), r)
+			w := serve(t, meHandler(t, stub), r)
 			if w.Code != c.status {
 				t.Fatalf("%d, want %d: %s", w.Code, c.status, w.Body)
 			}
@@ -247,7 +247,7 @@ func TestEnrollingNeedsTheLevelBindingRequires(t *testing.T) {
 		})
 	}
 	r, _ := asPerson(t, httptest.NewRequest(http.MethodPost, "/v1/me/authenticators:enroll", strings.NewReader(`{}`)), time.Minute)
-	if w := serve(meHandler(t, &stubSelf{}), r); w.Code != http.StatusBadRequest {
+	if w := serve(t, meHandler(t, &stubSelf{}), r); w.Code != http.StatusBadRequest {
 		t.Errorf("no type: %d", w.Code)
 	}
 }

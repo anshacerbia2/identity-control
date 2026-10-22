@@ -40,12 +40,12 @@ func TestTheEmergencyValidationReportIsAProvidersAndNamesEachUse(t *testing.T) {
 	handler := built.Mount(identity, identity)
 	const path = "/v1/provider-grants:emergency-validation"
 
-	if w := serve(handler, asOwner(httptest.NewRequest(http.MethodGet, path, nil), mustUUID(t))); w.Code != http.StatusForbidden {
+	if w := serve(t, handler, asOwner(httptest.NewRequest(http.MethodGet, path, nil), mustUUID(t))); w.Code != http.StatusForbidden {
 		t.Errorf("an owner answered %d, want 403", w.Code)
 	}
 	r, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, path, nil))
 	r.Header.Set(httpapi.AdministrativeReasonHeader, "a drill")
-	w := serve(handler, r)
+	w := serve(t, handler, r)
 	if w.Code != http.StatusOK {
 		t.Fatalf("a provider answered %d: %s", w.Code, w.Body)
 	}

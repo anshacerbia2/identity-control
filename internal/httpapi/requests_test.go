@@ -34,10 +34,10 @@ func TestAnApplicationDeveloperProposesAProductionRegistration(t *testing.T) {
 	registrar := &stubRegistrar{developers: map[id.UUID]bool{developer: true}}
 	handler := registrarHandler(t, registrar)
 
-	if w := serve(handler, asOwner(proposeRequest(developer, other), stranger)); w.Code != http.StatusForbidden || registrar.regProposal != nil {
+	if w := serve(t, handler, asOwner(proposeRequest(developer, other), stranger)); w.Code != http.StatusForbidden || registrar.regProposal != nil {
 		t.Fatalf("a caller without the standing answered %d and reached the service: %v", w.Code, registrar.regProposal != nil)
 	}
-	w := serve(handler, asOwner(proposeRequest(developer, other), developer))
+	w := serve(t, handler, asOwner(proposeRequest(developer, other), developer))
 	if w.Code != http.StatusCreated {
 		t.Fatalf("a developer's request answered %d: %s", w.Code, w.Body)
 	}
@@ -47,10 +47,10 @@ func TestAnApplicationDeveloperProposesAProductionRegistration(t *testing.T) {
 		t.Fatalf("the request reached the service as %+v", got)
 	}
 	registrar.replayed = true
-	if w := serve(handler, asOwner(proposeRequest(developer, other), developer)); w.Code != http.StatusOK {
+	if w := serve(t, handler, asOwner(proposeRequest(developer, other), developer)); w.Code != http.StatusOK {
 		t.Errorf("a retried request answered %d, want 200", w.Code)
 	}
-	if w := serve(handler, asOwner(httptest.NewRequest(http.MethodGet, "/v1/registration-requests:mine", nil), developer)); w.Code != http.StatusOK {
+	if w := serve(t, handler, asOwner(httptest.NewRequest(http.MethodGet, "/v1/registration-requests:mine", nil), developer)); w.Code != http.StatusOK {
 		t.Errorf("a developer's own requests answered %d", w.Code)
 	}
 }
@@ -65,22 +65,22 @@ func TestOnlyAProviderDecidesARequestOrReadsTheQueue(t *testing.T) {
 		return r
 	}
 	for _, name := range []string{"approve", "reject"} {
-		if w := serve(handler, asOwner(action(name), developer)); w.Code != http.StatusForbidden || registrar.regDecision != nil {
+		if w := serve(t, handler, asOwner(action(name), developer)); w.Code != http.StatusForbidden || registrar.regDecision != nil {
 			t.Errorf("a developer's :%s answered %d", name, w.Code)
 		}
 	}
-	if w := serve(handler, asOwner(httptest.NewRequest(http.MethodGet, "/v1/registration-requests", nil), developer)); w.Code != http.StatusForbidden {
+	if w := serve(t, handler, asOwner(httptest.NewRequest(http.MethodGet, "/v1/registration-requests", nil), developer)); w.Code != http.StatusForbidden {
 		t.Errorf("a developer reading the queue answered %d, want 403", w.Code)
 	}
-	if w := serve(handler, asOwner(action("withdraw"), developer)); w.Code != http.StatusOK || registrar.regDecision.Decision != "withdraw" || registrar.asProvider {
+	if w := serve(t, handler, asOwner(action("withdraw"), developer)); w.Code != http.StatusOK || registrar.regDecision.Decision != "withdraw" || registrar.asProvider {
 		t.Errorf("a developer's withdrawal answered %d as %+v", w.Code, registrar.regDecision)
 	}
 	r, provider := asPrincipal(t, action("approve"))
-	if w := serve(handler, r); w.Code != http.StatusOK || registrar.regDecision.DecidedBy != provider || !registrar.asProvider {
+	if w := serve(t, handler, r); w.Code != http.StatusOK || registrar.regDecision.DecidedBy != provider || !registrar.asProvider {
 		t.Errorf("a provider's approval answered %d as %+v", w.Code, registrar.regDecision)
 	}
 	q, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, "/v1/registration-requests", nil))
-	if w := serve(handler, q); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"requests"`) {
+	if w := serve(t, handler, q); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"requests"`) {
 		t.Errorf("a provider's queue answered %d: %s", w.Code, w.Body)
 	}
 }
@@ -110,7 +110,7 @@ func TestRequestRoutesRefuseMalformedRequestsAndMapRefusals(t *testing.T) {
 		"malformed request":  {malformed, http.StatusBadRequest},
 		"decision no reason": {decisionNoReason, http.StatusBadRequest},
 	} {
-		if w := serve(handler, asOwner(c.r, developer)); w.Code != c.want {
+		if w := serve(t, handler, asOwner(c.r, developer)); w.Code != c.want {
 			t.Errorf("%s answered %d, want %d", name, w.Code, c.want)
 		}
 	}
@@ -129,17 +129,17 @@ func TestRequestRoutesRefuseMalformedRequestsAndMapRefusals(t *testing.T) {
 		registration.ErrKeyTaken:                               http.StatusConflict,
 	} {
 		h := registrarHandler(t, &stubRegistrar{developers: map[id.UUID]bool{developer: true}, err: err})
-		if w := serve(h, asOwner(proposeRequest(developer, other), developer)); w.Code != want {
+		if w := serveInjected(h, asOwner(proposeRequest(developer, other), developer)); w.Code != want {
 			t.Errorf("a request refused with %v answered %d, want %d", err, w.Code, want)
 		}
 	}
 	failing := registrarHandler(t, &stubRegistrar{developers: map[id.UUID]bool{developer: true}, readErr: errors.New("down")})
 	q, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, "/v1/registration-requests", nil))
-	if w := serve(failing, q); w.Code != http.StatusInternalServerError {
+	if w := serve(t, failing, q); w.Code != http.StatusInternalServerError {
 		t.Errorf("a failed queue read answered %d, want 500", w.Code)
 	}
 	m, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, "/v1/registration-requests:mine", nil))
-	if w := serve(failing, m); w.Code != http.StatusInternalServerError {
+	if w := serve(t, failing, m); w.Code != http.StatusInternalServerError {
 		t.Errorf("a failed own read answered %d, want 500", w.Code)
 	}
 }

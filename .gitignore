@@ -41,3 +41,4 @@ Thumbs.db
 
 # The scratch build context of scripts/check-dockerignore.sh, removed when it exits.
 .dockerignore-check.*/
+.cache/

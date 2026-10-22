@@ -165,7 +165,7 @@ func TestAWorkloadIsCreatedUnderTheCaller(t *testing.T) {
 	owner := mustUUID(t)
 	r, principal := asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/workloads", strings.NewReader(workloadBody(owner.String()))))
 	r.Header.Set(httpapi.IdempotencyHeader, "workload-1")
-	w := serve(workloadHandler(t, service), r)
+	w := serve(t, workloadHandler(t, service), r)
 	if w.Code != http.StatusCreated || !strings.Contains(w.Body.String(), `"client_key":"nightly-job"`) {
 		t.Fatalf("status %d: %s", w.Code, w.Body)
 	}
@@ -194,7 +194,7 @@ func TestAWorkloadCreationRefusesWhatItCannotRead(t *testing.T) {
 		if c.key != "" {
 			r.Header.Set(httpapi.IdempotencyHeader, c.key)
 		}
-		if w := serve(workloadHandler(t, service), r); w.Code != http.StatusBadRequest || service.created != nil {
+		if w := serve(t, workloadHandler(t, service), r); w.Code != http.StatusBadRequest || service.created != nil {
 			t.Errorf("%s answered %d", name, w.Code)
 		}
 	}
@@ -218,7 +218,7 @@ func TestAWorkloadCreationMapsTheServicesErrors(t *testing.T) {
 	} {
 		r, _ := asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/workloads", strings.NewReader(workloadBody(mustUUID(t).String()))))
 		r.Header.Set(httpapi.IdempotencyHeader, "k")
-		if w := serve(workloadHandler(t, &stubWorkloadService{err: c.err}), r); w.Code != c.want {
+		if w := serveInjected(workloadHandler(t, &stubWorkloadService{err: c.err}), r); w.Code != c.want {
 			t.Errorf("%s answered %d, want %d", name, w.Code, c.want)
 		}
 	}
@@ -227,15 +227,15 @@ func TestAWorkloadCreationMapsTheServicesErrors(t *testing.T) {
 func TestAWorkloadIsReadByIdentifier(t *testing.T) {
 	principalID := mustUUID(t)
 	r, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, "/v1/workloads/"+principalID.String(), nil))
-	if w := serve(workloadHandler(t, &stubWorkloadService{}), r); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), principalID.String()) {
+	if w := serve(t, workloadHandler(t, &stubWorkloadService{}), r); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), principalID.String()) {
 		t.Errorf("status %d: %s", w.Code, w.Body)
 	}
 	r, _ = asPrincipal(t, httptest.NewRequest(http.MethodGet, "/v1/workloads/"+principalID.String(), nil))
-	if w := serve(workloadHandler(t, &stubWorkloadService{err: workload.ErrNotFound}), r); w.Code != http.StatusNotFound {
+	if w := serve(t, workloadHandler(t, &stubWorkloadService{err: workload.ErrNotFound}), r); w.Code != http.StatusNotFound {
 		t.Errorf("an unknown workload answered %d", w.Code)
 	}
 	r, _ = asPrincipal(t, httptest.NewRequest(http.MethodGet, "/v1/workloads/nope", nil))
-	if w := serve(workloadHandler(t, &stubWorkloadService{}), r); w.Code != http.StatusBadRequest {
+	if w := serve(t, workloadHandler(t, &stubWorkloadService{}), r); w.Code != http.StatusBadRequest {
 		t.Errorf("a malformed identifier answered %d", w.Code)
 	}
 }
@@ -249,7 +249,7 @@ func TestAWorkloadIsReassignedWithAReason(t *testing.T) {
 	service := &stubWorkloadService{}
 	r, caller := asPrincipal(t, httptest.NewRequest(http.MethodPost, path, strings.NewReader(body)))
 	r.Header.Set(httpapi.AdministrativeReasonHeader, "the previous owner moved to another team")
-	if w := serve(workloadHandler(t, service), r); w.Code != http.StatusOK {
+	if w := serve(t, workloadHandler(t, service), r); w.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", w.Code, w.Body)
 	}
 	if got := service.reassigned; got.PrincipalID != principalID || got.NewOwner != owner || got.ChangedBy != caller ||
@@ -271,7 +271,7 @@ func TestAWorkloadIsReassignedWithAReason(t *testing.T) {
 		if c.reason != "" {
 			r.Header.Set(httpapi.AdministrativeReasonHeader, c.reason)
 		}
-		if w := serve(workloadHandler(t, service), r); w.Code != c.want || service.reassigned != nil {
+		if w := serve(t, workloadHandler(t, service), r); w.Code != c.want || service.reassigned != nil {
 			t.Errorf("%s answered %d, want %d", name, w.Code, c.want)
 		}
 	}
@@ -286,7 +286,7 @@ func TestAWorkloadIsReassignedWithAReason(t *testing.T) {
 	} {
 		r, _ := asPrincipal(t, httptest.NewRequest(http.MethodPost, path, strings.NewReader(body)))
 		r.Header.Set(httpapi.AdministrativeReasonHeader, "r")
-		if w := serve(workloadHandler(t, &stubWorkloadService{err: c.err}), r); w.Code != c.want {
+		if w := serveInjected(workloadHandler(t, &stubWorkloadService{err: c.err}), r); w.Code != c.want {
 			t.Errorf("%s answered %d, want %d", name, w.Code, c.want)
 		}
 	}
@@ -301,7 +301,7 @@ func TestAWorkloadIsSuspendedRestoredAndRetiredWithAReason(t *testing.T) {
 		service := &stubWorkloadService{}
 		r, caller := asPrincipal(t, httptest.NewRequest(http.MethodPost, path, nil))
 		r.Header.Set(httpapi.AdministrativeReasonHeader, "the job is decommissioned")
-		if w := serve(workloadHandler(t, service), r); w.Code != http.StatusOK {
+		if w := serve(t, workloadHandler(t, service), r); w.Code != http.StatusOK {
 			t.Fatalf("%s: status %d: %s", action, w.Code, w.Body)
 		}
 		if got := service.lifecycle[action]; got.PrincipalID != principalID || got.ChangedBy != caller ||
@@ -311,7 +311,7 @@ func TestAWorkloadIsSuspendedRestoredAndRetiredWithAReason(t *testing.T) {
 
 		unreasoned := &stubWorkloadService{}
 		r, _ = asPrincipal(t, httptest.NewRequest(http.MethodPost, path, nil))
-		if w := serve(workloadHandler(t, unreasoned), r); w.Code != http.StatusBadRequest || unreasoned.lifecycle != nil {
+		if w := serve(t, workloadHandler(t, unreasoned), r); w.Code != http.StatusBadRequest || unreasoned.lifecycle != nil {
 			t.Errorf("%s without a reason answered %d, want 400", action, w.Code)
 		}
 	}
@@ -327,7 +327,7 @@ func TestAWorkloadIsSuspendedRestoredAndRetiredWithAReason(t *testing.T) {
 	} {
 		r, _ := asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/workloads/"+principalID.String()+":restore", nil))
 		r.Header.Set(httpapi.AdministrativeReasonHeader, "r")
-		if w := serve(workloadHandler(t, &stubWorkloadService{err: c.err}), r); w.Code != c.want {
+		if w := serve(t, workloadHandler(t, &stubWorkloadService{err: c.err}), r); w.Code != c.want {
 			t.Errorf("%s answered %d, want %d", name, w.Code, c.want)
 		}
 	}
@@ -344,7 +344,7 @@ func TestEveryWorkloadRouteRequiresAnAuthenticatedPrincipal(t *testing.T) {
 		httptest.NewRequest(http.MethodPost, "/v1/workloads/"+principalID+":suspend", nil),
 		httptest.NewRequest(http.MethodPost, "/v1/workloads/"+principalID+":retire", nil),
 	} {
-		if w := serve(handler, r); w.Code != http.StatusUnauthorized {
+		if w := serve(t, handler, r); w.Code != http.StatusUnauthorized {
 			t.Errorf("%s %s answered %d without a caller, want 401", r.Method, r.URL.Path, w.Code)
 		}
 	}
@@ -368,12 +368,12 @@ func TestAWorkloadIsReviewedByItsOwnerAlone(t *testing.T) {
 	path := "/v1/workloads/" + target.String() + ":review"
 
 	r := asOwner(httptest.NewRequest(http.MethodPost, path, nil), owner)
-	if w := serve(handler, r); w.Code != http.StatusBadRequest || service.reviewed != nil {
+	if w := serve(t, handler, r); w.Code != http.StatusBadRequest || service.reviewed != nil {
 		t.Errorf("a review without a statement answered %d", w.Code)
 	}
 	r = asOwner(httptest.NewRequest(http.MethodPost, path, nil), owner)
 	r.Header.Set(httpapi.AdministrativeReasonHeader, "still needed: it exports payroll nightly")
-	if w := serve(handler, r); w.Code != http.StatusOK {
+	if w := serve(t, handler, r); w.Code != http.StatusOK {
 		t.Fatalf("an owner's review answered %d: %s", w.Code, w.Body)
 	}
 	if got := service.reviewed; got == nil || got.PrincipalID != target || got.ReviewedBy != owner ||
@@ -384,14 +384,14 @@ func TestAWorkloadIsReviewedByItsOwnerAlone(t *testing.T) {
 	refusing := workloadHandler(t, &stubWorkloadService{err: workload.ErrNotOwner})
 	r = asOwner(httptest.NewRequest(http.MethodPost, path, nil), owner)
 	r.Header.Set(httpapi.AdministrativeReasonHeader, "r")
-	if w := serve(refusing, r); w.Code != http.StatusNotFound {
+	if w := serve(t, refusing, r); w.Code != http.StatusNotFound {
 		t.Errorf("a review by another answered %d, want 404", w.Code)
 	}
 
 	for _, action := range []string{"suspend", "rebuild", "reassign"} {
 		r := asOwner(httptest.NewRequest(http.MethodPost, "/v1/workloads/"+target.String()+":"+action, strings.NewReader(`{}`)), owner)
 		r.Header.Set(httpapi.AdministrativeReasonHeader, "r")
-		if w := serve(handler, r); w.Code != http.StatusForbidden {
+		if w := serve(t, handler, r); w.Code != http.StatusForbidden {
 			t.Errorf("an owner's :%s answered %d, want 403", action, w.Code)
 		}
 	}
@@ -404,27 +404,27 @@ func TestAProviderRebuildsSweepsAndListsWorkloads(t *testing.T) {
 	target := mustUUID(t)
 	r, caller := asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/workloads/"+target.String()+":rebuild", nil))
 	r.Header.Set(httpapi.AdministrativeReasonHeader, "its client was deleted in the console")
-	if w := serve(handler, r); w.Code != http.StatusOK {
+	if w := serve(t, handler, r); w.Code != http.StatusOK {
 		t.Fatalf("rebuild answered %d: %s", w.Code, w.Body)
 	}
 	if got := service.lifecycle["rebuild"]; got.PrincipalID != target || got.ChangedBy != caller {
 		t.Errorf("rebuild = %+v", got)
 	}
 	r, _ = asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/workloads:sweep", nil))
-	if w := serve(handler, r); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"orphaned":1`) {
+	if w := serve(t, handler, r); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"orphaned":1`) {
 		t.Errorf("sweep answered %d: %s", w.Code, w.Body)
 	}
 	for path, want := range map[string]string{"/v1/workloads:orphaned": `"stage":"escalated"`,
 		"/v1/workloads:unused": "idle-job", "/v1/workloads:reviews-overdue": "unreviewed-job"} {
 		r, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, path, nil))
-		if w := serve(handler, r); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), want) {
+		if w := serve(t, handler, r); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), want) {
 			t.Errorf("%s answered %d: %s", path, w.Code, w.Body)
 		}
 	}
 	failing := workloadHandler(t, &stubWorkloadService{err: workload.ErrClientPresent})
 	r, _ = asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/workloads/"+target.String()+":rebuild", nil))
 	r.Header.Set(httpapi.AdministrativeReasonHeader, "r")
-	if w := serve(failing, r); w.Code != http.StatusConflict {
+	if w := serve(t, failing, r); w.Code != http.StatusConflict {
 		t.Errorf("a rebuild while the client exists answered %d, want 409", w.Code)
 	}
 }
@@ -437,7 +437,7 @@ func TestAnOwnerReadsAndListsOnlyTheWorkloadsItOwns(t *testing.T) {
 	service := &stubWorkloadService{owners: map[id.UUID]id.UUID{owned: owner, other: mustUUID(t)}}
 	handler := workloadHandler(t, service)
 
-	w := serve(handler, asOwner(httptest.NewRequest(http.MethodGet, "/v1/workloads/"+owned.String(), nil), owner))
+	w := serve(t, handler, asOwner(httptest.NewRequest(http.MethodGet, "/v1/workloads/"+owned.String(), nil), owner))
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), owned.String()) {
 		t.Fatalf("an owner reading its workload answered %d: %s", w.Code, w.Body)
 	}
@@ -446,7 +446,7 @@ func TestAnOwnerReadsAndListsOnlyTheWorkloadsItOwns(t *testing.T) {
 	}
 	var bodies []string
 	for _, target := range []id.UUID{other, absent} {
-		w := serve(handler, asOwner(httptest.NewRequest(http.MethodGet, "/v1/workloads/"+target.String(), nil), owner))
+		w := serve(t, handler, asOwner(httptest.NewRequest(http.MethodGet, "/v1/workloads/"+target.String(), nil), owner))
 		if w.Code != http.StatusNotFound {
 			t.Errorf("an owner reading %s answered %d, want 404", target, w.Code)
 		}
@@ -456,34 +456,34 @@ func TestAnOwnerReadsAndListsOnlyTheWorkloadsItOwns(t *testing.T) {
 		t.Errorf("another's workload and none answered differently:\n%s\n%s", bodies[0], bodies[1])
 	}
 
-	w = serve(handler, asOwner(httptest.NewRequest(http.MethodGet, "/v1/workloads:mine", nil), owner))
+	w = serve(t, handler, asOwner(httptest.NewRequest(http.MethodGet, "/v1/workloads:mine", nil), owner))
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), owned.String()) || strings.Contains(w.Body.String(), other.String()) {
 		t.Errorf("mine answered %d: %s", w.Code, w.Body)
 	}
-	w = serve(handler, asOwner(httptest.NewRequest(http.MethodGet, "/v1/workloads:mine", nil), mustUUID(t)))
+	w = serve(t, handler, asOwner(httptest.NewRequest(http.MethodGet, "/v1/workloads:mine", nil), mustUUID(t)))
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"workloads":[]`) {
 		t.Errorf("mine for a caller owning none answered %d: %s", w.Code, w.Body)
 	}
 
 	service.readBy = nil
 	r, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, "/v1/workloads/"+other.String(), nil))
-	if w := serve(handler, r); w.Code != http.StatusOK || service.readBy != nil {
+	if w := serve(t, handler, r); w.Code != http.StatusOK || service.readBy != nil {
 		t.Errorf("a provider's read answered %d, through the owner's read: %v", w.Code, service.readBy != nil)
 	}
 	// A provider whose token does not show aal2 steps up before reading a workload as a provider.
 	r = httptest.NewRequest(http.MethodGet, "/v1/workloads/"+other.String(), nil)
 	r = r.WithContext(httpapi.WithProvider(httpapi.WithCallerScope(r.Context(), "principal:"+owner.String())))
-	if w := serve(handler, r); w.Code != http.StatusUnauthorized || service.readBy != nil {
+	if w := serve(t, handler, r); w.Code != http.StatusUnauthorized || service.readBy != nil {
 		t.Errorf("a provider at aal1 answered %d, want the step-up 401", w.Code)
 	}
 
 	for _, path := range []string{"/v1/workloads/" + owned.String(), "/v1/workloads:mine"} {
-		if w := serve(handler, httptest.NewRequest(http.MethodGet, path, nil)); w.Code != http.StatusUnauthorized {
+		if w := serve(t, handler, httptest.NewRequest(http.MethodGet, path, nil)); w.Code != http.StatusUnauthorized {
 			t.Errorf("%s without a caller answered %d, want 401", path, w.Code)
 		}
 	}
 	failing := workloadHandler(t, &stubWorkloadService{err: errors.New("database down")})
-	if w := serve(failing, asOwner(httptest.NewRequest(http.MethodGet, "/v1/workloads:mine", nil), owner)); w.Code != http.StatusInternalServerError {
+	if w := serve(t, failing, asOwner(httptest.NewRequest(http.MethodGet, "/v1/workloads:mine", nil), owner)); w.Code != http.StatusInternalServerError {
 		t.Errorf("a failed listing answered %d, want 500", w.Code)
 	}
 }
@@ -507,7 +507,7 @@ func TestEveryOtherWorkloadRouteRefusesAnOwner(t *testing.T) {
 	} {
 		r := asOwner(httptest.NewRequest(c.method, c.path, strings.NewReader(`{}`)), owner)
 		r.Header.Set(httpapi.AdministrativeReasonHeader, "r")
-		if w := serve(handler, r); w.Code != http.StatusForbidden {
+		if w := serve(t, handler, r); w.Code != http.StatusForbidden {
 			t.Errorf("an owner's %s %s answered %d, want 403", c.method, c.path, w.Code)
 		}
 	}

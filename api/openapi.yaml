@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Identity Control API
-  version: 1.2.0
+  version: 1.3.0
   summary: The control plane of the Scnehaux Identity Runtime (SAD-001).
   description: |
     The HTTP contract of identity-control, published as a versioned artifact under ADR-GLB-010
@@ -598,6 +598,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
         "503":
           $ref: "#/components/responses/Unavailable"
   "/v1/principals/{principal_id}/sessions:terminate-all":
@@ -658,6 +660,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
         "503":
           $ref: "#/components/responses/Unavailable"
   "/v1/principals/{principal_id}/authenticators/{security_ref}:revoke":
@@ -719,6 +723,8 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
         "503":
           $ref: "#/components/responses/Unavailable"
   "/v1/principals/{principal_id}/findings":

@@ -90,7 +90,7 @@ func (s *stubInvestigator) SecurityNotifications(_ context.Context, actor invest
 	if err := s.seen(actor, subject); err != nil {
 		return nil, err
 	}
-	return []investigation.SecurityNotification{{Event: "authenticator_bound", Recipients: 1, State: "submitted"}}, nil
+	return []investigation.SecurityNotification{{Event: "authenticator_bound", Details: map[string]string{}, Recipients: 1, State: "submitted"}}, nil
 }
 
 func investigationHandler(t *testing.T, stub *stubInvestigator) http.Handler {
@@ -114,17 +114,19 @@ func investigationHandler(t *testing.T, stub *stubInvestigator) http.Handler {
 func TestAProviderReadsAPrincipalsSecurityState(t *testing.T) {
 	subject := mustUUID(t)
 	for path, key := range map[string]string{
-		"":                  "principal_id",
-		"/sessions":         "sessions",
-		"/authenticators":   "authenticators",
-		"/federation-links": "federation_links",
-		"/findings":         "findings",
-		"/events":           "events",
+		"":                        "principal_id",
+		"/sessions":               "sessions",
+		"/authenticators":         "authenticators",
+		"/federation-links":       "federation_links",
+		"/findings":               "findings",
+		"/events":                 "events",
+		"/notification-addresses": "notification_addresses",
+		"/security-notifications": "security_notifications",
 	} {
 		t.Run("principal"+path, func(t *testing.T) {
 			stub := &stubInvestigator{}
 			r, caller := asPrincipal(t, httptest.NewRequest(http.MethodGet, "/v1/principals/"+subject.String()+path, nil))
-			w := serve(investigationHandler(t, stub), r)
+			w := serve(t, investigationHandler(t, stub), r)
 			if w.Code != http.StatusOK {
 				t.Fatalf("status %d: %s", w.Code, w.Body)
 			}
@@ -148,7 +150,7 @@ func TestAProviderReadsAPrincipalsSecurityState(t *testing.T) {
 func TestASearchPassesTheQueryTrimmed(t *testing.T) {
 	stub := &stubInvestigator{}
 	r, caller := asPrincipal(t, httptest.NewRequest(http.MethodGet, "/v1/principals:search?q=%20ali%20", nil))
-	w := serve(investigationHandler(t, stub), r)
+	w := serve(t, investigationHandler(t, stub), r)
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"principals"`) {
 		t.Fatalf("status %d: %s", w.Code, w.Body)
 	}
@@ -170,7 +172,7 @@ func TestInvestigationErrorsMapToTheirStatus(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			r, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, "/v1/principals/"+mustUUID(t).String()+"/sessions", nil))
-			if w := serve(investigationHandler(t, &stubInvestigator{err: c.err}), r); w.Code != c.status {
+			if w := serve(t, investigationHandler(t, &stubInvestigator{err: c.err}), r); w.Code != c.status {
 				t.Errorf("status %d; want %d: %s", w.Code, c.status, w.Body)
 			}
 		})
@@ -180,7 +182,7 @@ func TestInvestigationErrorsMapToTheirStatus(t *testing.T) {
 func TestAMalformedPrincipalIdentifierIsRefusedBeforeAnyRead(t *testing.T) {
 	stub := &stubInvestigator{}
 	r, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, "/v1/principals/nope/sessions", nil))
-	if w := serve(investigationHandler(t, stub), r); w.Code != http.StatusBadRequest {
+	if w := serve(t, investigationHandler(t, stub), r); w.Code != http.StatusBadRequest {
 		t.Errorf("status %d; want 400", w.Code)
 	}
 	if !stub.actor.Principal.IsNil() {
@@ -198,8 +200,8 @@ func TestOnlyAProviderReadsAnotherPrincipal(t *testing.T) {
 		"/v1/principals/" + subject + "/events"} {
 		stub := &stubInvestigator{}
 		handler := investigationHandler(t, stub)
-		anonymous := serve(handler, httptest.NewRequest(http.MethodGet, path, nil))
-		owner := serve(handler, asOwner(httptest.NewRequest(http.MethodGet, path, nil), mustUUID(t)))
+		anonymous := serve(t, handler, httptest.NewRequest(http.MethodGet, path, nil))
+		owner := serve(t, handler, asOwner(httptest.NewRequest(http.MethodGet, path, nil), mustUUID(t)))
 		if anonymous.Code != http.StatusUnauthorized || owner.Code != http.StatusForbidden {
 			t.Errorf("%s: anonymous %d, owner %d; want 401, 403", path, anonymous.Code, owner.Code)
 		}

@@ -99,7 +99,7 @@ func TestEachSecurityCommandReachesTheServiceAsItsType(t *testing.T) {
 	} {
 		stub := &stubCommander{}
 		r, caller := command(t, path, time.Minute)
-		w := serve(securityHandler(t, stub), r)
+		w := serve(t, securityHandler(t, stub), r)
 		if w.Code != http.StatusOK || stub.submitted == nil {
 			t.Fatalf("%s: status %d: %s", path, w.Code, w.Body)
 		}
@@ -118,7 +118,7 @@ func TestEachSecurityCommandReachesTheServiceAsItsType(t *testing.T) {
 func TestARelinkIsStillThePrincipalPaths(t *testing.T) {
 	stub := &stubCommander{}
 	r, _ := command(t, "/v1/principals/"+mustUUID(t).String()+":relink", time.Minute)
-	serve(securityHandler(t, stub), r)
+	serve(t, securityHandler(t, stub), r)
 	if stub.submitted != nil {
 		t.Error("a relink reached the security commands")
 	}
@@ -155,7 +155,7 @@ func TestASecurityCommandIsRefusedBeforeTheService(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			stub := &stubCommander{}
 			r, caller := command(t, path, time.Minute)
-			w := serve(securityHandler(t, stub), c.edit(r, caller))
+			w := serve(t, securityHandler(t, stub), c.edit(r, caller))
 			if w.Code != c.status || stub.submitted != nil {
 				t.Errorf("status %d, submitted %t; want %d and nothing submitted: %s", w.Code, stub.submitted != nil, c.status, w.Body)
 			}
@@ -172,7 +172,7 @@ func TestAProviderRouteNeedsTwoFactors(t *testing.T) {
 		"": http.StatusUnauthorized, "aal2": http.StatusOK, "phr": http.StatusOK} {
 		r, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, path, nil))
 		r = r.WithContext(httpapi.WithAssurance(r.Context(), acr, time.Now()))
-		w := serve(securityHandler(t, &stubCommander{}), r)
+		w := serve(t, securityHandler(t, &stubCommander{}), r)
 		if w.Code != want {
 			t.Errorf("acr %q: %d, want %d", acr, w.Code, want)
 		}
@@ -197,7 +197,7 @@ func TestReportModeServesATokenBelowTheLevel(t *testing.T) {
 	identity := func(next http.Handler) http.Handler { return next }
 	r, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, "/v1/security-operations/"+mustUUID(t).String(), nil))
 	r = r.WithContext(httpapi.WithAssurance(r.Context(), "1", time.Now()))
-	if w := serve(built.Mount(identity, identity), r); w.Code != http.StatusOK {
+	if w := serve(t, built.Mount(identity, identity), r); w.Code != http.StatusOK {
 		t.Errorf("report mode: %d", w.Code)
 	}
 }
@@ -205,7 +205,7 @@ func TestReportModeServesATokenBelowTheLevel(t *testing.T) {
 func TestAStaleAuthenticationIsAskedToStepUp(t *testing.T) {
 	stub := &stubCommander{}
 	r, _ := command(t, "/v1/principals/"+mustUUID(t).String()+":suspend", 6*time.Minute)
-	w := serve(securityHandler(t, stub), r)
+	w := serve(t, securityHandler(t, stub), r)
 	challenge := w.Header().Get("WWW-Authenticate")
 	if w.Code != http.StatusUnauthorized || !strings.Contains(challenge, `error="insufficient_user_authentication"`) ||
 		!strings.Contains(challenge, "max_age=300") || !strings.Contains(challenge, `acr_values="aal2"`) {
@@ -219,7 +219,7 @@ func TestAStaleAuthenticationIsAskedToStepUp(t *testing.T) {
 func TestACommandStillRunningAnswers202WithItsOperation(t *testing.T) {
 	stub := &stubCommander{state: securitystate.StateRetrying}
 	r, _ := command(t, "/v1/principals/"+mustUUID(t).String()+":suspend", time.Minute)
-	w := serve(securityHandler(t, stub), r)
+	w := serve(t, securityHandler(t, stub), r)
 	if w.Code != http.StatusAccepted || !strings.HasPrefix(w.Header().Get("Location"), "/v1/security-operations/") {
 		t.Errorf("status %d, Location %q", w.Code, w.Header().Get("Location"))
 	}
@@ -242,7 +242,7 @@ func TestSecurityErrorsMapToTheirStatus(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			r, _ := command(t, "/v1/principals/"+mustUUID(t).String()+":suspend", time.Minute)
-			if w := serve(securityHandler(t, &stubCommander{err: c.err}), r); w.Code != c.status {
+			if w := serve(t, securityHandler(t, &stubCommander{err: c.err}), r); w.Code != c.status {
 				t.Errorf("status %d; want %d: %s", w.Code, c.status, w.Body)
 			}
 		})
@@ -253,10 +253,10 @@ func TestAnOperationIsReadByAProvider(t *testing.T) {
 	handler := securityHandler(t, &stubCommander{})
 	path := "/v1/security-operations/" + mustUUID(t).String()
 	r, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, path, nil))
-	if w := serve(handler, r); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"state":"applied"`) {
+	if w := serve(t, handler, r); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"state":"applied"`) {
 		t.Errorf("status %d: %s", w.Code, w.Body)
 	}
-	if w := serve(handler, asOwner(httptest.NewRequest(http.MethodGet, path, nil), mustUUID(t))); w.Code != http.StatusForbidden {
+	if w := serve(t, handler, asOwner(httptest.NewRequest(http.MethodGet, path, nil), mustUUID(t))); w.Code != http.StatusForbidden {
 		t.Errorf("an owner read an operation: %d", w.Code)
 	}
 }
@@ -268,8 +268,8 @@ func TestOnlyAProviderCommands(t *testing.T) {
 		"/v1/principals/" + subject + "/sessions:terminate-all", "/v1/principals/" + subject + "/authenticators/k1.x:revoke"} {
 		stub := &stubCommander{}
 		handler := securityHandler(t, stub)
-		anonymous := serve(handler, httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"expected_version":1}`)))
-		owner := serve(handler, asOwner(httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"expected_version":1}`)), mustUUID(t)))
+		anonymous := serve(t, handler, httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"expected_version":1}`)))
+		owner := serve(t, handler, asOwner(httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"expected_version":1}`)), mustUUID(t)))
 		if anonymous.Code != http.StatusUnauthorized || owner.Code != http.StatusForbidden || stub.submitted != nil {
 			t.Errorf("%s: anonymous %d, owner %d, submitted %t", path, anonymous.Code, owner.Code, stub.submitted != nil)
 		}
@@ -289,14 +289,14 @@ func TestAProviderListsAndRedrivesParkedOperations(t *testing.T) {
 	stub := &stubCommander{}
 	handler := securityHandler(t, stub)
 	r, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, "/v1/security-operations:unresolved", nil))
-	if w := serve(handler, r); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"last_error_class":"unavailable"`) {
+	if w := serve(t, handler, r); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"last_error_class":"unavailable"`) {
 		t.Errorf("listing: %d %s", w.Code, w.Body)
 	}
 
 	operationID := mustUUID(t)
 	r, caller := asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/security-operations/"+operationID.String()+":redrive", nil))
 	r.Header.Set(httpapi.AdministrativeReasonHeader, "kernel back after the outage")
-	if w := serve(handler, r); w.Code != http.StatusOK {
+	if w := serve(t, handler, r); w.Code != http.StatusOK {
 		t.Fatalf("re-drive: %d %s", w.Code, w.Body)
 	}
 	if stub.redriven == nil || stub.redriven.operationID != operationID || stub.redriven.actor.Principal != caller ||
@@ -308,22 +308,22 @@ func TestAProviderListsAndRedrivesParkedOperations(t *testing.T) {
 func TestARedriveIsRefusedWhatItMust(t *testing.T) {
 	path := "/v1/security-operations/" + mustUUID(t).String() + ":redrive"
 	r, _ := asPrincipal(t, httptest.NewRequest(http.MethodPost, path, nil))
-	if w := serve(securityHandler(t, &stubCommander{}), r); w.Code != http.StatusBadRequest {
+	if w := serve(t, securityHandler(t, &stubCommander{}), r); w.Code != http.StatusBadRequest {
 		t.Errorf("no reason: %d", w.Code)
 	}
 	r, _ = asPrincipal(t, httptest.NewRequest(http.MethodPost, path, nil))
 	r.Header.Set(httpapi.AdministrativeReasonHeader, "retry")
 	r = r.WithContext(httpapi.WithAssurance(r.Context(), httpapi.AcrAAL2, time.Now().Add(-time.Hour)))
-	if w := serve(securityHandler(t, &stubCommander{}), r); w.Code != http.StatusUnauthorized {
+	if w := serve(t, securityHandler(t, &stubCommander{}), r); w.Code != http.StatusUnauthorized {
 		t.Errorf("a stale authentication: %d", w.Code)
 	}
 	r, _ = asPrincipal(t, httptest.NewRequest(http.MethodPost, path, nil))
 	r.Header.Set(httpapi.AdministrativeReasonHeader, "retry")
-	if w := serve(securityHandler(t, &stubCommander{err: securitystate.ErrState}), r); w.Code != http.StatusConflict {
+	if w := serve(t, securityHandler(t, &stubCommander{err: securitystate.ErrState}), r); w.Code != http.StatusConflict {
 		t.Errorf("not parked: %d", w.Code)
 	}
 	r = asOwner(httptest.NewRequest(http.MethodPost, path, nil), mustUUID(t))
-	if w := serve(securityHandler(t, &stubCommander{}), r); w.Code != http.StatusForbidden {
+	if w := serve(t, securityHandler(t, &stubCommander{}), r); w.Code != http.StatusForbidden {
 		t.Errorf("an owner: %d", w.Code)
 	}
 }

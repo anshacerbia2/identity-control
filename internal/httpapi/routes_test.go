@@ -57,8 +57,7 @@ func routes(t *testing.T, prober httpapi.Prober) http.Handler {
 func TestLivenessTouchesNoDependency(t *testing.T) {
 	prober := &stubProber{err: errors.New("database is down")}
 
-	w := httptest.NewRecorder()
-	routes(t, prober).ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	w := serveChecked(t, routes(t, prober), httptest.NewRequest(http.MethodGet, "/healthz", nil))
 
 	if w.Code != http.StatusOK {
 		t.Errorf("status = %d, want 200 even while the database is unreachable", w.Code)
@@ -74,8 +73,7 @@ func TestLivenessTouchesNoDependency(t *testing.T) {
 func TestReadinessFailsWhenTheDatabaseIsUnreachable(t *testing.T) {
 	prober := &stubProber{err: errors.New("database is down")}
 
-	w := httptest.NewRecorder()
-	routes(t, prober).ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	w := serveChecked(t, routes(t, prober), httptest.NewRequest(http.MethodGet, "/readyz", nil))
 
 	if w.Code != http.StatusServiceUnavailable {
 		t.Errorf("status = %d, want 503", w.Code)
@@ -88,8 +86,7 @@ func TestReadinessFailsWhenTheDatabaseIsUnreachable(t *testing.T) {
 func TestReadinessSucceedsWhenTheDatabaseIsReachable(t *testing.T) {
 	prober := &stubProber{}
 
-	w := httptest.NewRecorder()
-	routes(t, prober).ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	w := serveChecked(t, routes(t, prober), httptest.NewRequest(http.MethodGet, "/readyz", nil))
 
 	if w.Code != http.StatusOK {
 		t.Errorf("status = %d, want 200: %s", w.Code, w.Body.String())
@@ -101,12 +98,11 @@ func TestReadinessSucceedsWhenTheDatabaseIsReachable(t *testing.T) {
 // correct posture under EAD-006 §8, and a permissive development mode is deliberately not
 // offered: a permissive path that exists in one environment reaches production.
 func TestMutationFailsClosedWithoutAuthentication(t *testing.T) {
-	w := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/v1/principals",
 		strings.NewReader(`{"username":"operator","subject_type":"human"}`))
 	request.Header.Set(httpapi.IdempotencyHeader, "key-0001")
 
-	routes(t, &stubProber{}).ServeHTTP(w, request)
+	w := serveChecked(t, routes(t, &stubProber{}), request)
 
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("status = %d, want 401", w.Code)
@@ -116,14 +112,13 @@ func TestMutationFailsClosedWithoutAuthentication(t *testing.T) {
 // TestMutationSucceedsOnceACallerIsAuthenticated proves the route is wired rather than merely
 // present, by supplying the context value an authentication middleware will set.
 func TestMutationSucceedsOnceACallerIsAuthenticated(t *testing.T) {
-	w := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/v1/principals",
 		strings.NewReader(`{"username":"operator","subject_type":"human"}`))
 	request.Header.Set(httpapi.IdempotencyHeader, "key-0001")
 	request = request.WithContext(httpapi.WithAssurance(
 		httpapi.WithProvider(httpapi.WithCallerScope(request.Context(), "svc:admin-api")), httpapi.AcrAAL2, time.Now()))
 
-	routes(t, &stubProber{}).ServeHTTP(w, request)
+	w := serveChecked(t, routes(t, &stubProber{}), request)
 
 	if w.Code != http.StatusCreated {
 		t.Errorf("status = %d, want 201: %s", w.Code, w.Body.String())

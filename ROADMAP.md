@@ -884,9 +884,10 @@ from; an open one says what it waits on.
     (STD-IAM-002 1.9.0 §3.6, ADR-IAM-003 §5.11, TDD-005 2.13.0). Recorded 2026-10-20. Today the smoke
     lists the bootstrap operator's consents, and the list is empty. Waits on identity-kernel marking
     the scopes an `external` client releases "display on consent screen".
-19. ⏳ **The schemas against the handlers** (ADR-GLB-010 §5.1). Recorded 2026-10-20: a contract test
-    that sends each documented body to its handler (§API specification). Meanwhile identity-experience's
-    contract test found one gap, fixed in item 20.
+19. ✅ **The schemas against the handlers** (ADR-GLB-010 §5.1). Done 2026-10-22: a contract test holds
+    every exchange of the route tests to `api/openapi.yaml` (§API specification, TDD-005 2.15.0).
+    Found one gap, fixed in `api/openapi.yaml` 1.3.0: `409` on the three investigation reads of a
+    Principal with no kernel user. identity-experience's contract test found another, fixed in item 20.
 20. ✅ **`api/openapi.yaml` 1.1.0** (ADR-GLB-010 §5.1, ADR-GLB-006). Done 2026-10-20.
     - `PublicJWK` documents `use` (`sig`) and `alg` (`PS256`), which the handler always accepted, and
       that no other member is accepted. Found by identity-experience #60's contract test, which fails
@@ -1042,10 +1043,45 @@ SHALL publish its specification (OpenAPI for HTTP) as a versioned artifact".
   no operation names, or an operation names a route routes.go does not register or a path that route
   does not serve. The verify job's step "the API specification lints" runs Redocly CLI 2.55.0, pinned
   by digest, with every rule of its recommended set an error (`api/redocly.yaml`).
-- **Not checked yet: the schemas against the handlers.** The request and response schemas are read
-  from the handlers' types by hand. A contract test that sends each documented body to the handler is
-  item 19 (⏳, recorded 2026-10-20). identity-experience's contract test found `PublicJWK` missing
-  `use` and `alg`, fixed in 1.1.0 (item 20).
+- **Checked in CI: the schemas against the handlers (item 19, 2026-10-22).**
+  `internal/httpapi/contract_test.go` sends every exchange of the route tests to
+  `github.com/pb33f/libopenapi-validator` v0.16.1 (MIT; libopenapi v0.41.3), which validates an
+  `http.Response` and an `http.Request` against an OpenAPI 3.1 document. `serve` and the other route
+  helpers call it, so a route test is also a contract test.
+  - *What fails.* A response whose body does not satisfy the schema its status names; a status the
+    operation does not declare; a request a handler accepted that does not satisfy the operation's
+    parameters or body. An undeclared `500` is checked as a Problem and passes, because the
+    specification does not list unexpected failures.
+  - *Coverage.* After a whole run of the package (not with `-run` or `-short`), every operation has had
+    a success and a problem checked. A route with no test fails the run, naming it.
+  - *Stubs.* A stub returns what its service returns, a complete record and an empty list, never a zero
+    value (`contract_fixtures_test.go`). A test that makes a stub fail with each error a handler maps
+    uses `serveInjected`, which is not checked: a list route cannot answer "not the proposer".
+  - *Why this approach.* OpenAPI 3.1.0 §4.4: "Models are defined using the Schema Object, which is a
+    superset of JSON Schema Specification Draft 2020-12." JSON Schema 2020-12 core §7.6: "JSON Schema
+    can be used to assert constraints on a JSON document, which either passes or fails the assertions."
+    The validator is that assertion applied to a real response. Its README: "http.Response - Validates
+    the response against the OpenAPI specification" and "Document validation is explicitly covered for
+    OpenAPI 3.0, 3.1, and 3.2." OpenAPI 3.1.0 §Responses Object: "The documentation is not necessarily
+    expected to cover all possible HTTP response codes because they may not be known in advance.
+    However, documentation is expected to cover a successful operation response and any known errors."
+    That is why an undeclared `500` is read as a Problem and any other undeclared status fails. RFC 9110
+    §15.6.1: "The 500 (Internal Server Error) status code indicates that the server encountered an
+    unexpected condition that prevented it from fulfilling the request." A recorder, unlike a server,
+    sets no `Content-Type`; `net/http`'s `ResponseWriter.Write`: "If the Header does not contain a
+    Content-Type line, Write adds a Content-Type set to the result of passing the initial 512 bytes of
+    written data to DetectContentType", so the test does the same.
+  - *The library.* Chosen over kin-openapi because it validates OpenAPI 3.1 documents natively, with
+    the JSON Schema 2020-12 vocabulary. Both are maintained (releases of 2026-10-11 and 2026-10-15).
+    `govulncheck -test ./...` reports nothing in a required module. It is a test-only dependency, so
+    the deployable's binary does not link it; the radar lists technologies, not Go libraries
+    (`01-enterprise/tech-radar.yaml`), and STD-GLB-009 restricts none. The route-against-spec test
+    still reads lines, so the document's own reader stays free of a YAML library; this one is for the
+    schemas.
+  - *The library's path matcher.* Its radix-tree router cannot tell `{principal_id}:suspend` from
+    `{principal_id}:restore`. The test resolves the path with the library's regular-expression matcher
+    and passes the path item to the validator.
+  - *Same code in organization-control* (its item 62).
 - **The BFFs' clients are identity-experience's.** ADR-GLB-010 §5.1 has a hand-written client
   contract-tested in CI against this document; that test lives in identity-experience.
 

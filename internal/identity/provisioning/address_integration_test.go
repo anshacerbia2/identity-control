@@ -30,6 +30,31 @@ func TestTheCreationEmailIsTheFirstNotificationAddress(t *testing.T) {
 	}
 	t.Cleanup(pool.Close)
 
+	// RecoverPending reads every realm's pending mappings. Rows left pending here would be recovered by
+	// a later run of this package against the same database once older than the recovery threshold,
+	// into the other tests' kernel user identifiers. This test's realm is emptied before and after it.
+	empty := func() error {
+		return pool.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+			if _, err := tx.Exec(ctx, `SET LOCAL session_replication_role = replica`); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `DELETE FROM identity.notification_address WHERE principal_id IN
+			    (SELECT principal_id FROM identity.principal_mapping WHERE realm = 'address-test')`); err != nil {
+				return err
+			}
+			_, err := tx.Exec(ctx, `DELETE FROM identity.principal_mapping WHERE realm = 'address-test'`)
+			return err
+		})
+	}
+	if err := empty(); err != nil {
+		t.Fatalf("empty the address-test realm: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := empty(); err != nil {
+			t.Errorf("empty the address-test realm: %v", err)
+		}
+	})
+
 	insert := func(m Mapping) {
 		t.Helper()
 		if err := pool.InTx(ctx, func(ctx context.Context, tx db.Tx) error {

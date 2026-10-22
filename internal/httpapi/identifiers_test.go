@@ -33,9 +33,7 @@ func askMatch(t *testing.T, handler http.Handler, authorization, path, body stri
 	if authorization != "" {
 		request.Header.Set("Authorization", authorization)
 	}
-	recorder := httptest.NewRecorder()
-	root.ServeHTTP(recorder, request)
-	return recorder
+	return serveChecked(t, root, request)
 }
 
 // The match answers a boolean and nothing else, to Organization Control's workload alone
@@ -72,9 +70,11 @@ func TestTheIdentifierMatchAnswersABooleanToOrganizationControlAlone(t *testing.
 		"an unknown field":         {path, `{"address":"p@example.test","principal_id":"x"}`},
 		"not JSON":                 {path, `address=p@example.test`},
 	} {
-		m := &stubMatcher{}
+		// The service refuses an empty address as it refuses any other (securitynotify.normalized), which
+		// the stub reproduces so the exchange is one the real route could have.
+		m := &stubMatcher{err: securitynotify.ErrInvalidAddress}
 		w := askMatch(t, identifierMatch(deliveryVerifier{}, m, nil), "Bearer token", c.path, c.body)
-		if name != "no address" && w.Code != http.StatusBadRequest {
+		if w.Code != http.StatusBadRequest {
 			t.Errorf("%s answered %d; want 400", name, w.Code)
 		}
 	}

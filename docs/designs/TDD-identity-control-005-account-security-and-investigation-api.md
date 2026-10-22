@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-005
   title: Account Security and Investigation API Mediation
   owner: Core Platform Team
-  version: 2.14.0
+  version: 2.15.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-14
-  last_reviewed: 2026-10-21
+  last_reviewed: 2026-10-22
   parent_sad: SAD-001
 ---
 
@@ -1037,6 +1037,18 @@ approved secret manager and have independent rotation schedules.
 - The figure goes to the job summary against two bounds. `IDENTITY_SECURITY_COMMAND_BUDGET` (2 s) is
   the inline wait: above it is a warning. `SAD-001 §7.7`'s 60-second propagation budget for the
   Session class is the declared bound, and above it the job fails [R18].
+
+### The Schemas Against the Handlers (2.15.0)
+
+`internal/httpapi/contract_test.go` holds every exchange the route tests make to `api/openapi.yaml`
+(`ROADMAP.md` §API specification states the approach and its sources).
+
+- A response must satisfy the schema its status names, and a request a handler accepted must satisfy
+  its operation's parameters and body.
+- Every operation must have had a success and a problem checked in a whole run of the package.
+- Investigation reads of a Principal with no kernel user answer `409` `state-transition-refused`
+  (`investigation.ErrUnlinked`). `api/openapi.yaml` 1.3.0 documents it on `/sessions`,
+  `/authenticators` and `/federation-links`, where it was undocumented.
 
 ### Kernel Compatibility
 

@@ -30,21 +30,19 @@ func TestTheTenantReportIsServed(t *testing.T) {
 		Rows: []tenantcontext.ReportedRow{{MembershipID: membership, MembershipVersion: 7}}}
 	r := httptest.NewRequest(http.MethodGet, "/v1/projections/tenant-context/report", nil)
 	r = r.WithContext(WithCallerScope(r.Context(), "principal:019235f1-0000-7000-8000-000000000001"))
-	w := httptest.NewRecorder()
-	tenantReport(reporter{report: want})(w, r)
+	w := serveChecked(t, tenantReport(reporter{report: want}), r)
 	var got tenantcontext.Report
 	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || w.Code != http.StatusOK || got.Mark != 41 ||
 		len(got.Rows) != 1 || got.ConsumerID != "identity-control" {
 		t.Errorf("%d %s", w.Code, w.Body.String())
 	}
 
-	w = httptest.NewRecorder()
-	tenantReport(reporter{err: errors.New("down")})(w, r)
+	w = serveChecked(t, tenantReport(reporter{err: errors.New("down")}), r)
 	if w.Code != http.StatusInternalServerError {
 		t.Errorf("a failed read answered %d", w.Code)
 	}
-	w = httptest.NewRecorder()
-	tenantReport(reporter{report: want})(w, httptest.NewRequest(http.MethodGet, "/", nil))
+	w = serveChecked(t, tenantReport(reporter{report: want}),
+		httptest.NewRequest(http.MethodGet, "/v1/projections/tenant-context/report", nil))
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("no caller answered %d", w.Code)
 	}

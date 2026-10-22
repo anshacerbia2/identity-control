@@ -48,7 +48,7 @@ func consentHandler(t *testing.T, stub *stubSelf, consents *stubConsents) http.H
 func TestAPersonListsAndWithdrawsTheirConsents(t *testing.T) {
 	consents := &stubConsents{}
 	r, person := asPerson(t, httptest.NewRequest(http.MethodGet, "/v1/me/consents", nil), time.Hour)
-	w := serve(consentHandler(t, &stubSelf{}, consents), r)
+	w := serve(t, consentHandler(t, &stubSelf{}, consents), r)
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"access_token_lifetime_seconds":900`) ||
 		consents.caller != person {
 		t.Fatalf("list: %d %s", w.Code, w.Body)
@@ -56,19 +56,19 @@ func TestAPersonListsAndWithdrawsTheirConsents(t *testing.T) {
 
 	stub := &stubSelf{}
 	r, person = asPerson(t, httptest.NewRequest(http.MethodPost, "/v1/me/consents/k1.c:withdraw", nil), time.Hour)
-	w = serve(consentHandler(t, stub, consents), r)
+	w = serve(t, consentHandler(t, stub, consents), r)
 	c := stub.submitted
 	if w.Code != http.StatusOK || c == nil || !c.Self || c.Type != securitystate.TypeConsentWithdraw || c.Subject != person ||
 		c.Ref != "k1.c" || c.Reason != "" {
 		t.Fatalf("withdraw: %d %s, submitted %+v", w.Code, w.Body, c)
 	}
 	r, _ = asPerson(t, httptest.NewRequest(http.MethodPost, "/v1/me/consents/k1.c:grant", nil), time.Hour)
-	if w := serve(consentHandler(t, &stubSelf{}, consents), r); w.Code != http.StatusNotFound {
+	if w := serve(t, consentHandler(t, &stubSelf{}, consents), r); w.Code != http.StatusNotFound {
 		t.Errorf("an unknown consent action answered %d", w.Code)
 	}
 	// Without a consent service the routes are not mounted.
 	r, _ = asPerson(t, httptest.NewRequest(http.MethodGet, "/v1/me/consents", nil), time.Hour)
-	if w := serve(consentHandler(t, &stubSelf{}, nil), r); w.Code == http.StatusOK {
+	if w := serveInjected(consentHandler(t, &stubSelf{}, nil), r); w.Code == http.StatusOK {
 		t.Errorf("the consent list was served with no consent service")
 	}
 }

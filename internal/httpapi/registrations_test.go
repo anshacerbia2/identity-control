@@ -34,7 +34,15 @@ type stubReconciler struct {
 }
 
 func (s *stubReconciler) Status(context.Context) (reconcile.Status, error) {
-	return s.status, s.statusErr
+	// The reconciler's own Status starts both lists empty, never nil.
+	status := s.status
+	if status.LastRunFindings == nil {
+		status.LastRunFindings = []reconcile.Finding{}
+	}
+	if status.Findings == nil {
+		status.Findings = []reconcile.Finding{}
+	}
+	return status, s.statusErr
 }
 
 func (s *stubReconciler) FindingsFor(_ context.Context, registration id.UUID) ([]reconcile.Finding, error) {
@@ -98,15 +106,19 @@ func asOwner(r *http.Request, principal id.UUID) *http.Request {
 	return r.WithContext(httpapi.WithCallerScope(r.Context(), "principal:"+principal.String()))
 }
 
-func serve(handler http.Handler, r *http.Request) *httptest.ResponseRecorder {
+func serve(t testing.TB, handler http.Handler, r *http.Request) *httptest.ResponseRecorder {
+	t.Helper()
+	withKey(r)
+	return serveChecked(t, handler, r)
+}
+
+// withKey gives a command the Idempotency-Key it needs.
+func withKey(r *http.Request) {
 	if r.Method == http.MethodPost && r.Header.Values(httpapi.IdempotencyHeader) == nil && replayedInTest(r.URL.Path) {
 		// Every command carries a key (STD-GLB-001 1.4.0). The tests of a route this package replays
 		// are about the route, so they get one; a missing key is commands_test.go's subject.
 		r.Header.Set(httpapi.IdempotencyHeader, "test-"+r.URL.Path)
 	}
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, r)
-	return w
 }
 
 // replayedInTest reports whether a path is one of replayedKey's routes, whose key the handler tests
@@ -134,7 +146,7 @@ func TestEveryDriftRouteRequiresAnAuthenticatedPrincipal(t *testing.T) {
 		httptest.NewRequest(http.MethodPost, "/v1/registrations/"+mustUUID(t).String()+"/drift-exceptions", strings.NewReader(`{}`)),
 		httptest.NewRequest(http.MethodGet, "/v1/registrations/"+mustUUID(t).String()+"/drift-exceptions", nil),
 	} {
-		if w := serve(handler, r); w.Code != http.StatusUnauthorized {
+		if w := serve(t, handler, r); w.Code != http.StatusUnauthorized {
 			t.Errorf("%s %s answered %d without a caller, want 401", r.Method, r.URL.Path, w.Code)
 		}
 	}
@@ -150,7 +162,7 @@ func TestDriftReportsTheLastRunAndOpenFindings(t *testing.T) {
 		Findings: []reconcile.Finding{{ClientKey: "identity-control-caller", Class: reconcile.Blocked}},
 	}}
 	r, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, "/v1/registrations:drift", nil))
-	w := serve(registrationsHandler(t, stub), r)
+	w := serve(t, registrationsHandler(t, stub), r)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", w.Code, w.Body)
 	}
@@ -169,7 +181,7 @@ func TestDriftReportsTheLastRunAndOpenFindings(t *testing.T) {
 	}
 
 	stub.statusErr = errors.New("database down")
-	if w := serve(registrationsHandler(t, stub), r); w.Code != http.StatusInternalServerError {
+	if w := serve(t, registrationsHandler(t, stub), r); w.Code != http.StatusInternalServerError {
 		t.Errorf("a failed status read answered %d", w.Code)
 	}
 }
@@ -177,7 +189,7 @@ func TestDriftReportsTheLastRunAndOpenFindings(t *testing.T) {
 func TestReconcileRunsASweepNow(t *testing.T) {
 	stub := &stubReconciler{run: reconcile.Run{Outcome: reconcile.Converged}}
 	r, _ := asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/registrations:reconcile", nil))
-	w := serve(registrationsHandler(t, stub), r)
+	w := serve(t, registrationsHandler(t, stub), r)
 	if w.Code != http.StatusOK || stub.sweeps != 1 || stub.resolved != nil {
 		t.Errorf("status %d, %d sweep(s), resolved %v", w.Code, stub.sweeps, stub.resolved)
 	}
@@ -195,13 +207,13 @@ func TestResolvingFindingsRequiresAReason(t *testing.T) {
 	handler := registrationsHandler(t, stub)
 
 	r, _ := asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/registrations:reconcile", strings.NewReader(body)))
-	if w := serve(handler, r); w.Code != http.StatusBadRequest || stub.resolved != nil {
+	if w := serve(t, handler, r); w.Code != http.StatusBadRequest || stub.resolved != nil {
 		t.Errorf("a resolution without a reason answered %d and resolved %v", w.Code, stub.resolved)
 	}
 
 	r, principal := asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/registrations:reconcile", strings.NewReader(body)))
 	r.Header.Set(httpapi.AdministrativeReasonHeader, "investigated")
-	if w := serve(handler, r); w.Code != http.StatusOK {
+	if w := serve(t, handler, r); w.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", w.Code, w.Body)
 	}
 	if stub.resolved == nil || stub.resolved.ResolvedBy != principal || stub.resolved.Reason != "investigated" ||
@@ -219,7 +231,7 @@ func TestReconcileRefusesWhatItCannotRead(t *testing.T) {
 	} {
 		r, _ := asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/registrations:reconcile", strings.NewReader(body)))
 		r.Header.Set(httpapi.AdministrativeReasonHeader, "why")
-		if w := serve(handler, r); w.Code != http.StatusBadRequest {
+		if w := serve(t, handler, r); w.Code != http.StatusBadRequest {
 			t.Errorf("%s answered %d, want 400", name, w.Code)
 		}
 	}
@@ -240,7 +252,7 @@ func TestReconcileMapsTheReconcilersErrors(t *testing.T) {
 	} {
 		r, _ := asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/registrations:reconcile", strings.NewReader(c.body)))
 		r.Header.Set(httpapi.AdministrativeReasonHeader, "why")
-		w := serve(registrationsHandler(t, c.stub), r)
+		w := serve(t, registrationsHandler(t, c.stub), r)
 		if w.Code != c.want {
 			t.Errorf("%s answered %d, want %d", name, w.Code, c.want)
 		}
@@ -256,7 +268,7 @@ func TestADriftExceptionIsGrantedByTheCaller(t *testing.T) {
 	r, principal := asPrincipal(t, httptest.NewRequest(http.MethodPost,
 		"/v1/registrations/"+registration.String()+"/drift-exceptions",
 		strings.NewReader(`{"field_class":"token_lifespan","actor":"admin-user","reason":"load test","duration_seconds":3600}`)))
-	w := serve(registrationsHandler(t, stub), r)
+	w := serve(t, registrationsHandler(t, stub), r)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("status %d: %s", w.Code, w.Body)
 	}
@@ -280,7 +292,7 @@ func TestADriftExceptionRefusesWhatItCannotGrant(t *testing.T) {
 		"no such registration":     {path, valid, &stubReconciler{grantErr: reconcile.ErrNoSuchRegistration}, http.StatusNotFound},
 	} {
 		r, _ := asPrincipal(t, httptest.NewRequest(http.MethodPost, c.path, strings.NewReader(c.body)))
-		if w := serve(registrationsHandler(t, c.stub), r); w.Code != c.want {
+		if w := serve(t, registrationsHandler(t, c.stub), r); w.Code != c.want {
 			t.Errorf("%s answered %d, want %d", name, w.Code, c.want)
 		}
 	}
@@ -290,7 +302,7 @@ func TestARegistrationsDriftExceptionsAreReported(t *testing.T) {
 	registrationID := mustUUID(t)
 	path := "/v1/registrations/" + registrationID.String() + "/drift-exceptions"
 	r, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, path, nil))
-	w := serve(registrationsHandler(t, &stubReconciler{}), r)
+	w := serve(t, registrationsHandler(t, &stubReconciler{}), r)
 	var body struct {
 		Exceptions []struct {
 			Registration string `json:"registration_id"`
@@ -317,7 +329,7 @@ func TestARegistrationsDriftExceptionsAreReported(t *testing.T) {
 		"a failed read":  {path, &stubReconciler{statusErr: errors.New("database down")}, http.StatusInternalServerError},
 	} {
 		r, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, c.path, nil))
-		if w := serve(registrationsHandler(t, c.stub), r); w.Code != c.want {
+		if w := serve(t, registrationsHandler(t, c.stub), r); w.Code != c.want {
 			t.Errorf("%s answered %d, want %d", name, w.Code, c.want)
 		}
 	}
@@ -380,7 +392,7 @@ func (s *stubRegistrar) lifecycle(action string, change registration.StateChange
 		return registration.Registration{}, s.err
 	}
 	states := map[string]string{"suspend": "suspended", "restore": "active", "retire": "retired"}
-	return registration.Registration{ID: change.RegistrationID, State: states[action]}, nil
+	return aRegistration(registration.Registration{ID: change.RegistrationID, State: states[action]}), nil
 }
 
 func (s *stubRegistrar) Suspend(_ context.Context, change registration.StateChange) (registration.Registration, error) {
@@ -410,7 +422,7 @@ func (s *stubRegistrar) Mine(_ context.Context, principal id.UUID) ([]registrati
 	out := []registration.Registration{}
 	for registrationID, owner := range s.owners {
 		if owner == principal {
-			out = append(out, registration.Registration{ID: registrationID, ClientKey: "owned", State: "active"})
+			out = append(out, aRegistration(registration.Registration{ID: registrationID, ClientKey: "owned", State: "active"}))
 		}
 	}
 	return out, nil
@@ -432,17 +444,17 @@ func (s *stubRegistrar) RevokeOwner(_ context.Context, change registration.Owner
 
 func (s *stubRegistrar) ProposeChange(_ context.Context, proposal registration.Proposal) (registration.Change, bool, error) {
 	s.proposal = &proposal
-	return registration.Change{Registration: proposal.RegistrationID, RedirectURIs: proposal.RedirectURIs, State: "proposed"},
+	return aChange(registration.Change{Registration: proposal.RegistrationID, RedirectURIs: proposal.RedirectURIs, State: "proposed"}),
 		!s.replayed, s.err
 }
 
 func (s *stubRegistrar) DecideChange(_ context.Context, decision registration.Decision, provider bool) (registration.Change, error) {
 	s.decision, s.asProvider = &decision, provider
-	return registration.Change{ID: decision.ChangeID, Registration: decision.RegistrationID, State: "applied"}, s.err
+	return aChange(registration.Change{ID: decision.ChangeID, Registration: decision.RegistrationID, State: "applied"}), s.err
 }
 
 func (s *stubRegistrar) Changes(_ context.Context, registrationID id.UUID) ([]registration.Change, error) {
-	return []registration.Change{{Registration: registrationID, State: "proposed"}}, s.err
+	return []registration.Change{aChange(registration.Change{Registration: registrationID, State: "proposed"})}, s.err
 }
 
 func (s *stubRegistrar) OpenChanges(context.Context) ([]registration.Change, error) {
@@ -473,12 +485,12 @@ func (s *stubRegistrar) RevokeApplicationDeveloper(_ context.Context, change reg
 
 func (s *stubRegistrar) ProposeRegistration(_ context.Context, proposal registration.RegistrationProposal) (registration.RegistrationRequest, bool, error) {
 	s.regProposal = &proposal
-	return registration.RegistrationRequest{ClientKey: proposal.Request.ClientKey, State: "proposed"}, !s.replayed, s.err
+	return aRegistrationRequest(registration.RegistrationRequest{ClientKey: proposal.Request.ClientKey, State: "proposed"}), !s.replayed, s.err
 }
 
 func (s *stubRegistrar) DecideRegistration(_ context.Context, decision registration.RequestDecision, provider bool) (registration.RegistrationRequest, error) {
 	s.regDecision, s.asProvider = &decision, provider
-	return registration.RegistrationRequest{ID: decision.RequestID, State: "approved"}, s.err
+	return aRegistrationRequest(registration.RegistrationRequest{ID: decision.RequestID, State: "approved"}), s.err
 }
 
 func (s *stubRegistrar) RequestQueue(context.Context) ([]registration.RegistrationRequest, error) {
@@ -492,8 +504,12 @@ func (s *stubRegistrar) MyRequests(context.Context, id.UUID) ([]registration.Reg
 func (s *stubRegistrar) Adopt(_ context.Context, req registration.AdoptRequest) (registration.AdoptResult, error) {
 	s.adopted = &req
 	result := registration.AdoptResult{Plan: s.adoptPlan}
+	if result.Plan.Differences == nil {
+		result.Plan.Differences = []registration.Difference{}
+	}
 	if s.err == nil && !req.DryRun {
-		result.Registration = &registration.Registration{ClientKey: req.ClientKey, State: "active"}
+		adopted := aRegistration(registration.Registration{ClientKey: req.ClientKey, State: "active"})
+		result.Registration = &adopted
 	}
 	return result, s.err
 }
@@ -502,7 +518,7 @@ func (s *stubRegistrar) Keys(_ context.Context, registrationID id.UUID) ([]regis
 	if s.err != nil {
 		return nil, s.err
 	}
-	return []registration.Key{{Registration: registrationID, KID: "k1", State: registration.KeyActive}}, nil
+	return aKeySet([]registration.Key{{Registration: registrationID, KID: "k1", State: registration.KeyActive}}), nil
 }
 
 func (s *stubRegistrar) AddKey(_ context.Context, registrationID id.UUID, publicKey json.RawMessage, by id.UUID) ([]registration.Key, bool, error) {
@@ -510,7 +526,7 @@ func (s *stubRegistrar) AddKey(_ context.Context, registrationID id.UUID, public
 	if s.err != nil {
 		return nil, false, s.err
 	}
-	return []registration.Key{{Registration: registrationID, KID: "k2", State: registration.KeyActive}}, !s.notAdded, nil
+	return aKeySet([]registration.Key{{Registration: registrationID, KID: "k2", State: registration.KeyActive}}), !s.notAdded, nil
 }
 
 func (s *stubRegistrar) RevokeKey(_ context.Context, registrationID, keyID, by id.UUID, reason string) ([]registration.Key, error) {
@@ -518,24 +534,24 @@ func (s *stubRegistrar) RevokeKey(_ context.Context, registrationID, keyID, by i
 	if s.err != nil {
 		return nil, s.err
 	}
-	return []registration.Key{{Registration: registrationID, ID: keyID, State: registration.KeyRevoked}}, nil
+	return aKeySet([]registration.Key{{Registration: registrationID, ID: keyID, State: registration.KeyRevoked}}), nil
 }
 
 func (s *stubRegistrar) List(_ context.Context, query registration.ListQuery) (registration.Page, error) {
 	s.listed = &query
-	return s.page, s.err
+	return aRegistrationPage(s.page), s.err
 }
 
 func (s *stubRegistrar) Register(_ context.Context, req registration.Request) (registration.Registration, error) {
 	s.req = &req
-	return s.created, s.err
+	return aRegistration(s.created), s.err
 }
 
 func (s *stubRegistrar) Get(_ context.Context, registrationID id.UUID) (registration.Registration, error) {
 	if s.err != nil {
 		return registration.Registration{}, s.err
 	}
-	return registration.Registration{ID: registrationID, ClientKey: "web"}, nil
+	return aRegistration(registration.Registration{ID: registrationID, ClientKey: "web"}), nil
 }
 
 func registrarHandler(t *testing.T, registrar *stubRegistrar) http.Handler {
@@ -561,7 +577,7 @@ func TestTheRegistrationListPassesItsCursorThrough(t *testing.T) {
 		Registrations: []registration.Registration{{ClientKey: "web", State: "active"}}, Next: &next}}
 	r, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet,
 		"/v1/registrations?after="+after.String()+"&limit=10&state=active", nil))
-	w := serve(registrarHandler(t, registrar), r)
+	w := serve(t, registrarHandler(t, registrar), r)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", w.Code, w.Body)
 	}
@@ -589,7 +605,7 @@ func TestTheRegistrationListRefusesWhatItCannotRead(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			registrar := &stubRegistrar{}
 			r, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, target, nil))
-			w := serve(registrarHandler(t, registrar), r)
+			w := serve(t, registrarHandler(t, registrar), r)
 			if w.Code != http.StatusBadRequest {
 				t.Errorf("status %d: %s", w.Code, w.Body)
 			}
@@ -598,13 +614,13 @@ func TestTheRegistrationListRefusesWhatItCannotRead(t *testing.T) {
 	// The service's own refusal (a limit over the maximum, an unknown state) is a 400 as well.
 	registrar := &stubRegistrar{err: fmt.Errorf("%w: limit must be between 1 and 100", registration.ErrInvalid)}
 	r, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, "/v1/registrations?limit=500", nil))
-	if w := serve(registrarHandler(t, registrar), r); w.Code != http.StatusBadRequest {
+	if w := serve(t, registrarHandler(t, registrar), r); w.Code != http.StatusBadRequest {
 		t.Errorf("status %d: %s", w.Code, w.Body)
 	}
 }
 
 func TestTheRegistrationListRequiresACaller(t *testing.T) {
-	w := serve(registrarHandler(t, &stubRegistrar{}), httptest.NewRequest(http.MethodGet, "/v1/registrations", nil))
+	w := serve(t, registrarHandler(t, &stubRegistrar{}), httptest.NewRequest(http.MethodGet, "/v1/registrations", nil))
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("status %d", w.Code)
 	}
@@ -618,7 +634,7 @@ func TestARegistrationIsRecordedUnderTheCaller(t *testing.T) {
 	registrar := &stubRegistrar{created: registration.Registration{ClientKey: "web", State: "active"}}
 	r, principal := asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/registrations", strings.NewReader(registerBody)))
 	r.Header.Set(httpapi.IdempotencyHeader, "register-1")
-	w := serve(registrarHandler(t, registrar), r)
+	w := serve(t, registrarHandler(t, registrar), r)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("status %d: %s", w.Code, w.Body)
 	}
@@ -643,11 +659,11 @@ func TestARegistrationRefusesWhatItCannotRead(t *testing.T) {
 		if c.key != "" {
 			r.Header.Set(httpapi.IdempotencyHeader, c.key)
 		}
-		if w := serve(registrarHandler(t, registrar), r); w.Code != http.StatusBadRequest || registrar.req != nil {
+		if w := serve(t, registrarHandler(t, registrar), r); w.Code != http.StatusBadRequest || registrar.req != nil {
 			t.Errorf("%s answered %d", name, w.Code)
 		}
 	}
-	w := serve(registrarHandler(t, &stubRegistrar{}), httptest.NewRequest(http.MethodPost, "/v1/registrations", strings.NewReader(registerBody)))
+	w := serve(t, registrarHandler(t, &stubRegistrar{}), httptest.NewRequest(http.MethodPost, "/v1/registrations", strings.NewReader(registerBody)))
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("an unauthenticated registration answered %d", w.Code)
 	}
@@ -669,7 +685,7 @@ func TestARegistrationMapsTheRegistrarsErrors(t *testing.T) {
 	} {
 		r, _ := asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/registrations", strings.NewReader(registerBody)))
 		r.Header.Set(httpapi.IdempotencyHeader, "k")
-		if w := serve(registrarHandler(t, &stubRegistrar{err: c.err}), r); w.Code != c.want {
+		if w := serve(t, registrarHandler(t, &stubRegistrar{err: c.err}), r); w.Code != c.want {
 			t.Errorf("%s answered %d, want %d", name, w.Code, c.want)
 		}
 	}
@@ -678,7 +694,7 @@ func TestARegistrationMapsTheRegistrarsErrors(t *testing.T) {
 func TestARegistrationIsReadByIdentifier(t *testing.T) {
 	registrationID := mustUUID(t)
 	r, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, "/v1/registrations/"+registrationID.String(), nil))
-	w := serve(registrarHandler(t, &stubRegistrar{}), r)
+	w := serve(t, registrarHandler(t, &stubRegistrar{}), r)
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), registrationID.String()) {
 		t.Errorf("status %d: %s", w.Code, w.Body)
 	}
@@ -686,15 +702,15 @@ func TestARegistrationIsReadByIdentifier(t *testing.T) {
 		"/v1/registrations/nope": http.StatusBadRequest,
 	} {
 		r, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, path, nil))
-		if w := serve(registrarHandler(t, &stubRegistrar{}), r); w.Code != want {
+		if w := serve(t, registrarHandler(t, &stubRegistrar{}), r); w.Code != want {
 			t.Errorf("%s answered %d", path, w.Code)
 		}
 	}
 	r, _ = asPrincipal(t, httptest.NewRequest(http.MethodGet, "/v1/registrations/"+registrationID.String(), nil))
-	if w := serve(registrarHandler(t, &stubRegistrar{err: registration.ErrNotFound}), r); w.Code != http.StatusNotFound {
+	if w := serve(t, registrarHandler(t, &stubRegistrar{err: registration.ErrNotFound}), r); w.Code != http.StatusNotFound {
 		t.Errorf("an unknown registration answered %d", w.Code)
 	}
-	if w := serve(registrarHandler(t, &stubRegistrar{}), httptest.NewRequest(http.MethodGet, "/v1/registrations/"+registrationID.String(), nil)); w.Code != http.StatusUnauthorized {
+	if w := serve(t, registrarHandler(t, &stubRegistrar{}), httptest.NewRequest(http.MethodGet, "/v1/registrations/"+registrationID.String(), nil)); w.Code != http.StatusUnauthorized {
 		t.Errorf("an unauthenticated read answered %d", w.Code)
 	}
 }
@@ -709,7 +725,7 @@ func TestARegistrationsFindingsAreReported(t *testing.T) {
 	registrationID := mustUUID(t)
 	path := "/v1/registrations/" + registrationID.String() + "/findings"
 	r, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, path, nil))
-	w := serve(registrationsHandler(t, &stubReconciler{}), r)
+	w := serve(t, registrationsHandler(t, &stubReconciler{}), r)
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"finding_class":"repaired"`) {
 		t.Errorf("status %d: %s", w.Code, w.Body)
 	}
@@ -727,7 +743,7 @@ func TestARegistrationsFindingsAreReported(t *testing.T) {
 		if c.auth {
 			r, _ = asPrincipal(t, r)
 		}
-		if w := serve(registrationsHandler(t, c.stub), r); w.Code != c.want {
+		if w := serve(t, registrationsHandler(t, c.stub), r); w.Code != c.want {
 			t.Errorf("%s answered %d, want %d", name, w.Code, c.want)
 		}
 	}
@@ -742,7 +758,7 @@ func TestARegistrationCarriesItsPublicKey(t *testing.T) {
 	  "redirect_uris":["https://app.example.com/cb"],"public_key":{"kty":"RSA","n":"AQAB","e":"AQAB"}}`
 	r, _ := asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/registrations", strings.NewReader(body)))
 	r.Header.Set(httpapi.IdempotencyHeader, "register-bff")
-	if w := serve(registrarHandler(t, registrar), r); w.Code != http.StatusCreated {
+	if w := serve(t, registrarHandler(t, registrar), r); w.Code != http.StatusCreated {
 		t.Fatalf("status %d: %s", w.Code, w.Body)
 	}
 	if got := registrar.req; got == nil || !strings.Contains(string(got.PublicKey), `"kty":"RSA"`) {
@@ -761,7 +777,7 @@ func TestTheNextKeyIsAddedUnderTheCaller(t *testing.T) {
 	}{{false, http.StatusCreated}, {true, http.StatusOK}} {
 		registrar := &stubRegistrar{notAdded: c.notAdded}
 		r, principal := asPrincipal(t, httptest.NewRequest(http.MethodPost, path, strings.NewReader(keyBody)))
-		w := serve(registrarHandler(t, registrar), r)
+		w := serve(t, registrarHandler(t, registrar), r)
 		if w.Code != c.want || !strings.Contains(w.Body.String(), `"kid":"k2"`) {
 			t.Errorf("status %d, want %d: %s", w.Code, c.want, w.Body)
 		}
@@ -775,11 +791,11 @@ func TestTheKeysAreListed(t *testing.T) {
 	registrationID := mustUUID(t)
 	path := "/v1/registrations/" + registrationID.String() + "/keys"
 	r, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, path, nil))
-	if w := serve(registrarHandler(t, &stubRegistrar{}), r); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"kid":"k1"`) {
+	if w := serve(t, registrarHandler(t, &stubRegistrar{}), r); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"kid":"k1"`) {
 		t.Errorf("status %d: %s", w.Code, w.Body)
 	}
 	r, _ = asPrincipal(t, httptest.NewRequest(http.MethodGet, path, nil))
-	if w := serve(registrarHandler(t, &stubRegistrar{err: registration.ErrNotFound}), r); w.Code != http.StatusNotFound {
+	if w := serve(t, registrarHandler(t, &stubRegistrar{err: registration.ErrNotFound}), r); w.Code != http.StatusNotFound {
 		t.Errorf("an unknown registration's keys answered %d", w.Code)
 	}
 }
@@ -791,7 +807,7 @@ func TestAKeyIsRevokedWithAReason(t *testing.T) {
 	registrar := &stubRegistrar{}
 	r, principal := asPrincipal(t, httptest.NewRequest(http.MethodPost, path, nil))
 	r.Header.Set(httpapi.AdministrativeReasonHeader, "the laptop holding it was lost")
-	if w := serve(registrarHandler(t, registrar), r); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"state":"revoked"`) {
+	if w := serve(t, registrarHandler(t, registrar), r); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"state":"revoked"`) {
 		t.Fatalf("status %d: %s", w.Code, w.Body)
 	}
 	if registrar.revokedKey != keyID || registrar.revokedBy != principal || registrar.reason != "the laptop holding it was lost" {
@@ -815,7 +831,7 @@ func TestAKeyIsRevokedWithAReason(t *testing.T) {
 		if c.reason != "" {
 			r.Header.Set(httpapi.AdministrativeReasonHeader, c.reason)
 		}
-		if w := serve(registrarHandler(t, registrar), r); w.Code != c.want || !registrar.revokedKey.IsNil() {
+		if w := serve(t, registrarHandler(t, registrar), r); w.Code != c.want || !registrar.revokedKey.IsNil() {
 			t.Errorf("%s answered %d, want %d", name, w.Code, c.want)
 		}
 	}
@@ -840,17 +856,17 @@ func TestTheKeyRoutesMapTheRegistrarsErrors(t *testing.T) {
 		"kernel down":           {keycloak.ErrUnavailable, http.StatusServiceUnavailable},
 	} {
 		r, _ := asPrincipal(t, httptest.NewRequest(http.MethodPost, add, strings.NewReader(keyBody)))
-		if w := serve(registrarHandler(t, &stubRegistrar{err: c.err}), r); w.Code != c.want {
+		if w := serve(t, registrarHandler(t, &stubRegistrar{err: c.err}), r); w.Code != c.want {
 			t.Errorf("adding: %s answered %d, want %d", name, w.Code, c.want)
 		}
 		r, _ = asPrincipal(t, httptest.NewRequest(http.MethodPost, revoke, nil))
 		r.Header.Set(httpapi.AdministrativeReasonHeader, "leaked")
-		if w := serve(registrarHandler(t, &stubRegistrar{err: c.err}), r); w.Code != c.want {
+		if w := serve(t, registrarHandler(t, &stubRegistrar{err: c.err}), r); w.Code != c.want {
 			t.Errorf("revoking: %s answered %d, want %d", name, w.Code, c.want)
 		}
 	}
 	r, _ := asPrincipal(t, httptest.NewRequest(http.MethodPost, add, strings.NewReader(`{"public_key":{},"secret":"x"}`)))
-	if w := serve(registrarHandler(t, &stubRegistrar{}), r); w.Code != http.StatusBadRequest {
+	if w := serve(t, registrarHandler(t, &stubRegistrar{}), r); w.Code != http.StatusBadRequest {
 		t.Errorf("a key document with an unknown field answered %d", w.Code)
 	}
 }
@@ -864,7 +880,7 @@ func TestEveryKeyRouteRequiresAnAuthenticatedPrincipal(t *testing.T) {
 		httptest.NewRequest(http.MethodPost, "/v1/registrations/"+registrationID.String()+"/keys", strings.NewReader(keyBody)),
 		httptest.NewRequest(http.MethodPost, "/v1/registrations/"+registrationID.String()+"/keys/"+keyID.String()+":revoke", nil),
 	} {
-		if w := serve(handler, r); w.Code != http.StatusUnauthorized {
+		if w := serve(t, handler, r); w.Code != http.StatusUnauthorized {
 			t.Errorf("%s %s answered %d without a caller, want 401", r.Method, r.URL.Path, w.Code)
 		}
 	}
@@ -884,7 +900,7 @@ func TestAnAdoptionIsPlannedThenMade(t *testing.T) {
 	r, principal := asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/registrations:adopt",
 		strings.NewReader(fmt.Sprintf(adoptBody, `,"dry_run":true`))))
 	r.Header.Set(httpapi.AdministrativeReasonHeader, "bring the BFF under registration")
-	w := serve(registrarHandler(t, registrar), r)
+	w := serve(t, registrarHandler(t, registrar), r)
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"adoptable":true`) {
 		t.Fatalf("a dry run answered %d: %s", w.Code, w.Body)
 	}
@@ -896,7 +912,7 @@ func TestAnAdoptionIsPlannedThenMade(t *testing.T) {
 	r, _ = asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/registrations:adopt",
 		strings.NewReader(fmt.Sprintf(adoptBody, `,"converge":["token_lifespan"]`))))
 	r.Header.Set(httpapi.AdministrativeReasonHeader, "bring the BFF under registration")
-	if w := serve(registrarHandler(t, registrar), r); w.Code != http.StatusBadRequest {
+	if w := serve(t, registrarHandler(t, registrar), r); w.Code != http.StatusBadRequest {
 		t.Errorf("an adoption without an Idempotency-Key answered %d", w.Code)
 	}
 	r.Header.Set(httpapi.IdempotencyHeader, "adopt-bff")
@@ -904,7 +920,7 @@ func TestAnAdoptionIsPlannedThenMade(t *testing.T) {
 		strings.NewReader(fmt.Sprintf(adoptBody, `,"converge":["token_lifespan"]`))))
 	r.Header.Set(httpapi.AdministrativeReasonHeader, "bring the BFF under registration")
 	r.Header.Set(httpapi.IdempotencyHeader, "adopt-bff")
-	if w := serve(registrarHandler(t, registrar), r); w.Code != http.StatusCreated ||
+	if w := serve(t, registrarHandler(t, registrar), r); w.Code != http.StatusCreated ||
 		!strings.Contains(w.Body.String(), `"registration"`) {
 		t.Errorf("an adoption answered %d: %s", w.Code, w.Body)
 	}
@@ -926,7 +942,7 @@ func TestAnAdoptionRefusesWhatItCannotRead(t *testing.T) {
 		if c.reason != "" {
 			r.Header.Set(httpapi.AdministrativeReasonHeader, c.reason)
 		}
-		if w := serve(registrarHandler(t, registrar), r); w.Code != c.want || registrar.adopted != nil {
+		if w := serve(t, registrarHandler(t, registrar), r); w.Code != c.want || registrar.adopted != nil {
 			t.Errorf("%s answered %d, want %d", name, w.Code, c.want)
 		}
 	}
@@ -945,7 +961,7 @@ func TestAnAdoptionRefusesWhatItCannotRead(t *testing.T) {
 		r, _ := asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/registrations:adopt",
 			strings.NewReader(fmt.Sprintf(adoptBody, `,"dry_run":true`))))
 		r.Header.Set(httpapi.AdministrativeReasonHeader, "r")
-		w := serve(registrarHandler(t, registrar), r)
+		w := serve(t, registrarHandler(t, registrar), r)
 		if w.Code != c.want {
 			t.Errorf("%s answered %d, want %d", name, w.Code, c.want)
 		}
@@ -962,7 +978,7 @@ func TestALifecycleActionNamesItsCallerAndReason(t *testing.T) {
 		r, principal := asPrincipal(t, httptest.NewRequest(http.MethodPost,
 			"/v1/registrations/"+registrationID.String()+":"+action, nil))
 		r.Header.Set(httpapi.AdministrativeReasonHeader, "the BFF's key may have leaked")
-		w := serve(registrarHandler(t, registrar), r)
+		w := serve(t, registrarHandler(t, registrar), r)
 		if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"state":"`+state+`"`) {
 			t.Fatalf("%s: status %d: %s", action, w.Code, w.Body)
 		}
@@ -995,7 +1011,7 @@ func TestALifecycleActionIsRefusedBeforeTheRegistrarIsAsked(t *testing.T) {
 		if c.reason != "" {
 			r.Header.Set(httpapi.AdministrativeReasonHeader, c.reason)
 		}
-		if w := serve(registrarHandler(t, registrar), r); w.Code != c.want || registrar.action != "" {
+		if w := serve(t, registrarHandler(t, registrar), r); w.Code != c.want || registrar.action != "" {
 			t.Errorf("%s answered %d, want %d, and asked %q", name, w.Code, c.want, registrar.action)
 		}
 	}
@@ -1018,7 +1034,7 @@ func TestTheLifecycleRoutesMapTheRegistrarsErrors(t *testing.T) {
 		registrar := &stubRegistrar{err: c.err}
 		r, _ := asPrincipal(t, httptest.NewRequest(http.MethodPost, "/v1/registrations/"+mustUUID(t).String()+":retire", nil))
 		r.Header.Set(httpapi.AdministrativeReasonHeader, "decommissioned")
-		if w := serve(registrarHandler(t, registrar), r); w.Code != c.want || !strings.Contains(w.Body.String(), c.body) {
+		if w := serve(t, registrarHandler(t, registrar), r); w.Code != c.want || !strings.Contains(w.Body.String(), c.body) {
 			t.Errorf("%s answered %d, want %d: %s", name, w.Code, c.want, w.Body)
 		}
 	}
@@ -1034,11 +1050,11 @@ func TestExpiringKeysAreReportedToAnAuthenticatedCaller(t *testing.T) {
 			Profile: "confidential", Severity: registration.SeverityCritical, KeyID: &keyID, KID: "laptop", ExpiresAt: &expires}}}}
 	handler := registrarHandler(t, registrar)
 
-	if w := serve(handler, httptest.NewRequest(http.MethodGet, "/v1/registrations:expiring-keys", nil)); w.Code != http.StatusUnauthorized {
+	if w := serve(t, handler, httptest.NewRequest(http.MethodGet, "/v1/registrations:expiring-keys", nil)); w.Code != http.StatusUnauthorized {
 		t.Errorf("without a caller the route answered %d, want 401", w.Code)
 	}
 	r, _ := asPrincipal(t, httptest.NewRequest(http.MethodGet, "/v1/registrations:expiring-keys", nil))
-	w := serve(handler, r)
+	w := serve(t, handler, r)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", w.Code, w.Body)
 	}

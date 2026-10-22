@@ -69,7 +69,7 @@ func TestATemporaryPasswordIsShownOnceAndNeverCached(t *testing.T) {
 	subject := mustUUID(t).String()
 	stub := &stubIssuer{}
 	r, caller := issueRequest(t, subject, "", time.Minute)
-	w := serve(temporaryPasswordHandler(t, stub), r)
+	w := serve(t, temporaryPasswordHandler(t, stub), r)
 	if w.Code != http.StatusCreated || !strings.Contains(w.Body.String(), `"value":"`+issuedValue+`"`) {
 		t.Fatalf("issue: %d %s", w.Code, w.Body)
 	}
@@ -85,7 +85,7 @@ func TestATemporaryPasswordIsShownOnceAndNeverCached(t *testing.T) {
 
 	replayed := &stubIssuer{replay: true}
 	r, _ = issueRequest(t, subject, "{}", time.Minute)
-	w = serve(temporaryPasswordHandler(t, replayed), r)
+	w = serve(t, temporaryPasswordHandler(t, replayed), r)
 	if w.Code != http.StatusOK || strings.Contains(w.Body.String(), `"value"`) || w.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("a retry answered %d %s, Cache-Control %q", w.Code, w.Body, w.Header().Get("Cache-Control"))
 	}
@@ -117,7 +117,7 @@ func TestAnIssueIsRefusedBeforeTheServiceWithoutWhatItNeeds(t *testing.T) {
 			http.StatusBadRequest},
 	} {
 		stub := &stubIssuer{}
-		// Served as is: serve() would supply a missing key.
+		// Served as is: serve(t, ) would supply a missing key.
 		w := httptest.NewRecorder()
 		temporaryPasswordHandler(t, stub).ServeHTTP(w, c.build())
 		if w.Code != c.want || stub.got != nil {
@@ -129,7 +129,7 @@ func TestAnIssueIsRefusedBeforeTheServiceWithoutWhatItNeeds(t *testing.T) {
 	}
 	// The step-up challenge names aal2 and the age, as RFC 9470 defines.
 	r, _ := issueRequest(t, subject, "", time.Hour)
-	w := serve(temporaryPasswordHandler(t, &stubIssuer{}), r)
+	w := serve(t, temporaryPasswordHandler(t, &stubIssuer{}), r)
 	if challenge := w.Header().Get("WWW-Authenticate"); !strings.Contains(challenge, `acr_values="aal2"`) ||
 		!strings.Contains(challenge, "max_age=300") {
 		t.Fatalf("the challenge is %q", challenge)
@@ -138,7 +138,7 @@ func TestAnIssueIsRefusedBeforeTheServiceWithoutWhatItNeeds(t *testing.T) {
 	r, caller := issueRequest(t, subject, "", time.Minute)
 	r2, _ := issueRequest(t, caller.String(), "", time.Minute)
 	r2 = r2.WithContext(r.Context())
-	if w := serve(temporaryPasswordHandler(t, &stubIssuer{}), r2); w.Code != http.StatusForbidden {
+	if w := serve(t, temporaryPasswordHandler(t, &stubIssuer{}), r2); w.Code != http.StatusForbidden {
 		t.Fatalf("an issue for the caller's own Principal answered %d", w.Code)
 	}
 }
@@ -160,7 +160,7 @@ func TestIssueRefusalsAreTold(t *testing.T) {
 		errors.New("boom"):                       {http.StatusInternalServerError, ""},
 	} {
 		r, _ := issueRequest(t, subject, "", time.Minute)
-		w := serve(temporaryPasswordHandler(t, &stubIssuer{err: err}), r)
+		w := serve(t, temporaryPasswordHandler(t, &stubIssuer{err: err}), r)
 		if w.Code != c.status || !strings.Contains(w.Body.String(), c.detail) {
 			t.Errorf("%v answered %d %s; want %d naming %q", err, w.Code, w.Body, c.status, c.detail)
 		}
