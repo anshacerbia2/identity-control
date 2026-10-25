@@ -3604,3 +3604,277 @@ table "enrolment_count" {
     expr = "count > 0"
   }
 }
+
+// The realm signing keys' registry (ADR-IAM-002 §5.5 Q5 to Q9, TDD-identity-control-001 1.29.0 §The
+// Signing Key Registry). Insert-only for the runtime (grants.sql). No foreign keys between the three:
+// each audit table keeps and purges its own rows, and the command reads the key before it writes a
+// dependent row in the same transaction.
+table "signing_key" {
+  schema  = schema.identity
+  comment = "Each realm signing key, written once when it is staged. Insert-only. ADR-IAM-002 §5.5 Q5."
+
+  column "kid" {
+    null    = false
+    type    = text
+    comment = "The RFC 7638 thumbprint of public_jwk, checked when the row is written."
+  }
+
+  column "realm" {
+    null = false
+    type = text
+  }
+
+  column "algorithm" {
+    null = false
+    type = text
+  }
+
+  column "public_jwk" {
+    null    = false
+    type    = jsonb
+    comment = "The public key, kept as evidence after the key is destroyed. Never a private key."
+  }
+
+  column "custody_ref" {
+    null    = false
+    type    = text
+    comment = "Where the key's custody is: the secrets' names or the development keys directory. Never the material."
+  }
+
+  column "operator" {
+    null = false
+    type = text
+  }
+
+  column "witness" {
+    null = false
+    type = text
+  }
+
+  column "reason" {
+    null = false
+    type = text
+  }
+
+  column "correlation_id" {
+    null = false
+    type = text
+  }
+
+  column "staged_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+
+  primary_key {
+    columns = [column.kid]
+  }
+
+  check "signing_key_algorithm_check" {
+    expr = "algorithm = 'PS256'::text"
+  }
+
+  check "signing_key_kid_form" {
+    expr = "kid ~ '^[A-Za-z0-9_-]{43}$'::text"
+  }
+
+  check "signing_key_named" {
+    expr = "(btrim(realm) <> ''::text) AND (btrim(custody_ref) <> ''::text) AND (btrim(operator) <> ''::text) AND (btrim(reason) <> ''::text) AND (btrim(correlation_id) <> ''::text)"
+  }
+
+  check "signing_key_witness_check" {
+    expr = "(btrim(witness) <> ''::text) AND (lower(btrim(witness)) <> lower(btrim(operator)))"
+  }
+}
+
+table "signing_key_approval" {
+  schema  = schema.identity
+  comment = "Each approval of one transition of one signing key. Insert-only. ADR-IAM-002 §5.5 Q9."
+
+  column "approval_id" {
+    null = false
+    type = uuid
+  }
+
+  column "kid" {
+    null = false
+    type = text
+  }
+
+  column "transition" {
+    null = false
+    type = text
+  }
+
+  column "operator" {
+    null    = false
+    type    = text
+    comment = "The operator of the step this approval is for."
+  }
+
+  column "approver" {
+    null    = false
+    type    = text
+    comment = "A holder of the ceremony role who is not the operator. STD-IAM-001 §3.10."
+  }
+
+  column "emergency" {
+    null    = false
+    type    = boolean
+    default = false
+    comment = "An activation after a compromise, which does not wait the cache window. ADR-IAM-002 §5.5 Q7."
+  }
+
+  column "reason" {
+    null = false
+    type = text
+  }
+
+  column "correlation_id" {
+    null = false
+    type = text
+  }
+
+  column "approved_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+
+  primary_key {
+    columns = [column.approval_id]
+  }
+
+  index "signing_key_approval_kid_idx" {
+    columns = [column.kid, column.transition]
+  }
+
+  check "signing_key_approval_transition_check" {
+    expr = "transition = ANY (ARRAY['activate'::text, 'retire'::text, 'abandon'::text, 'revoke'::text])"
+  }
+
+  check "signing_key_approval_independent" {
+    expr = "(btrim(approver) <> ''::text) AND (lower(btrim(approver)) <> lower(btrim(operator)))"
+  }
+
+  check "signing_key_approval_named" {
+    expr = "(btrim(operator) <> ''::text) AND (btrim(reason) <> ''::text) AND (btrim(correlation_id) <> ''::text)"
+  }
+
+  check "signing_key_approval_emergency_check" {
+    expr = "(NOT emergency) OR (transition = 'activate'::text)"
+  }
+}
+
+table "signing_key_transition" {
+  schema  = schema.identity
+  comment = "Each transition of a signing key, and each failed attempt at one. Insert-only. A key's state is its latest completed row. ADR-IAM-002 §5.5 Q5, Q9."
+
+  column "transition_id" {
+    null = false
+    type = uuid
+  }
+
+  column "kid" {
+    null = false
+    type = text
+  }
+
+  column "step" {
+    null = false
+    type = text
+  }
+
+  column "from_state" {
+    null = true
+    type = text
+  }
+
+  column "to_state" {
+    null = false
+    type = text
+  }
+
+  column "actor" {
+    null = false
+    type = text
+  }
+
+  column "approval_id" {
+    null    = true
+    type    = uuid
+    comment = "The approval the step ran under. Null for staging, which the ceremony's witness attests."
+  }
+
+  column "reason" {
+    null = false
+    type = text
+  }
+
+  column "correlation_id" {
+    null = false
+    type = text
+  }
+
+  column "outcome" {
+    null = false
+    type = text
+  }
+
+  column "evidence" {
+    null    = true
+    type    = text
+    comment = "For a destruction, its proof (CloudTrail DeleteSecret events, or the files removed); for a failure, the error."
+  }
+
+  column "occurred_at" {
+    null    = false
+    type    = timestamptz
+    default = sql("now()")
+  }
+
+  primary_key {
+    columns = [column.transition_id]
+  }
+
+  index "signing_key_transition_kid_idx" {
+    columns = [column.kid, column.occurred_at]
+  }
+
+  index "signing_key_transition_state_once" {
+    unique  = true
+    columns = [column.kid, column.to_state]
+    where   = "outcome = 'completed'::text"
+  }
+
+  index "signing_key_transition_approval_once" {
+    unique  = true
+    columns = [column.approval_id, column.kid]
+    where   = "outcome = 'completed'::text"
+  }
+
+  check "signing_key_transition_step_check" {
+    expr = "step = ANY (ARRAY['stage'::text, 'activate'::text, 'demote'::text, 'retire'::text, 'abandon'::text, 'revoke'::text])"
+  }
+
+  check "signing_key_transition_state_check" {
+    expr = "(to_state = ANY (ARRAY['staged'::text, 'active'::text, 'retiring'::text, 'retired'::text, 'revoked'::text])) AND ((from_state IS NULL) OR (from_state = ANY (ARRAY['staged'::text, 'active'::text, 'retiring'::text])))"
+  }
+
+  check "signing_key_transition_outcome_check" {
+    expr = "outcome = ANY (ARRAY['completed'::text, 'failed'::text])"
+  }
+
+  check "signing_key_transition_approved" {
+    expr = "(step = 'stage'::text) = (approval_id IS NULL)"
+  }
+
+  check "signing_key_transition_evidence" {
+    expr = "((outcome = 'failed'::text) OR (to_state = ANY (ARRAY['retired'::text, 'revoked'::text]))) = ((evidence IS NOT NULL) AND (btrim(evidence) <> ''::text))"
+  }
+
+  check "signing_key_transition_named" {
+    expr = "(btrim(actor) <> ''::text) AND (btrim(reason) <> ''::text) AND (btrim(correlation_id) <> ''::text)"
+  }
+}

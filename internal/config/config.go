@@ -623,3 +623,28 @@ func durationOr(key string, fallback time.Duration, problems *[]error) time.Dura
 	}
 	return value
 }
+
+// SigningKeyConfig is the configuration of cmd/identity-signing-key, the realm signing keys'
+// registry command (ADR-IAM-002 §5.5 Q5 and Q9, TDD-identity-control-001 §The Signing Key Registry).
+// It reaches the Control Database alone, as the runtime role: the registry is insert-only for that
+// role, so the command can record a step and never rewrite one.
+type SigningKeyConfig struct {
+	Deployable string
+	System     string
+	RuntimeDSN string
+	LogLevel   string
+}
+
+// LoadSigningKey reads the registry command's configuration from the environment.
+func LoadSigningKey() (SigningKeyConfig, error) {
+	cfg := SigningKeyConfig{
+		Deployable: "identity-signing-key",
+		System:     "SAD-001",
+		RuntimeDSN: os.Getenv("IDENTITY_DATABASE_URL"),
+		LogLevel:   stringOr("LOG_LEVEL", "info"),
+	}
+	if strings.TrimSpace(cfg.RuntimeDSN) == "" {
+		return SigningKeyConfig{}, errors.New("IDENTITY_DATABASE_URL is required")
+	}
+	return cfg, nil
+}

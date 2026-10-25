@@ -734,6 +734,9 @@ var auditTables = []string{
 	"identity.enrolment_caller",
 	"identity.enrolment",
 	"identity.enrolment_message",
+	"identity.signing_key_transition",
+	"identity.signing_key_approval",
+	"identity.signing_key",
 }
 
 // TestNoAuditRecordIsPurgedBeforeSevenYears is STD-GLB-007 1.2.1 §5 item 4 for this service, read from

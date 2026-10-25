@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-001
   title: Canonical Principal Identifier and Creation Path
   owner: Core Platform Team
-  version: 1.28.0
+  version: 1.29.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-10
-  last_reviewed: 2026-10-22
+  last_reviewed: 2026-10-25
   parent_sad: SAD-001
 ---
 
@@ -453,6 +453,96 @@ grant is projected, and retired then by an insert-only record (`ADR-ORG-002 §5.
 request when a table is empty is a route whose authorization depends on data. The table is empty
 in every fresh environment, including a restored-from-backup one and a mistakenly-pointed-at one,
 and the failure is silent: the request succeeds.
+
+#### The Signing Key Registry (built 1.29.0)
+
+ADR-IAM-002 §5.5, amended 2026-10-24, puts the realm signing keys' registry here (Q5), with the
+approvals and the event (Q9). The kernel's rotation steps own the keys and their providers
+(`TDD-identity-kernel-002` §Rotation as Built). This service keeps the record of each key and refuses
+a step the record does not allow. The registry is evidence. It has no authority over key material,
+and it never holds any.
+
+**Three insert-only tables** (migration `20261025100000_signing_key_registry`):
+
+| Table | One row per | Written by | Holds |
+| :-- | :-- | :-- | :-- |
+| `signing_key` | key | `stage`, once | `kid`, realm, `algorithm` (`PS256`), `public_jwk`, `custody_ref`, the ceremony's operator and witness, reason, correlation identifier, `staged_at` |
+| `signing_key_approval` | approval of one transition of one key | `approve` | the transition (`activate`, `retire`, `abandon` or `revoke`), the step's operator, the approver, `emergency`, reason, correlation identifier, `approved_at` |
+| `signing_key_transition` | transition | `stage` and `record` | the step (`stage`, `activate`, `demote`, `retire`, `abandon`, `revoke`), the states it leaves and enters, the actor, the approval, reason, correlation identifier, the outcome, the evidence, `occurred_at` |
+
+- **A key's state is its latest completed transition.** The states are ADR-IAM-002 §5.2's: `staged`,
+  `active`, `retiring`, `retired`, `revoked`. A partial unique index lets each key enter each state
+  once, so a `retiring` key can never be `active` again (Q6). Another lets each approval complete one
+  transition of its key, so an approval cannot be reused (Q9).
+- **`public_jwk`, the algorithm and `custody_ref` are written once**, at staging (Q5). `stage`
+  computes the RFC 7638 thumbprint of the JWK and refuses a `kid` that differs, a key that is not RSA,
+  and a modulus under 3072 bits (ADR-IAM-002 §5.1, §5.2).
+- **Insert-only.** The runtime holds no `UPDATE`, `DELETE` or `TRUNCATE` on the three tables
+  (`grants.sql`). They carry the retention triggers (§Audit Retention).
+- **No foreign keys between them.** Each audit table keeps and purges its own rows, as the enrolment's
+  do. The command reads the key row before it writes a dependent one, in the same transaction.
+
+**The command is `identity-signing-key`,** on the migrate image, as `identity-bootstrap` is. No
+endpoint exists for it (Q9: "so no new endpoint exists to protect"). It uses the runtime credential and
+reaches only the Control Database.
+
+| Subcommand | Writes | Refuses |
+| :-- | :-- | :-- |
+| `stage -realm -kid -jwk -custody-ref -operator -witness -reason -correlation` | the key row and its `stage` transition (no state → `staged`) | a `kid` already registered; a witness equal to the operator; a `kid` that is not the JWK's thumbprint |
+| `approve -realm -kid -transition -operator -approver -reason -correlation [-emergency]` | an approval row | an approver equal to the operator; for `activate`, an approver who generated the key; a transition the key's state does not allow; `-emergency` on anything but `activate` |
+| `check -realm -kid -transition -operator [-min-age]` | nothing; prints the approval's identifier | no unused approval for that key, transition and operator; a state that does not allow it; a state entered less than `-min-age` ago, unless the approval is an emergency activation |
+| `record -realm -approval -outcome completed\|failed [-evidence]` | the transition, and for an activation the previous active key's `demote` | a completed retirement, abandonment or revocation without evidence; a transition the state no longer allows |
+| `state -realm [-kid]` | nothing; prints each key's state as JSON lines | — |
+
+The transitions it allows, all from ADR-IAM-002 §5.2 and §5.5:
+
+| Step | From | To | Approval | Note |
+| :-- | :-- | :-- | :-- | :-- |
+| `stage` | — | `staged` | none: the ceremony's operator and witness | Q5 |
+| `activate` | `staged` | `active` | `activate`, by neither the generating operator nor the step's operator | Q9. The kernel passes the cache window as `-min-age`; an emergency approval skips it (Q7) |
+| `demote` | `active` | `retiring` | the activation's | written with the activation, in its transaction, for the realm's previous active key |
+| `retire` | `retiring` | `retired` | `retire` | the kernel passes the retirement window as `-min-age`; evidence is the destruction's (Q8) |
+| `abandon` | `staged` | `retired` | `abandon` | the row's reason is `abandoned` (Q6) |
+| `revoke` | `staged` or `retiring` | `revoked` | `revoke` | Q7: a compromised active key is demoted by its replacement's activation first, so no moment has no active key |
+
+- **Who approves.** The ceremony role is the owner's to name (STD-IAM-001 §3.10), and its holders are
+  named in `docs/runbooks/bootstrap-ceremony.md`. The command records names, as the ceremony does,
+  and refuses the combinations Q9 forbids, compared trimmed and case-folded (a database check for
+  approver and operator, the command for the generating operator).
+- **The outcome.** The kernel's step records `completed` after it acts, and `failed` with the error
+  as evidence when it stops part way. A failed row changes no state and leaves the approval unused.
+- **The event (Q9).** The transition row carries actor, approver (through its approval), reason,
+  correlation identifier and outcome. It is the privileged-administration event, kept here until
+  Audit & Evidence has it (STD-IAM-001 §3.8). The kernel's admin events and CloudTrail corroborate it
+  by the correlation identifier.
+- **The first key.** It is activated by `realm-apply` on an empty realm (ADR-IAM-002 §5.5 Q4), before
+  this service runs, because this service needs the realm. Once the Control Database exists, the
+  operator stages it from its ceremony record and records its activation under an approval, in that
+  order, so the registry holds every key the realm has signed with.
+- **Concurrency.** Each write takes a transaction-level advisory lock on the realm's registry, so two
+  activations cannot each demote the same key or leave two keys active, and two steps on one key
+  cannot both pass its state check. Not `FOR UPDATE`, which needs `UPDATE` on the table, and the
+  runtime holds none (found when the kernel's rotation job ran the command as the runtime role; the
+  registry's tests now run as that role).
+
+**Backup and retention (STD-GLB-007 1.3.0).** The rows are in the Control Database, so `backup.sh`
+and the restore drill carry them with every other table (§Restore Evidence); the keys directory is
+never backed up, and the registry does not depend on it (ADR-IAM-002 §5.3, §5.5 Q5). They are audit
+records and state together: a key's rows decide what the next step may do while the key exists. They
+are kept while the key is in force and for 7 years after it ends, counted from its `retired` or
+`revoked` row, as the CA/Browser Forum counts CA key records "after the later occurrence of" the key's
+destruction (STD-GLB-007 [R5]). The scheduled pass purges a key's three kinds of row together, once
+that row is 7 years old (§Audit Retention).
+
+**Restore to an earlier point.** A restored Control Database can lack transitions the kernel has
+made. The kernel's steps read the realm's providers before they ask the registry, so a step on a key
+whose registry state is behind refuses, and the operator records the missing transitions from the
+kernel's admin events and CloudTrail under new approvals (`docs/runbooks/control-database-restore.md`).
+
+**Tested against PostgreSQL** (`internal/signingkey`): the full lifecycle of two keys through
+staging, activation with the previous key's demotion, retirement after the window, and an abandoned
+and a revoked key; each refusal in the tables above; an approval used twice; a reactivation; two
+concurrent activations; and the retention triggers and purge (`internal/controldb`).
 
 ## Data Model
 
@@ -1405,7 +1495,9 @@ and its reviews, `ceremony_grant_retirement`, `principal_relink`, `principal_rel
 `workload_owner_change`, `workload_review`, `security_operation` and its attempts,
 `temporary_password_issuance` and `temporary_password_outcome`, `security_notification`, and, from
 1.27.0, `enrolment_caller`, `enrolment` and `enrolment_message` (`controldb.AuditTables`; their
-triggers are migration `20261021175107_enrolment`). An open enrolment, a message not handed over and a
+triggers are migration `20261021175107_enrolment`), and, from 1.29.0, `signing_key`,
+`signing_key_approval` and `signing_key_transition` (§The Signing Key Registry; their triggers are
+migration `20261025100000_signing_key_registry`). An open enrolment, a message not handed over and a
 caller not retired are in force; `enrolment_count` is not evidence and is deleted when its window
 ends (§Enrolment From an Invitation). It holds no Tenant's data, so the Tenant decommissioning purge has nothing
 to delete here.
@@ -1467,6 +1559,9 @@ retention under 7 years before it runs anything.
   - **`kernel_event` purge, planned (ROADMAP item 23).** Once Audit & Evidence exists, a row is purged
     when it is 7 years old and received, whichever is later (`STD-GLB-007` 1.3.0). Until then the
     row keeps its triggers and is not in the pass.
+- **The signing key registry (1.29.0).** A key's rows are purged together, once its `retired` or
+  `revoked` row is 7 years old: its transitions, then its approvals, then the key. A key not yet
+  retired or revoked is in force, and none of its rows is purged.
 
 **Tested against PostgreSQL on every build** (`internal/controldb`):
 
@@ -1854,6 +1949,8 @@ prints them. The runner image is not pinned to dodge it.
 | Conforms to | ADR-IAM-011 §5.7 (a) and (b) — the resolve client is built: the token in the body, the one `404` read as "nothing" (1.26.0) |
 | Plans | ADR-IAM-011 §5.1 to §5.6 — enrolment from an invitation, a third creation path, not built (1.24.0); waits on open questions Q1 to Q3 (1.26.0) |
 | Conforms to | ADR-IAM-011 §5.1 to §5.9 (amended 2026-10-21) and STD-IAM-001 3.1.0 §3.1 — enrolment built: the BFF workload from `identity.enrolment_caller`, `Forwarded`, the four counts, the double check, quarantine on a kernel duplicate, the temporary password to the second recipient; Q1 to Q3 closed by §5.8, §5.9 and STD-IAM-001 3.1.0 (1.27.0) |
+| Conforms to | ADR-IAM-002 §5.2 and §5.5 Q5, Q6, Q7, Q8 and Q9 (amended 2026-10-24) — the signing key registry: insert-only transitions, approvals by someone other than the operator, the `identity-signing-key` command (1.29.0) |
+| Conforms to | STD-GLB-007 1.3.0 §Data Retention Lifecycle — the registry's rows kept while the key is in force and 7 years after its end (1.29.0) |
 
 ### Open Proof-of-Concept Questions
 

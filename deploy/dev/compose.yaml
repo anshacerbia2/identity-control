@@ -86,6 +86,22 @@ services:
         condition: service_completed_successfully
     networks: [internal, kernel]
 
+  # The realm signing keys' registry (ADR-IAM-002 §5.5 Q5 and Q9, TDD-identity-control-001 §The Signing
+  # Key Registry). identity-kernel's rotation steps run it, `docker compose run --rm -T signing-key …`,
+  # never `up`. The runtime credential, for which the registry is insert-only, and the Control Database
+  # alone: no key, and no network but the internal one.
+  signing-key:
+    image: scnehaux-identity-control-dev-migrate
+    pull_policy: never
+    profiles: ["signing-key"]
+    entrypoint: ["identity-signing-key"]
+    environment:
+      IDENTITY_DATABASE_URL: postgres://identity_app:${IDENTITY_APP_PASSWORD:?set IDENTITY_APP_PASSWORD in .env}@postgres:5432/identity_control?sslmode=disable
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks: [internal]
+
   # The provider authority projection's first snapshot, from Organization Control
   # (TDD-identity-control-006 §Bootstrap). Run once Organization Control serves this consumer; safe
   # to rerun, because the snapshot is applied by version.

@@ -37,6 +37,7 @@
       "internal/workload"
     ],
     "cmd/identity-migrate": ["internal/controldb"],
+    "cmd/identity-signing-key": ["internal/config", "internal/signingkey"],
 
     "_comment_bootstrap": [
       "cmd/identity-bootstrap performs the single ceremony that creates a realm's first",

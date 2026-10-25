@@ -909,6 +909,18 @@ from; an open one says what it waits on.
     - The check found two gaps: `**/compose.override.yaml` and `.token`. Both are excluded.
     - `scripts/check-dockerignore.sh` (the same file in all three repositories) and the `dockerignore`
       job of `ci.yml` fail on a missing file or an unmatched path of the three kinds.
+25. ✅ **The signing key registry, its approvals and its command** (ADR-IAM-002 §5.5 Q5 to Q9, amended
+    2026-10-24; STD-GLB-007 1.3.0 §Data Retention Lifecycle; TDD-001 1.29.0 §The Signing Key Registry).
+    Recorded 2026-10-25, the day the architecture decided it; identity-kernel's rotation steps call it.
+    - Migration `20261025100000_signing_key_registry`: `signing_key`, `signing_key_approval` and
+      `signing_key_transition`, insert-only for the runtime, with the retention triggers.
+    - `identity-signing-key` on the migrate image (`stage`, `approve`, `check`, `record`, `state`), and
+      the `signing-key` one-off service on the development server. No endpoint, and no API change.
+    - Refused: an approver equal to the step's operator, an activation approved by the key's generating
+      operator, an approval used twice, a reactivation, a transition the state does not allow, and a
+      destruction recorded without evidence.
+    - Kept while the key is in force and 7 years after its `retired` or `revoked` row; carried by the
+      Control Database's backup; purged by the scheduled pass after that.
 
 ## Waiting on the Keycloak proof-of-concept
 

@@ -14,6 +14,8 @@ package controldb_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"slices"
@@ -270,6 +272,81 @@ func TestTheAuditPurgeDeletesOnlyExpiredRecords(t *testing.T) {
 	} {
 		if got := exists(check.statement, check.key); got != check.kept {
 			t.Errorf("%s: kept %v, want %v", check.what, got, check.kept)
+		}
+	}
+}
+
+// TestTheSigningKeyRegistryIsPurgedOnlyAfterItsKeyEnds holds the registry's retention
+// (TDD-identity-control-001 1.29.0 §The Signing Key Registry): a key's rows go together once its
+// retired or revoked row is 7 years old, and never while the key is in force, however old.
+func TestTheSigningKeyRegistryIsPurgedOnlyAfterItsKeyEnds(t *testing.T) {
+	pool, ctx := openPool(t)
+	kid := func() string {
+		sum := sha256.Sum256([]byte(newUUID(t)))
+		return base64.RawURLEncoding.EncodeToString(sum[:])
+	}
+	ended, recent, inForce := kid(), kid(), kid()
+	key := `INSERT INTO identity.signing_key (kid, realm, algorithm, public_jwk, custody_ref, operator, witness, reason,
+		correlation_id, staged_at) VALUES ('%s', 'retention-test', 'PS256', '{}', 'test', 'operator', 'witness', 'test',
+		'retention-test', now() - interval '%s')`
+	approval := `INSERT INTO identity.signing_key_approval (approval_id, kid, transition, operator, approver, reason,
+		correlation_id, approved_at) VALUES ('%s', '%s', '%s', 'operator', 'approver', 'test', 'retention-test',
+		now() - interval '%s')`
+	row := `INSERT INTO identity.signing_key_transition (transition_id, kid, step, from_state, to_state, actor,
+		approval_id, reason, correlation_id, outcome, evidence, occurred_at)
+		VALUES ('%s', '%s', '%s', %s, '%s', 'operator', %s, 'test', 'retention-test', 'completed', %s, now() - interval '%s')`
+	var setup []string
+	for _, k := range []struct{ kid, staged, ended, end string }{
+		{ended, "9 years", "8 years", "retired"},
+		{recent, "9 years", "6 years", "revoked"},
+		{inForce, "9 years", "", ""},
+	} {
+		activation, end := newUUID(t), newUUID(t)
+		setup = append(setup,
+			fmt.Sprintf(key, k.kid, k.staged),
+			fmt.Sprintf(row, newUUID(t), k.kid, "stage", "NULL", "staged", "NULL", "NULL", k.staged),
+			fmt.Sprintf(approval, activation, k.kid, "activate", k.staged),
+			fmt.Sprintf(row, newUUID(t), k.kid, "activate", "'staged'", "active", "'"+activation+"'", "NULL", k.staged))
+		if k.end != "" {
+			step := map[string]string{"retired": "retire", "revoked": "revoke"}[k.end]
+			setup = append(setup,
+				fmt.Sprintf(row, newUUID(t), k.kid, "demote", "'active'", "retiring", "'"+newUUID(t)+"'", "NULL", k.staged),
+				fmt.Sprintf(approval, end, k.kid, step, k.ended),
+				fmt.Sprintf(row, newUUID(t), k.kid, step, "'retiring'", k.end, "'"+end+"'", "'files removed'", k.ended))
+		}
+	}
+	if err := exec(ctx, pool, setup...); err != nil {
+		t.Fatalf("seed the registry: %v", err)
+	}
+	t.Cleanup(func() {
+		in := fmt.Sprintf("('%s', '%s', '%s')", ended, recent, inForce)
+		_ = exec(context.Background(), pool, `SET LOCAL session_replication_role = replica`,
+			`DELETE FROM identity.signing_key_transition WHERE kid IN `+in,
+			`DELETE FROM identity.signing_key_approval WHERE kid IN `+in,
+			`DELETE FROM identity.signing_key WHERE kid IN `+in)
+	})
+
+	purged, err := controldb.PurgeExpiredAuditRecords(ctx, pool, controldb.AuditRetentionFloor)
+	if err != nil {
+		t.Fatalf("the purge failed: %v", err)
+	}
+	if purged["identity.signing_key"] < 1 || purged["identity.signing_key_transition"] < 4 ||
+		purged["identity.signing_key_approval"] < 2 {
+		t.Errorf("the purge counted %v", purged)
+	}
+	for _, check := range []struct {
+		what, kid string
+		kept      bool
+	}{
+		{"a key retired 8 years ago", ended, false},
+		{"a key revoked 6 years ago", recent, true},
+		{"an active key staged 9 years ago, still in force", inForce, true},
+	} {
+		for _, table := range []string{"signing_key", "signing_key_approval", "signing_key_transition"} {
+			got := queryBool(t, pool, ctx, `SELECT EXISTS (SELECT 1 FROM identity.`+table+` WHERE kid = $1)`, check.kid)
+			if got != check.kept {
+				t.Errorf("%s: %s kept %v, want %v", check.what, table, got, check.kept)
+			}
 		}
 	}
 }
