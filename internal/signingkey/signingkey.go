@@ -175,6 +175,9 @@ func (r *Registry) Stage(ctx context.Context, req StageRequest) error {
 		return err
 	}
 	return r.store.InTx(ctx, func(ctx context.Context, tx db.Tx) error {
+		if err := lockRealm(ctx, tx, req.Realm); err != nil {
+			return err
+		}
 		exists, err := keyExists(ctx, tx, req.Kid)
 		if err != nil {
 			return err
@@ -367,13 +370,6 @@ func (r *Registry) Record(ctx context.Context, req RecordRequest) ([]Recorded, e
 		if err != nil {
 			return err
 		}
-		if approval.Transition == Activate {
-			// Two activations in one realm would each demote the same key, or leave two active.
-			if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('signing-key:' || $1, 0))`,
-				req.Realm); err != nil {
-				return err
-			}
-		}
 		key, err := lockKey(ctx, tx, req.Realm, approval.Kid)
 		if err != nil {
 			return err
@@ -526,10 +522,18 @@ func readKey(ctx context.Context, tx db.Tx, realm, kid string) (keyRow, error) {
 	return scanKey(ctx, tx, keyStatement, realm, kid)
 }
 
-// lockKey reads the key and holds its row until the transaction ends, so two steps on one key run
-// one after the other.
+// lockRealm holds a transaction-level advisory lock on the realm's registry, so two writes run one
+// after the other: two activations cannot each demote the same key or leave two active, and two
+// steps on one key cannot both pass its state check. An advisory lock rather than FOR UPDATE, which
+// needs UPDATE on the table, and the runtime holds none: the registry is insert-only (grants.sql).
+func lockRealm(ctx context.Context, tx db.Tx, realm string) error {
+	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('signing-key:' || $1, 0))`, realm)
+	return err
+}
+
+// lockKey takes the realm's lock and reads the key.
 func lockKey(ctx context.Context, tx db.Tx, realm, kid string) (keyRow, error) {
-	if _, err := tx.Exec(ctx, `SELECT 1 FROM identity.signing_key WHERE kid = $1 FOR UPDATE`, kid); err != nil {
+	if err := lockRealm(ctx, tx, realm); err != nil {
 		return keyRow{}, err
 	}
 	return readKey(ctx, tx, realm, kid)
@@ -548,8 +552,7 @@ func activeKeys(ctx context.Context, tx db.Tx, realm string) ([]string, error) {
 	                     WHERE kid = k.kid AND outcome = 'completed'
 	                     ORDER BY occurred_at DESC, transition_id DESC LIMIT 1) t ON true
 	     WHERE k.realm = $1 AND t.to_state = 'active'
-	     ORDER BY k.kid
-	       FOR UPDATE OF k`, realm)
+	     ORDER BY k.kid`, realm)
 	if err != nil {
 		return nil, err
 	}

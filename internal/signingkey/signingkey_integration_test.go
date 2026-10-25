@@ -38,6 +38,18 @@ func openRegistry(t *testing.T) (*signingkey.Registry, *db.Pool, string) {
 		t.Fatalf("open pool: %v", err)
 	}
 	t.Cleanup(pool.Close)
+	// The registry runs as the runtime role, as the command does: insert-only on the three tables, so a
+	// statement that needs UPDATE, such as SELECT … FOR UPDATE, fails here as it would deployed.
+	separator := "?"
+	if strings.Contains(dsn, "?") {
+		separator = "&"
+	}
+	runtime, err := db.Open(context.Background(), db.Config{Name: "signingkey-runtime-test",
+		DSN: dsn + separator + "options=-c%20role%3Didentity_runtime", MaxConns: 6})
+	if err != nil {
+		t.Fatalf("open the runtime pool: %v", err)
+	}
+	t.Cleanup(runtime.Close)
 	realmID, err := id.NewV7()
 	if err != nil {
 		t.Fatal(err)
@@ -62,7 +74,7 @@ func openRegistry(t *testing.T) (*signingkey.Registry, *db.Pool, string) {
 			return nil
 		})
 	})
-	return signingkey.New(pool), pool, realm
+	return signingkey.New(runtime), pool, realm
 }
 
 type testKey struct {

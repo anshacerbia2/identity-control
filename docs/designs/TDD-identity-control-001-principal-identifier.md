@@ -519,9 +519,11 @@ The transitions it allows, all from ADR-IAM-002 §5.2 and §5.5:
   this service runs, because this service needs the realm. Once the Control Database exists, the
   operator stages it from its ceremony record and records its activation under an approval, in that
   order, so the registry holds every key the realm has signed with.
-- **Concurrency.** Each write locks the key's row (`FOR UPDATE`), and an activation also takes a
-  transaction-level advisory lock on the realm, so two activations cannot each demote the same key or
-  leave two keys active.
+- **Concurrency.** Each write takes a transaction-level advisory lock on the realm's registry, so two
+  activations cannot each demote the same key or leave two keys active, and two steps on one key
+  cannot both pass its state check. Not `FOR UPDATE`, which needs `UPDATE` on the table, and the
+  runtime holds none (found when the kernel's rotation job ran the command as the runtime role; the
+  registry's tests now run as that role).
 
 **Backup and retention (STD-GLB-007 1.3.0).** The rows are in the Control Database, so `backup.sh`
 and the restore drill carry them with every other table (§Restore Evidence); the keys directory is
