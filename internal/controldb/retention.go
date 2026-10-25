@@ -75,6 +75,9 @@ var AuditTables = []struct {
 	{AuditTable{"identity.enrolment_caller", []string{"registered_at", "retired_at"}}, true},
 	{AuditTable{"identity.enrolment", []string{"code_expires_at", "verifying_until", "created_at", "closed_at"}}, true},
 	{AuditTable{"identity.enrolment_message", []string{"next_attempt_at", "requested_at", "submitted_at"}}, true},
+	{AuditTable{"identity.signing_key_transition", []string{"occurred_at"}}, true},
+	{AuditTable{"identity.signing_key_approval", []string{"approved_at"}}, true},
+	{AuditTable{"identity.signing_key", []string{"staged_at"}}, true},
 }
 
 // expired is the boundary every purge statement compares a row's newest timestamp with. $1 is the
@@ -168,6 +171,26 @@ var auditPurges = []struct{ table, statement string }{
 		`DELETE FROM identity.security_notification
 		  WHERE state <> 'requested'
 		    AND greatest(occurred_at, next_attempt_at, requested_at, submitted_at) ` + expired},
+	// The signing key registry (TDD-identity-control-001 1.29.0): a key is in force until its
+	// completed retired or revoked row, and its rows go together once that row is 7 years old. Its
+	// transitions first, then its approvals, then the key, each only when nothing of the key is left
+	// before it.
+	{"identity.signing_key_transition",
+		`DELETE FROM identity.signing_key_transition t
+		  WHERE t.kid IN (SELECT e.kid FROM identity.signing_key_transition e
+		                   WHERE e.outcome = 'completed' AND e.to_state IN ('retired', 'revoked')
+		                     AND e.occurred_at ` + expired + `)
+		    AND NOT EXISTS (SELECT 1 FROM identity.signing_key_transition y
+		                     WHERE y.kid = t.kid AND NOT (y.occurred_at ` + expired + `))`},
+	{"identity.signing_key_approval",
+		`DELETE FROM identity.signing_key_approval a
+		  WHERE a.approved_at ` + expired + `
+		    AND NOT EXISTS (SELECT 1 FROM identity.signing_key_transition t WHERE t.kid = a.kid)`},
+	{"identity.signing_key",
+		`DELETE FROM identity.signing_key k
+		  WHERE k.staged_at ` + expired + `
+		    AND NOT EXISTS (SELECT 1 FROM identity.signing_key_transition t WHERE t.kid = k.kid)
+		    AND NOT EXISTS (SELECT 1 FROM identity.signing_key_approval a WHERE a.kid = k.kid)`},
 }
 
 // AuditPurge is how many audit records one pass deleted, by table. The temporary password's outcome

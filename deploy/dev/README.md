@@ -18,6 +18,7 @@ It is **development only**, and three things make it so:
 | `migrate` | built, `migrate` target | Once per `up`: roles and platform schema, Atlas, privileges, the `identity_app` login role, and an assertion of the privilege shape. The service starts only if it succeeds |
 | `identity-control` | built, `service` target (distroless, non-root) | The API, on `127.0.0.1:8082` |
 | `bootstrap` | built, `migrate` target | Only through `bootstrap.sh`: the ceremony of ADR-IAM-001 §5.11 |
+| `signing-key` | built, `migrate` target | Only through identity-kernel's signing-key steps: the registry of ADR-IAM-002 §5.5 |
 | `mailpit` | `axllent/mailpit:v1.31.6`, pinned | The development mail catcher (ADR-IAM-007 §5.3, 2026-10-19). It receives every account security notification, proof codes included, and delivers nothing. SMTP on the internal network only; its web interface and API on `127.0.0.1:8025` (§Reading a code in the mail catcher) |
 
 The compose project is `scnehaux-identity-control-dev`, and the network other stacks call this service
@@ -218,6 +219,7 @@ Each is a service behind a profile that runs the migrate image, and never starts
 | Task | Run | When |
 | :-- | :-- | :-- |
 | `bootstrap` | `./bootstrap.sh "<operator>" "<witness>" "<reason>"` the first time; to resume, `docker compose run --rm bootstrap -operator … -witness … -resume …` | once per Control Database (ADR-IAM-001 §5.11) |
+| `signing-key` | `docker compose run --rm -T signing-key <stage\|approve\|check\|record\|state> …`, normally through identity-kernel's `scripts/signing-key-rotation.sh`, which names the flags | each realm signing key's staging, the approval of each transition, and each transition (TDD-identity-control-001 §The Signing Key Registry) |
 | `provider-bootstrap` | `docker compose run --rm provider-bootstrap` | once Organization Control serves this consumer, and again after its registration changes; organization-control's `deploy/dev/README.md` says when. It bootstraps provider authority and the Tenant context, and records the lower mark |
 
 ### Reading a code in the mail catcher

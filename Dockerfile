@@ -20,7 +20,7 @@ ARG GOPROXY=https://proxy.golang.org,direct
 RUN if [ "$GOPROXY" = "direct" ]; then apk add --no-cache git; fi && go mod download
 COPY . .
 # CGO off, so the binaries run on distroless static and on the Postgres image alike.
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/ ./cmd/identity-control ./cmd/identity-migrate ./cmd/identity-bootstrap ./cmd/identity-provider-bootstrap
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/ ./cmd/identity-control ./cmd/identity-migrate ./cmd/identity-bootstrap ./cmd/identity-provider-bootstrap ./cmd/identity-signing-key
 
 # arigaio/atlas:1.3.4, resolved from Docker Hub on 2026-10-18: Atlas v1.3.4, built with go1.26.9,
 # golang.org/x/net v0.60.0 and google.golang.org/grpc v1.83.2, the fixed versions of every Go advisory
@@ -38,7 +38,7 @@ COPY --from=atlas /atlas /usr/local/bin/atlas
 # Migrate Image and Its Exceptions).
 ENV ATLAS_NO_UPDATE_NOTIFIER=true \
     ATLAS_NO_ANON_TELEMETRY=true
-COPY --from=build /out/identity-migrate /out/identity-bootstrap /out/identity-provider-bootstrap /usr/local/bin/
+COPY --from=build /out/identity-migrate /out/identity-bootstrap /out/identity-provider-bootstrap /out/identity-signing-key /usr/local/bin/
 WORKDIR /work
 COPY atlas.hcl schema.hcl ./
 COPY migrations ./migrations

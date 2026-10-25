@@ -71,6 +71,9 @@ BEGIN
               ('identity.enrolment'),
               ('identity.enrolment_message'),
               ('identity.enrolment_count'),
+              ('identity.signing_key'),
+              ('identity.signing_key_approval'),
+              ('identity.signing_key_transition'),
               ('platform.outbox'),
               ('platform.processed_event'),
               ('platform.dead_letter'),
@@ -241,6 +244,12 @@ GRANT UPDATE (retired_by, retire_reason, retired_at) ON identity.enrolment_calle
 REVOKE DELETE, TRUNCATE ON identity.enrolment FROM identity_runtime;
 REVOKE DELETE, TRUNCATE ON identity.enrolment_message FROM identity_runtime;
 REVOKE TRUNCATE ON identity.enrolment_count FROM identity_runtime;
+-- The realm signing keys' registry (ADR-IAM-002 §5.5 Q5 and Q9, TDD-identity-control-001 1.29.0 §The
+-- Signing Key Registry). Each key, approval and transition is written once and never changed, so neither
+-- the operator of a step nor its approver can rewrite what was done or who allowed it.
+REVOKE UPDATE, DELETE, TRUNCATE ON identity.signing_key FROM identity_runtime;
+REVOKE UPDATE, DELETE, TRUNCATE ON identity.signing_key_approval FROM identity_runtime;
+REVOKE UPDATE, DELETE, TRUNCATE ON identity.signing_key_transition FROM identity_runtime;
 -- The ceremony grant ends once, by an insert, and is never revived: insert-only like the ceremony
 -- row it retires (TDD-identity-control-006 §The Ceremony's Grant).
 REVOKE UPDATE, DELETE, TRUNCATE ON identity.ceremony_grant_retirement FROM identity_runtime;
@@ -291,6 +300,9 @@ GRANT SELECT (state, occurred_at, next_attempt_at, requested_at, submitted_at), 
 GRANT SELECT (registered_at, retired_at), DELETE ON identity.enrolment_caller TO identity_audit_purger;
 GRANT SELECT (enrolment_id, issuance_id, state, code_expires_at, verifying_until, created_at, closed_at), DELETE ON identity.enrolment TO identity_audit_purger;
 GRANT SELECT (enrolment_id, state, next_attempt_at, requested_at, submitted_at), DELETE ON identity.enrolment_message TO identity_audit_purger;
+GRANT SELECT (kid, to_state, outcome, occurred_at), DELETE ON identity.signing_key_transition TO identity_audit_purger;
+GRANT SELECT (kid, approved_at), DELETE ON identity.signing_key_approval TO identity_audit_purger;
+GRANT SELECT (kid, staged_at), DELETE ON identity.signing_key TO identity_audit_purger;
 
 -- The retention trigger function (migration 20261020200000_audit_retention). EXECUTE is asked of the
 -- trigger's creator: "To create or replace a trigger on a table, the user must have the TRIGGER
