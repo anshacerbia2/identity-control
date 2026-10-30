@@ -922,6 +922,12 @@ from; an open one says what it waits on.
       destruction recorded without evidence.
     - Kept while the key is in force and 7 years after its `retired` or `revoked` row; carried by the
       Control Database's backup; purged by the scheduled pass after that.
+26. ⏳ **go-jose v4.1.4 in Atlas, `affected` until 2026-12-27** (STD-GLB-009 §Container Images rules 4,
+    5, 7 and 8; TDD-001 1.30.0 §The Migrate Image and Its Exceptions). Recorded 2026-10-30. The daily
+    image scan has failed since 2026-10-28 on GHSA-mgcc-cww5-fp2q in `/usr/local/bin/atlas`. No Atlas
+    release carries go-jose v4.1.6 yet, 1.3.6 included, so `.grype.yaml` holds an `affected`
+    statement. Waits on an Ariga release; the pin moves to it and the statement goes. organization-control
+    pins the same Atlas.
 
 ## Waiting on the Keycloak proof-of-concept
 
