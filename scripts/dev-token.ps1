@@ -81,6 +81,23 @@ function Get-TotpCode([string] $Secret, [long] $Step) {
     return ($value % 1000000).ToString("000000")
 }
 
+# Get-ServerTotpCode is the current code of a development server's own TOTP (ADR-IAM-004 §5.5), from
+# its file. The kernel accepts a code once (the realm's OTP policy does not allow reuse), so a step
+# already used waits for the next one. The step is recorded in the file, rewritten whole, so the
+# recovery codes kept beside the secret stay. The owner calls it once to read a code, on the server.
+function Get-ServerTotpCode([string] $TotpSecretFile) {
+    $stored = Get-Content -Raw $TotpSecretFile | ConvertFrom-Json
+    $step = Get-TotpStep
+    $last = if ($stored.PSObject.Properties.Name -contains 'last') { [long]$stored.last } else { -1 }
+    if ($step -le $last) {
+        Start-Sleep -Seconds (30 - ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() % 30) + 1)
+        $step = Get-TotpStep
+    }
+    $stored | Add-Member -NotePropertyName last -NotePropertyValue $step -Force
+    $stored | ConvertTo-Json -Compress | Set-Content -NoNewline $TotpSecretFile
+    return Get-TotpCode $stored.secret $step
+}
+
 # Get-HiddenInputs reads a form's hidden fields, which the kernel carries its state in. A page that
 # offers another factor also holds the separate "Try another way" form; its tryAnotherWay field is
 # not the page's own, and a browser submitting the page's form does not send it.
@@ -124,8 +141,9 @@ function Get-ScnehauxToken {
         [string] $RedirectUri = "http://127.0.0.1:8099/callback",
         # The authentication level to ask for (ADR-IAM-004). Every provider route requires aal2, so
         # a token for one is asked with -AcrValues aal2 and the current code from the person's
-        # authenticator app in -Otp. The first TOTP is enrolled in a browser: sign in to the Admin
-        # Portal, which asks for aal2 and shows the kernel's enrollment page.
+        # authenticator app in -Otp. On a server from zero the bootstrap operator's first TOTP is the
+        # server's (-OperatorTotpFile), and the owner then adds their own in the account application
+        # (ADR-IAM-004 §5.5).
         [string] $AcrValues = "",
         [string] $Otp = "",
         # A development server's own TOTP for this account (ADR-IAM-004 §5.5): a JSON file holding its
@@ -289,7 +307,7 @@ function Get-ScnehauxToken {
         $fields = Get-HiddenInputs $content
         if ($content -match 'name="totpSecret"') {
             if (-not $EnrollTotpFile) {
-                throw "the kernel asks to enroll a TOTP authenticator first: sign in to the Admin Portal in a browser once, then pass the app's code in -Otp"
+                throw "the kernel asks to enroll a TOTP authenticator first: on a development server, bind the server's with -OperatorTotpFile (IDENTITY_OPERATOR_TOTP_FILE for the scripts); a person enrolls theirs in a browser"
             }
             $enrolledSecret = $fields["totpSecret"]
             $enrolledStep = Get-TotpStep
@@ -312,18 +330,8 @@ function Get-ScnehauxToken {
                 $stored = Get-Content -Raw $TotpSecretFile | ConvertFrom-Json
                 $credential = Find-OtpCredential $content $stored.label
                 if ($credential) { $fields["selectedCredentialId"] = $credential }
-                # The kernel accepts a code once (the realm's OTP policy does not allow reuse), so a
-                # second sign-in in the same 30 seconds waits for the next step.
-                $step = Get-TotpStep
-                $last = if ($stored.PSObject.Properties.Name -contains 'last') { [long]$stored.last } else { -1 }
-                if ($step -le $last) {
-                    Start-Sleep -Seconds (30 - ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() % 30) + 1)
-                    $step = Get-TotpStep
-                }
-                $fields["otp"] = Get-TotpCode $stored.secret $step
-                # Rewritten whole, so the recovery codes kept beside the secret stay.
-                $stored | Add-Member -NotePropertyName last -NotePropertyValue $step -Force
-                $stored | ConvertTo-Json -Compress | Set-Content -NoNewline $TotpSecretFile
+                # A second sign-in in the same 30 seconds waits for the next step.
+                $fields["otp"] = Get-ServerTotpCode $TotpSecretFile
             } else {
                 throw "the kernel asks for a one-time code: pass -Otp, or -TotpSecretFile on a development server"
             }

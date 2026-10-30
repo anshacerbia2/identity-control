@@ -185,9 +185,31 @@ procedure to keep in step with the code.
 ### The server's own TOTP for the bootstrap operator
 
 The agent that operates this server needs `aal2` tokens, and nobody can relay a 30-second code to it.
-So the server holds a second TOTP for the bootstrap operator (ADR-IAM-004 §5.5). It is bound at
-`aal2`, as NIST SP 800-63B-4 §4.1.2.1 requires: once, with one code the owner reads from their own
-authenticator.
+So the server holds a TOTP of its own for the bootstrap operator, beside the owner's (ADR-IAM-004
+§5.5). It is bound at the level the account holds, as NIST SP 800-63B-4 §4.1.2.1 requires, so which
+comes first decides how.
+
+**On a server from zero, the server's comes first.** No browser can sign in until a provider call at
+`aal2` has registered identity-experience's client, so the owner cannot enroll first. §First start
+step 8's first run, with `IDENTITY_OPERATOR_TOTP_FILE`, binds the server's TOTP at `aal1`, the
+account's level while it holds no second factor. The recovery codes the kernel issues with that first
+TOTP are kept in the same file, never printed.
+
+**The owner's own TOTP comes next,** once identity-experience's client is registered. The owner signs
+in to the account application and chooses **Add an authenticator app**. Its step-up asks for a code,
+which the owner reads on the server, in their own session, from the repository root:
+
+```powershell
+. ./scripts/dev-token.ps1
+Get-ServerTotpCode deploy/dev/keys/operator-totp.json
+```
+
+It prints one code, never the secret, and records its step in the file, so no script reuses it. Never
+relay the code through chat or a ticket. The kernel's page then shows the QR code for the owner's
+authenticator app. The owner sets up recovery codes of their own in the account application.
+
+**Where the owner's TOTP is bound already** and the file is missing, the server's is bound at `aal2`,
+once, with one code the owner reads from their own authenticator:
 
 ```powershell
 . ./scripts/dev-token.ps1
