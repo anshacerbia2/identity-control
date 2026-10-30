@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-001
   title: Canonical Principal Identifier and Creation Path
   owner: Core Platform Team
-  version: 1.29.0
+  version: 1.30.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-10
-  last_reviewed: 2026-10-25
+  last_reviewed: 2026-10-30
   parent_sad: SAD-001
 ---
 
@@ -1818,6 +1818,46 @@ the zlib rule is the only one left.
 
 organization-control makes the same move, in its TDD-001 1.25.0.
 
+**1.30.0: go-jose in Atlas 1.3.4, `affected`.** The daily scan of 2026-10-28 failed on the migrate
+image, and has failed every day since: `github.com/go-jose/go-jose/v4` v4.1.4 in
+`/usr/local/bin/atlas`, GHSA-mgcc-cww5-fp2q (CVE-2026-116587), High, fixed in 4.1.6. The advisory:
+"A crafted RSA key inside a JWK can cause operations that parse JWKs to consume excess CPU", because
+go-jose passes an unbounded modulus and primes to `crypto/rsa.PrivateKey.Validate()`, which "takes
+cubic time complexity" [R25]. The service image passes the gate: go-jose is not in this repository's
+modules.
+
+- **No release fixes it.** The newest tag on 2026-10-30, `arigaio/atlas:1.3.6`, pushed 2026-10-27,
+  is built with go1.26.10 and still carries go-jose v4.1.4 (`go version -m` on its `/atlas`) [R26].
+  Rule 4's pin move is not open.
+- **`vulnerable_code_not_present` is not open.** The 1.3.4 file holds the vulnerable code: its
+  symbol table names `JSONWebKey.UnmarshalJSON` and `fromRsaPrivateKey`. `govulncheck` v1.8.0
+  `-mode binary` on it, with the database of 2026-10-30, has no entry for this advisory yet, so it
+  gives no evidence either way. It reports GO-2026-6866 and GO-2026-6860 in `golang.org/x/net`
+  v0.60.0 and GO-2026-6809 in the standard library, which Grype rates below High or does not
+  report, so the gate does not fail on them.
+- **`vulnerable_code_not_in_execute_path` is not open either.** The 1.19.0 statements rested on the
+  side of each bug: server code in a program that never listens, client code in a program the trace
+  shows making no request. This bug is in parsing, not in a connection, so the trace cannot show
+  its path closed. The open-source build of Atlas has no go-jose at all, so only the closed official
+  build uses it, through the modules it adds for secret stores and cloud credentials (HashiCorp
+  Vault, SPIFFE, and the AWS, Google Cloud and Azure SDKs). `atlas.hcl` uses none of them, but
+  nothing a reviewer can rerun shows that `migrate apply --env local` never parses a JWK.
+- **So the statement is `affected`,** due 2026-12-27. Under rule 8 the finding is not publicly
+  exposed, not in the KEV, and in CISA's Vulnrichment Automatable yes with Technical Impact partial,
+  which gives 60 days from detection on 2026-10-28 [R27]. The action is the pin move to the first
+  Atlas release built with go-jose v4.1.6 or later. A request to Ariga is drafted in this version's
+  pull request, for the owner to file.
+
+**What was rejected in 1.30.0.**
+
+- **`not_affected/vulnerable_code_not_in_execute_path`, as in 1.19.0.** 1.19.0 rejected `affected`
+  because "The trace shows no path to any of this code". Here the trace shows nothing about the
+  code, so that reason does not carry over.
+- **Building Atlas from source with go-jose v4.1.6.** The image is not exposed, so rule 9 does not
+  ask for it, and the open-source build is not the binary Ariga ships, as 1.19.0 found.
+- **Moving the pin to 1.3.6 now.** It fixes GO-2026-6809, which does not fail the gate, and leaves
+  this finding as it is. The pin moves once, to the release that fixes it.
+
 **What was rejected.**
 
 - **A `not_affected` statement for GO-2026-6617 on 1.3.3.** The evidence above would support it, but
@@ -1870,7 +1910,8 @@ in identity-kernel, identity-control and organization-control. The checker fails
 - for `affected`, whose `review-by` is more than 90 days after `detected`, which is rule 8's longest
   time.
 
-Every rule here gives a location. Until 1.20.0 the Go modules named `/usr/local/bin/atlas`. The
+Every rule here gives a location. Until 1.20.0 the Go modules named `/usr/local/bin/atlas`, and
+from 1.30.0 the go-jose rule does again. The
 zlib rule, whose type does not require one, names `/lib/apk/db/installed` as well. Whether a statement is true is
 left to review. Outside CI, the scan's database and image archives go under `./.image-scan`, which
 git ignores, and never under `/tmp`.
@@ -2088,3 +2129,20 @@ Keycloak release:
 - **[R22]** Docker, _Compose Build Specification_, `labels`, <https://docs.docker.com/reference/compose-file/build/#labels>, accessed 2026-10-22. "`labels` add metadata to the resulting image."
 - **[R23]** Open Container Initiative, _Image Format Specification: Annotations_, <https://github.com/opencontainers/image-spec/blob/main/annotations.md>, accessed 2026-10-22. "**org.opencontainers.image.revision** Source control revision identifier for the packaged software." "Keys using the `org.opencontainers.image` namespace are reserved for use in the OCI Image Specification and MUST NOT be used by other specifications and extensions, including other OCI specifications." The page defines annotations; that the same key is set as an image label is Compose's `labels` [R22].
 - **[R24]** Docker, _containerd image store_, <https://docs.docker.com/engine/storage/containerd/>, accessed 2026-10-22. "The containerd image store is the default storage backend for Docker Engine 29.0 and later on fresh installations." "Working with images that include attestations (provenance, SBOM). These use image indices that the classic store doesn't support."
+- **[R25]** GitHub Advisory Database, _GHSA-mgcc-cww5-fp2q: Go JOSE: DoS when parsing JWKs that
+  contain RSA keys_ (CVE-2026-116587, published 2026-10-27),
+  <https://github.com/advisories/GHSA-mgcc-cww5-fp2q>, accessed 2026-10-30. High, CVSS 3.1 7.5
+  (`AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H`); `github.com/go-jose/go-jose/v4` vulnerable through 4.1.5,
+  patched in 4.1.6. "A crafted RSA key inside a JWK can cause operations that parse JWKs to consume
+  excess CPU"; "go-jose does not check for bounds on RSA modulus and primes before validating them.
+  Values are passed directly to `crypto/rsa.PrivateKey.Validate()`. On Go 1.24+, this takes cubic
+  time complexity with respect to the RSA modulus and primes."
+- **[R26]** Ariga, `arigaio/atlas` on Docker Hub, tag `1.3.6` (pushed 2026-10-27), the newest
+  numbered tag, <https://hub.docker.com/r/arigaio/atlas/tags>, accessed 2026-10-30. `go version -m`
+  on its `/atlas` reads `go1.26.10` and `github.com/go-jose/go-jose/v4 v4.1.4`. The 1.3.4 file
+  (sha256 `aec7e73a561889836b5fb7d8ba8cc55969c593e53188048d83cdf087f23bc476`) reads the same go-jose
+  version. `ariga/atlas` `cmd/atlas/go.mod`, at `v1.3.0` and on `master`, does not require go-jose.
+- **[R27]** CISA, _Vulnrichment_, record for CVE-2026-116587 (Exploitation none, Automatable yes,
+  Technical Impact partial), <https://github.com/cisagov/vulnrichment>, accessed 2026-10-30; CISA,
+  _Known Exploited Vulnerabilities Catalog_, catalog version 2026.10.29, accessed 2026-10-30, which
+  does not list it.
