@@ -138,8 +138,9 @@ design, not a fault.
    no second factor yet, and every later script finds the file without being told. Where the owner's
    TOTP is enrolled already, bind the server's with one of the owner's codes first (§Updating, The
    server's own TOTP), and run the plan without the variable.
-9. **Adopt the BFF,** once `identity-experience`'s `create-bff-client.sh` has made it: §Wiring to other
-   services, Adopting the BFF.
+9. **Register each BFF client,** one per developer device, as identity-experience's
+   `deploy/dev/README.md` First start step 2 does through this API. `create-bff-client.sh` is superseded
+   there; §Wiring to other services, Adopting the BFF, applies only to a client that already exists.
 10. **Apply the registered state, if anything differs.** Both adoptions converge `token_format` and
     `audience_scope`, so every client this server holds now carries the token profile (`TDD-identity-control-003`
     §Profiles) and none should differ. Read the open findings with a provider token:
