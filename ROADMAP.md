@@ -1254,3 +1254,36 @@ the first Principal. **Owner decision pending:** the names of the ceremony role 
 the review deadline, are explicit placeholders in the runbook's §Who performs it, and remain open until
 the owner decides (NIST SP 800-53 AU-6's assignments). ✅ Who the realm serves before the review is
 decided: the first Principal and the reviewer, and no one else (STD-IAM-001 2.10.0 §3.10, item 15).
+
+### Information security gates (ISMS-005, 2026-11-01)
+
+The approved risk treatment plan
+([ISMS-005](https://github.com/anshacerbia2/scnehaux-architecture/blob/main/07-isms/ISMS-005-risk-treatment-and-soa.md#treatment-plan))
+makes these production gate items for this repository. Each risk (R) is rated in
+[ISMS-004](https://github.com/anshacerbia2/scnehaux-architecture/blob/main/07-isms/ISMS-004-risk-register.md#the-register);
+each action (T) has its owner role and target date there. When an action completes, this list and
+the SoA in ISMS-005 change together.
+
+- ⏳ **The bootstrap ceremony's witness signs in** (T8, R2; before production), instead of being a
+  name the operator types. The record and review checks above stay.
+- ⏳ **The Control Database archives continuously, with copies off the host** (T11, R4; before
+  production), which also closes the RPO gap recorded above.
+- ⏳ **The kernel event record and the ceremony records reach Audit & Evidence** (T13, R5; before
+  production), so they no longer live only beside the database's superuser.
+- ⏳ **Account security notifications are delivered** (T14, R6; before production), through the
+  Notification Platform (ADR-IAM-007).
+- ⏳ **A path to erase a person's data, and a record of processing** (T39; before production).
+  TDD-identity-control-001 §Restore Evidence records that none exists.
+- ⏳ **A failed backup is reported** (T9, R18; by 30 November 2026).
+- ⏳ **Production secrets come from a managed store, never from `.env`** (T23, R7; before
+  production). In development `KC_BOOTSTRAP_ADMIN_PASSWORD` is copied from the kernel's `.env`.
+- ⏳ **A failed scheduled run alerts the Information Security Officer** (T4, R21; by 30 November
+  2026). Today a failed run of `ci`, `image-scan` or `deploy-dev` alerts nobody; it shows only to
+  someone who opens the Actions tab.
+- ⏳ **Secret scanning in CI** (T5, R7; by 15 December 2026), as STD-IAM-001 §5 lists. Today nothing
+  scans a change for a secret before it reaches this public repository.
+- ⏳ **The shared workflows are called at a pinned commit** (T6, R14; by 31 December 2026). Today
+  `linter.yml` and `deploy-dev-skeleton.yml` are called from scnehaux-architecture's `main` branch,
+  so a change there changes what this repository's CI runs.
+- ⏳ **A second person's approval on `main`** (T19, R19 and R23; before production). A ruleset
+  requires one approval once a second maintainer exists; until then each merge is a recorded risk.
