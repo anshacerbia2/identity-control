@@ -29,7 +29,7 @@ func TestSecurityStateIsReadFromTheUserSubresources(t *testing.T) {
 			  {"id":"k3","type":"recovery-authn-codes","createdDate":6000,"secretData":"SECRET",
 			   "credentialData":"{\"hashIterations\":null,\"algorithm\":\"RS512\",\"remaining\":11,\"total\":12}"}]`
 		case strings.HasSuffix(path, "/users/u1/federated-identity"):
-			return http.StatusOK, `[{"identityProvider":"github","userId":"77","userName":"ansha"}]`
+			return http.StatusOK, `[{"identityProvider":"github","userId":"77","userName":"dev-user"}]`
 		}
 		return http.StatusNotFound, ""
 	}
@@ -57,7 +57,7 @@ func TestSecurityStateIsReadFromTheUserSubresources(t *testing.T) {
 	}
 
 	links, err := admin.UserFederatedIdentities(ctx, testRealm, "u1")
-	if err != nil || len(links) != 1 || links[0].Provider != "github" || links[0].UserName != "ansha" {
+	if err != nil || len(links) != 1 || links[0].Provider != "github" || links[0].UserName != "dev-user" {
 		t.Errorf("links: %+v, %v", links, err)
 	}
 

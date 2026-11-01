@@ -335,7 +335,7 @@ func TestEveryRejectionProducesTheSameDocument(t *testing.T) {
 		"a workload":              token(t, withClaims(map[string]any{"subject_type": "workload"})),
 		"provider_scope present":  token(t, withClaims(map[string]any{"provider_scope": "provider:identity-control"})),
 		"empty provider_scope":    token(t, withClaims(map[string]any{"provider_scope": ""})),
-		"principal_id not a uuid": token(t, withClaims(map[string]any{"principal_id": "ansha"})),
+		"principal_id not a uuid": token(t, withClaims(map[string]any{"principal_id": "operator"})),
 		"tenant present":          token(t, withClaims(map[string]any{"tenant_id": "019235f1-0000-7000-8000-000000000001"})),
 		"no acr":                  token(t, withClaims(map[string]any{"acr": nil})),
 		"no auth_time":            token(t, withClaims(map[string]any{"auth_time": nil})),
@@ -379,7 +379,7 @@ func TestRequirementRejectsEveryMissingMandatoryClaim(t *testing.T) {
 	cases := map[string]map[string]any{
 		"no claims at all":        {"principal_id": nil, "subject_type": nil, "acr": nil, "auth_time": nil},
 		"no principal_id":         {"principal_id": nil},
-		"principal_id not a uuid": {"principal_id": "ansha"},
+		"principal_id not a uuid": {"principal_id": "operator"},
 		"no subject_type":         {"subject_type": nil},
 		"unknown subject type":    {"subject_type": "agent"},
 		"a workload":              {"subject_type": "workload"},
