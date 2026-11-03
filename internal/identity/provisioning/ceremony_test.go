@@ -50,7 +50,7 @@ func ceremonyRequest() provisioning.CeremonyRequest {
 		Realm:    "scnehaux",
 		Username: "first.operator",
 		Email:    "first.operator@example.com",
-		Operator: "ansha@example.com",
+		Operator: "operator@example.com",
 		Witness:  ceremonyWitness,
 		Reason:   "initial estate stand-up",
 	}
@@ -58,7 +58,7 @@ func ceremonyRequest() provisioning.CeremonyRequest {
 
 func TestBootstrapCreatesTheFirstPrincipalThroughTheOrdinaryPath(t *testing.T) {
 	tx := &fakeTx{txs: []*dbtest.Tx{
-		ceremonyClaimed("ansha@example.com", "initial estate stand-up", "bootstrap:scnehaux", 0),
+		ceremonyClaimed("operator@example.com", "initial estate stand-up", "bootstrap:scnehaux", 0),
 		claimed(), // Create checkpoint one
 		claimed(), // Create checkpoint two
 	}}
@@ -80,7 +80,7 @@ func TestBootstrapCreatesTheFirstPrincipalThroughTheOrdinaryPath(t *testing.T) {
 	if response.SubjectType != keycloak.SubjectHuman {
 		t.Errorf("subject_type = %q, want human", response.SubjectType)
 	}
-	if record.Operator != "ansha@example.com" {
+	if record.Operator != "operator@example.com" {
 		t.Errorf("recorded operator = %q", record.Operator)
 	}
 	if kernel.Calls.CreateUser != 1 {
@@ -95,7 +95,7 @@ func TestBootstrapCreatesTheFirstPrincipalThroughTheOrdinaryPath(t *testing.T) {
 // create call, because the port has no credential field to inspect — which is itself the point.
 func TestBootstrapHoldsNoCredential(t *testing.T) {
 	tx := &fakeTx{txs: []*dbtest.Tx{
-		ceremonyClaimed("ansha@example.com", "initial estate stand-up", "bootstrap:scnehaux", 0),
+		ceremonyClaimed("operator@example.com", "initial estate stand-up", "bootstrap:scnehaux", 0),
 		claimed(),
 		claimed(),
 	}}
@@ -126,7 +126,7 @@ func TestBootstrapHoldsNoCredential(t *testing.T) {
 // the ceremony's local emergency grant (TDD-identity-control-006 §The Ceremony's Grant), and a
 // resumed ceremony creates the same Principal.
 func TestTheCeremonyCreatesThePrincipalItsRowNames(t *testing.T) {
-	ceremonyRow := ceremonyClaimed("ansha@example.com", "reason", "bootstrap:scnehaux", 0)
+	ceremonyRow := ceremonyClaimed("operator@example.com", "reason", "bootstrap:scnehaux", 0)
 	tx := &fakeTx{txs: []*dbtest.Tx{ceremonyRow, claimed(), claimed()}}
 	kernel := keycloakfake.New()
 	response, record, err := newProvisioner(t, tx, kernel).Bootstrap(context.Background(), ceremonyRequest())
@@ -155,7 +155,7 @@ func TestTheCeremonyCreatesThePrincipalItsRowNames(t *testing.T) {
 // cannot be rewritten to; completing it would create a first Principal with no authority.
 func TestACeremonyRowNamingNoPrincipalIsRefused(t *testing.T) {
 	tx := &fakeTx{txs: []*dbtest.Tx{{
-		Tag: dbtest.CommandTag(0), RowValues: []any{"ansha@example.com", ceremonyWitness, "reason", "bootstrap:scnehaux", "", 0},
+		Tag: dbtest.CommandTag(0), RowValues: []any{"operator@example.com", ceremonyWitness, "reason", "bootstrap:scnehaux", "", 0},
 	}}}
 	kernel := keycloakfake.New()
 	if _, _, err := newProvisioner(t, tx, kernel).Bootstrap(context.Background(), ceremonyRequest()); !errors.Is(err, provisioning.ErrCeremonyUnnamed) {
@@ -170,7 +170,7 @@ func TestACeremonyRowNamingNoPrincipalIsRefused(t *testing.T) {
 // inject a Principal into a running estate rather than to start one.
 func TestBootstrapRefusesAPopulatedRegistry(t *testing.T) {
 	tx := &fakeTx{txs: []*dbtest.Tx{
-		ceremonyClaimed("ansha@example.com", "initial estate stand-up", "bootstrap:scnehaux", 3),
+		ceremonyClaimed("operator@example.com", "initial estate stand-up", "bootstrap:scnehaux", 3),
 	}}
 	kernel := keycloakfake.New()
 	p := newProvisioner(t, tx, kernel)
@@ -225,7 +225,7 @@ func TestResumedCeremonyUsesTheRecordedOperator(t *testing.T) {
 // minting a fresh identifier.
 func TestResumedCeremonyReusesTheStoredKey(t *testing.T) {
 	first := &fakeTx{txs: []*dbtest.Tx{
-		ceremonyClaimed("ansha@example.com", "initial estate stand-up", "bootstrap:scnehaux", 0),
+		ceremonyClaimed("operator@example.com", "initial estate stand-up", "bootstrap:scnehaux", 0),
 		claimed(),
 		claimed(),
 	}}
@@ -243,7 +243,7 @@ func TestResumedCeremonyReusesTheStoredKey(t *testing.T) {
 	// The second run finds the claim completed. Create replays the stored response and performs
 	// no remote call, which is the property the exit criterion names.
 	second := &fakeTx{txs: []*dbtest.Tx{
-		ceremonyAlreadyClaimed("ansha@example.com", "initial estate stand-up", "bootstrap:scnehaux", 1),
+		ceremonyAlreadyClaimed("operator@example.com", "initial estate stand-up", "bootstrap:scnehaux", 1),
 		replaying(claimArg(t, first.txs[1], 2), stored),
 	}}
 	kernel := keycloakfake.New()
@@ -293,7 +293,7 @@ func TestBootstrapRequiresANamedHumanAndAReason(t *testing.T) {
 		"no realm":       func(r *provisioning.CeremonyRequest) { r.Realm = "" },
 		"no witness":     func(r *provisioning.CeremonyRequest) { r.Witness = " " },
 		"the operator as witness": func(r *provisioning.CeremonyRequest) {
-			r.Witness = " ANSHA@example.com "
+			r.Witness = " OPERATOR@example.com "
 		},
 	}
 
@@ -318,7 +318,7 @@ func TestBootstrapRequiresANamedHumanAndAReason(t *testing.T) {
 // ceremony's claim.
 func TestCeremonyScopeCannotCollideWithACaller(t *testing.T) {
 	tx := &fakeTx{txs: []*dbtest.Tx{
-		ceremonyClaimed("ansha@example.com", "reason", "bootstrap:scnehaux", 0),
+		ceremonyClaimed("operator@example.com", "reason", "bootstrap:scnehaux", 0),
 		claimed(),
 		claimed(),
 	}}
@@ -344,7 +344,7 @@ func TestCeremonyScopeCannotCollideWithACaller(t *testing.T) {
 // case folded, as the database's check does.
 func TestTheWitnessIsNeverTheOperator(t *testing.T) {
 	request := ceremonyRequest()
-	request.Witness = "Ansha@Example.com"
+	request.Witness = "Operator@Example.com"
 	p := newProvisioner(t, &fakeTx{}, keycloakfake.New())
 	if _, _, err := p.Bootstrap(context.Background(), request); !errors.Is(err, provisioning.ErrWitnessIsOperator) {
 		t.Fatalf("Bootstrap = %v, want ErrWitnessIsOperator", err)
