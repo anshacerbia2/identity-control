@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-001
   title: Canonical Principal Identifier and Creation Path
   owner: Core Platform Team
-  version: 1.30.0
+  version: 1.31.0
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-10
-  last_reviewed: 2026-10-30
+  last_reviewed: 2026-11-10
   parent_sad: SAD-001
 ---
 
@@ -1847,6 +1847,33 @@ modules.
   which gives 60 days from detection on 2026-10-28 [R27]. The action is the pin move to the first
   Atlas release built with go-jose v4.1.6 or later. A request to Ariga is drafted in this version's
   pull request, for the owner to file.
+
+**1.31.0: Atlas 1.3.9, brotli and compress `affected`, the database's zlib (2026-11-10).** The daily
+scan failed from 2026-11-05 and nobody read it (ISMS-008 NC-4). It found, with a fix and at High or
+Critical: in Atlas 1.3.4, `andybalholm/brotli` v1.2.0 (GO-2026-6888, CVE-2026-111497, Critical, in
+the KEV since 2026-10-27), `klauspost/compress` v1.18.7 (GO-2026-6865, CVE-2026-116591, High) and
+go-jose v4.1.4 (the rule above); in the base, musl 1.2.6-r2 (CVE-2026-107891, High); in the
+database image, zlib (CVE-2026-4738, Critical).
+
+- **The pins move.** Atlas to 1.3.9 (published 2026-11-09), which carries go-jose v4.1.6, so the
+  GHSA-mgcc-cww5-fp2q rule goes. PostgreSQL to the `17.11-alpine3.24` rebuild of 2026-11-06, which
+  carries zlib 1.3.2-r1, so the CVE-2026-85091 rule goes too (ISMS-005 T1). The migrate stage
+  requires `zlib>=1.4-r0` and `musl>=1.2.6-r3` (rule 10).
+- **brotli and compress stay `affected`.** Atlas 1.3.9 still carries both. `govulncheck` v1.1.4
+  `-mode binary` on the 1.3.9 linux/amd64 release binary (go1.26.10, revision `5314a229caa6`) finds
+  `brotli.Reader.Read`, `fse.Compress` and `fse.Decompress`, so `vulnerable_code_not_present` is not
+  open, and the trace cannot show a decompression path closed, as 1.34.0 found for go-jose. Under
+  rule 8, brotli is not publicly exposed, in the KEV, Automatable no, Technical Impact total: 14
+  days from detection on 2026-11-06, so by 2026-11-20. compress is not in the KEV, Automatable yes,
+  Technical Impact partial: 60 days, so by 2027-01-05. Both wait for an Atlas release with brotli
+  v1.2.7 and compress v1.20.2, asked of Ariga with T2. If brotli is not fixed by 2026-11-20, the
+  finding goes to the owner with two options: Atlas built from source with the fixed module, or the
+  pipeline held until a release.
+- **The database's zlib is `affected`** until the PostgreSQL 17.12 image (scheduled 2026-11-12):
+  not exposed, not in the KEV, Automatable no, Technical Impact total, so fix on system upgrade,
+  reviewed by 2026-11-20.
+
+organization-control records the same decisions, in its TDD-001 1.35.0. identity-control also moves the development mail catcher, Mailpit, from v1.31.6 to v1.33.1, which clears its x/net (GO-2026-6860), compress and zlib findings.
 
 **What was rejected in 1.30.0.**
 
