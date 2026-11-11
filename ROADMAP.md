@@ -934,7 +934,7 @@ from; an open one says what it waits on.
     of 2026-11-06 (closing CVE-2026-85091, ISMS-005 T1), Mailpit to v1.33.1, and the migrate stage requires zlib
     1.4-r0 and musl 1.2.6-r3. Open: brotli v1.2.0 in Atlas (GO-2026-6888, in the KEV), `affected` until
     **2026-11-20**; compress v1.18.7 (GO-2026-6865) until 2027-01-05; zlib CVE-2026-4738 in the database image
-    until the PostgreSQL 17.12 image, review 2026-11-20. organization-control records the same.
+    until the PostgreSQL 17.12 image, review 2026-11-20. organization-control records the same. Added 2026-11-11: libxslt (CVE-2026-125350, in the KEV) and krb5-libs in the PostgreSQL base; the migrate stage upgrades both, and the database image waits under `affected` rules until 2026-11-14 for the PostgreSQL 17.12 image, or runs an image built from the pin with the upgrade line.
 
 ## Waiting on the Keycloak proof-of-concept
 
