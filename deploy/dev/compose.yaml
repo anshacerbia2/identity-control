@@ -11,8 +11,8 @@ name: scnehaux-identity-control-dev
 
 services:
   postgres:
-    # postgres:17.11-alpine
-    image: postgres@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+    # postgres:17.11-alpine3.24, resolved from Docker Hub on 2026-11-10 (rebuilt upstream 2026-11-06)
+    image: postgres@sha256:3540c0362c809df084ffac0ae69fe794515f9de92692f02178bcdce0ef0302ac
     restart: unless-stopped
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
@@ -231,8 +231,10 @@ services:
   # the owner through the tunnel or on the server (README §Reading a code in the mail catcher).
   # Messages live in its memory and go when it stops.
   mailpit:
-    # axllent/mailpit:v1.31.6, resolved from Docker Hub on 2026-10-19.
-    image: axllent/mailpit@sha256:23fe39e81bde596a918000b3135c0f85dc8bb4c9ea6be274b051143f3e300387
+    # axllent/mailpit:v1.33.1, resolved from Docker Hub on 2026-11-10. v1.31.6 carried golang.org/x/net
+    # v0.61.0 (GO-2026-6860, High), klauspost/compress v1.20.1 (GO-2026-6865, High) and zlib 1.3.2-r1
+    # (CVE-2026-4738, Critical).
+    image: axllent/mailpit@sha256:aef2aacc11f075ec0fb6874275ee4a421e688e11a96ebb296134d1735c7761ce
     restart: unless-stopped
     environment:
       # The listeners inside the container: SMTP for identity-control, HTTP for the interface and API.

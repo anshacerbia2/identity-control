@@ -922,12 +922,19 @@ from; an open one says what it waits on.
       destruction recorded without evidence.
     - Kept while the key is in force and 7 years after its `retired` or `revoked` row; carried by the
       Control Database's backup; purged by the scheduled pass after that.
-26. ⏳ **go-jose v4.1.4 in Atlas, `affected` until 2026-12-27** (STD-GLB-009 §Container Images rules 4,
+26. ✅ **go-jose v4.1.4 in Atlas** (done 2026-11-10: Atlas 1.3.9 carries go-jose v4.1.6, the pin moved and the rule went; item 27). Was: `affected` until 2026-12-27 (STD-GLB-009 §Container Images rules 4,
     5, 7 and 8; TDD-001 1.30.0 §The Migrate Image and Its Exceptions). Recorded 2026-10-30. The daily
     image scan has failed since 2026-10-28 on GHSA-mgcc-cww5-fp2q in `/usr/local/bin/atlas`. No Atlas
     release carries go-jose v4.1.6 yet, 1.3.6 included, so `.grype.yaml` holds an `affected`
     statement. Waits on an Ariga release; the pin moves to it and the statement goes. organization-control
     pins the same Atlas.
+27. ⏳ **The findings of 2026-11-05: brotli and compress in Atlas, zlib in the database, the mail catcher**
+    (TDD-001 1.31.0 §The Migrate Image and Its Exceptions; ISMS-008 NC-4). Recorded 2026-11-10. The daily scan
+    failed from 2026-11-05 unread. Fixed now: Atlas pin to 1.3.9, PostgreSQL pin to the 17.11-alpine3.24 rebuild
+    of 2026-11-06 (closing CVE-2026-85091, ISMS-005 T1), Mailpit to v1.33.1, and the migrate stage requires zlib
+    1.4-r0 and musl 1.2.6-r3. Open: brotli v1.2.0 in Atlas (GO-2026-6888, in the KEV), `affected` until
+    **2026-11-20**; compress v1.18.7 (GO-2026-6865) until 2027-01-05; zlib CVE-2026-4738 in the database image
+    until the PostgreSQL 17.12 image, review 2026-11-20. organization-control records the same.
 
 ## Waiting on the Keycloak proof-of-concept
 
