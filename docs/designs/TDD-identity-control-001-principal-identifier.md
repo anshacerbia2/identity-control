@@ -3,12 +3,12 @@ doc_meta:
   id: TDD-identity-control-001
   title: Canonical Principal Identifier and Creation Path
   owner: Core Platform Team
-  version: 1.31.0
+  version: 1.31.1
   status: approved
   classification: restricted
   review_cycle_days: 90
   created_date: 2026-08-10
-  last_reviewed: 2026-11-10
+  last_reviewed: 2026-11-11
   parent_sad: SAD-001
 ---
 
@@ -1874,6 +1874,8 @@ database image, zlib (CVE-2026-4738, Critical).
   reviewed by 2026-11-20.
 
 organization-control records the same decisions, in its TDD-001 1.35.0. identity-control also moves the development mail catcher, Mailpit, from v1.31.6 to v1.33.1, which clears its x/net (GO-2026-6860), compress and zlib findings.
+
+**1.31.1: libxslt and krb5-libs (2026-11-11).** The scan of 2026-11-11 found libxslt 1.1.43-r3 (CVE-2026-125350, in the KEV since 2026-11-10; CVE-2026-87636; CVE-2026-9947) and krb5-libs 1.22.2-r1 (nine High) in the PostgreSQL base. The migrate stage requires ``libxslt>=1.1.43-r4`` and ``krb5-libs>=1.22.3-r0`` (rule 10). The database image waits under `affected` rules reviewed by 2026-11-14: CVE-2026-125350 has no Vulnrichment record yet, so the strictest row for an image not exposed and in the KEV applies, 3 days. The pin moves to the PostgreSQL 17.12 image, scheduled for 2026-11-12, if it carries the fixes; if it is not published by 2026-11-13, the database runs an image built from the pinned one with the upgrade line (rule 10).
 
 **What was rejected in 1.30.0.**
 
