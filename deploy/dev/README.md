@@ -14,7 +14,7 @@ It is **development only**, and three things make it so:
 
 | Service | Image | Runs |
 | :-- | :-- | :-- |
-| `postgres` | `postgres:17.11-alpine`, pinned | The Control Database |
+| `postgres` | `postgres:17.12-alpine3.24`, pinned by digest | The Control Database |
 | `migrate` | built, `migrate` target | Once per `up`: roles and platform schema, Atlas, privileges, the `identity_app` login role, and an assertion of the privilege shape. The service starts only if it succeeds |
 | `identity-control` | built, `service` target (distroless, non-root) | The API, on `127.0.0.1:8082` |
 | `bootstrap` | built, `migrate` target | Only through `bootstrap.sh`: the ceremony of ADR-IAM-001 §5.11 |
